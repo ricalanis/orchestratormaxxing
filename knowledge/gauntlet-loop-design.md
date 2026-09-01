@@ -3,7 +3,7 @@
 Ricardo's spec: *"The agent (not you!!) breaks the goal into parts, gives each part a
 specialist builder and a ruthless blind critic sub-agent, with a mandate to only pass if
 the generated artifact is better than some real-world equivalent."* Implemented in both
-hosts: `/gauntlet` (Claude) · `$claudemaxxing:gauntlet` (Codex) · `bin/gauntlet-judge`
+hosts: `/gauntlet` (Claude) · `$orchestratormaxxing:gauntlet` (Codex) · `bin/gauntlet-judge`
 (the shared deterministic gate). Pipeline: 2 parallel arXiv deep-research agents + repo
 conventions map → fableplan (Fable planned, Opus built) → Sol adversarial critique
 (2 BLOCKERs + 3 MAJORs, all adjudicated below) → OPUS-DIRECT implementation.

@@ -128,7 +128,7 @@ PY
 }
 hv_count() { wc -l < "$1/hv.log" | tr -d ' '; }
 tick() { ( cd "$1" && rm -f "$1/.results/watch-stamp.json" \
-             && env -u CLAUDEMAXXING_HARNESS_CHILD LOOP_QUEUE_HOST="$HOST" \
+             && env -u ORCHESTRATORMAXXING_HARNESS_CHILD LOOP_QUEUE_HOST="$HOST" \
                   python3 "$ROOT/bin/loop-tick" --gate --quiet >/dev/null 2>&1; echo $? ); }
 
 # ── C1: a this-host machine red that is gone gets released ───────────────────
@@ -259,7 +259,7 @@ fi
 # queue automatically. `loop-tick --reconcile` closes that class WITHOUT widening
 # the automatic path: it PROPOSES foreign/unstamped machine reds absent from two
 # consecutive local runs, and resolves one only on an explicit human
-# `--confirm <id>`. The gate is structural: under CLAUDEMAXXING_HARNESS_CHILD
+# `--confirm <id>`. The gate is structural: under ORCHESTRATORMAXXING_HARNESS_CHILD
 # (any harness-spawned agent) the verb refuses, so an unattended round cannot
 # confirm on a human's behalf.
 # ═════════════════════════════════════════════════════════════════════════════
@@ -274,7 +274,7 @@ PY
 }
 # run reconcile as the real subprocess; stdout+stderr to $repo/recon.out, echoes rc
 recon() { local repo="$1"; shift
-  ( cd "$repo" && env -u CLAUDEMAXXING_HARNESS_CHILD LOOP_QUEUE_HOST="$HOST" \
+  ( cd "$repo" && env -u ORCHESTRATORMAXXING_HARNESS_CHILD LOOP_QUEUE_HOST="$HOST" \
       python3 "$ROOT/bin/loop-tick" --reconcile "$@" >"$repo/recon.out" 2>&1; echo $? ); }
 
 # ── R1: propose lists a foreign red absent locally; resolves NOTHING ─────────
@@ -430,7 +430,7 @@ repo="$(mk_repo r7)"
 seed "$repo" V harness-verify "$FLAW" "$OTHER_HOST"
 printf 'green\ngreen\n' > "$repo/hv-plan"
 iid="$(item_id_of "$repo" "$FLAW")"
-rc="$( ( cd "$repo" && CLAUDEMAXXING_HARNESS_CHILD=1 LOOP_QUEUE_HOST="$HOST" \
+rc="$( ( cd "$repo" && ORCHESTRATORMAXXING_HARNESS_CHILD=1 LOOP_QUEUE_HOST="$HOST" \
       python3 "$ROOT/bin/loop-tick" --reconcile --confirm "$iid" >"$repo/recon.out" 2>&1; echo $? ) )"
 if [ "$rc" != "0" ] && [ "$(status_of "$repo" "$FLAW")" = "open" ] \
    && grep -q "human-gated" "$repo/recon.out"; then

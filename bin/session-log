@@ -100,7 +100,7 @@ def atomic_write(path, text):
 
 CHANGELOG_HEADER = (
     "# Changelog\n\n"
-    "<!-- Maintained by `session-log` (claudemaxxing). Newest entries on top; "
+    "<!-- Maintained by `session-log` (orchestratormaxxing). Newest entries on top; "
     "older entries roll to changelog-archive/. -->\n\n"
 )
 

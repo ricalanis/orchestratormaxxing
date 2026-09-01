@@ -1,6 +1,6 @@
-# claudemaxxing — `g` Codex tmux session helper (SOURCE this file, don't run it).
+# orchestratormaxxing — `g` Codex tmux session helper (SOURCE this file, don't run it).
 # Source of truth: <repo>/shell/codex-g.sh; `./install.sh` deploys a copy to
-# ~/.config/claudemaxxing/codex-g.sh and sources it from bash/zsh startup files.
+# ~/.config/orchestratormaxxing/codex-g.sh and sources it from bash/zsh startup files.
 #
 # `g` mirrors the useful lifecycle of `c` while respecting Codex's CLI:
 #   g [name]                         new interactive Codex TUI in tmux
@@ -104,15 +104,15 @@ _g_next_session() {
 
 # Fleet identity reader — identical copy in claude-c.sh / codex-g.sh / opencode-o.sh
 # so each installed file stays self-contained. Prints the value of one
-# CLAUDEMAXXING_* key from the fleet.env file ($CLAUDEMAXXING_FLEET_ENV, else
-# ~/.config/claudemaxxing/fleet.env) WITHOUT sourcing it: only `KEY=VALUE` lines
-# whose KEY matches CLAUDEMAXXING_[A-Z_]+ count, an optional `export ` prefix and
+# ORCHESTRATORMAXXING_* key from the fleet.env file ($ORCHESTRATORMAXXING_FLEET_ENV, else
+# ~/.config/orchestratormaxxing/fleet.env) WITHOUT sourcing it: only `KEY=VALUE` lines
+# whose KEY matches ORCHESTRATORMAXXING_[A-Z_]+ count, an optional `export ` prefix and
 # surrounding double quotes are stripped, nothing is expanded, comments/unknown
 # keys are ignored, last assignment wins. Missing/unreadable file or absent key
 # prints nothing (== not configured). Always returns 0. Portable bash/zsh.
-_claudemaxxing_fleet_env() {
-  local key="$1" file="${CLAUDEMAXXING_FLEET_ENV:-$HOME/.config/claudemaxxing/fleet.env}"
-  local line value="" re='^CLAUDEMAXXING_[A-Z_]+='
+_orchestratormaxxing_fleet_env() {
+  local key="$1" file="${ORCHESTRATORMAXXING_FLEET_ENV:-$HOME/.config/orchestratormaxxing/fleet.env}"
+  local line value="" re='^ORCHESTRATORMAXXING_[A-Z_]+='
   [[ -f "$file" && -r "$file" ]] || return 0
   while IFS= read -r line || [[ -n "$line" ]]; do
     line="${line#export }"
@@ -129,15 +129,15 @@ _claudemaxxing_fleet_env() {
 _g_register_role() {
   local session="$1" role="$2" feature="$3"
   [[ -z "$role" && -z "$feature" ]] && return 0
-  # Dashboard base URL: legacy ORCH_DASHBOARD_URL > CLAUDEMAXXING_DASHBOARD_URL (env,
+  # Dashboard base URL: legacy ORCH_DASHBOARD_URL > ORCHESTRATORMAXXING_DASHBOARD_URL (env,
   # else fleet.env) > not configured → no network at all.
-  local url="${ORCH_DASHBOARD_URL:-${CLAUDEMAXXING_DASHBOARD_URL:-$(_claudemaxxing_fleet_env CLAUDEMAXXING_DASHBOARD_URL)}}"
+  local url="${ORCH_DASHBOARD_URL:-${ORCHESTRATORMAXXING_DASHBOARD_URL:-$(_orchestratormaxxing_fleet_env ORCHESTRATORMAXXING_DASHBOARD_URL)}}"
   [[ -n "$url" ]] || return 0
   local token="" payload link_payload
   if [[ -n "${HERMES_DASHBOARD_TOKEN+x}" ]]; then
     token="$HERMES_DASHBOARD_TOKEN"
-  elif [[ -f "$HOME/.config/claudemaxxing/dashboard-token" ]]; then
-    token="$(<"$HOME/.config/claudemaxxing/dashboard-token")"
+  elif [[ -f "$HOME/.config/orchestratormaxxing/dashboard-token" ]]; then
+    token="$(<"$HOME/.config/orchestratormaxxing/dashboard-token")"
   fi
   payload="$(python3 - "$session" "$role" "$feature" <<'PY'
 import json, sys

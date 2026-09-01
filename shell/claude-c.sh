@@ -1,6 +1,6 @@
-# claudemaxxing — `c` / `cs` Claude Code tmux session helpers (SOURCE this file, don't run it).
+# orchestratormaxxing — `c` / `cs` Claude Code tmux session helpers (SOURCE this file, don't run it).
 # Source of truth: <repo>/shell/claude-c.sh — edit here, then `./install.sh` re-syncs it to
-# ~/.config/claudemaxxing/claude-c.sh and (idempotently) makes ~/.bashrc + ~/.zshrc source it.
+# ~/.config/orchestratormaxxing/claude-c.sh and (idempotently) makes ~/.bashrc + ~/.zshrc source it.
 # Portable across bash AND zsh: avoids zsh-reserved locals (`path` is tied to $PATH, `status`
 # is read-only) and never assumes a 0- vs 1-indexed array base (counter-based selection).
 #
@@ -126,15 +126,15 @@ _c_bind_recovery() {
 
 # Fleet identity reader — identical copy in claude-c.sh / codex-g.sh / opencode-o.sh
 # so each installed file stays self-contained. Prints the value of one
-# CLAUDEMAXXING_* key from the fleet.env file ($CLAUDEMAXXING_FLEET_ENV, else
-# ~/.config/claudemaxxing/fleet.env) WITHOUT sourcing it: only `KEY=VALUE` lines
-# whose KEY matches CLAUDEMAXXING_[A-Z_]+ count, an optional `export ` prefix and
+# ORCHESTRATORMAXXING_* key from the fleet.env file ($ORCHESTRATORMAXXING_FLEET_ENV, else
+# ~/.config/orchestratormaxxing/fleet.env) WITHOUT sourcing it: only `KEY=VALUE` lines
+# whose KEY matches ORCHESTRATORMAXXING_[A-Z_]+ count, an optional `export ` prefix and
 # surrounding double quotes are stripped, nothing is expanded, comments/unknown
 # keys are ignored, last assignment wins. Missing/unreadable file or absent key
 # prints nothing (== not configured). Always returns 0. Portable bash/zsh.
-_claudemaxxing_fleet_env() {
-  local key="$1" file="${CLAUDEMAXXING_FLEET_ENV:-$HOME/.config/claudemaxxing/fleet.env}"
-  local line value="" re='^CLAUDEMAXXING_[A-Z_]+='
+_orchestratormaxxing_fleet_env() {
+  local key="$1" file="${ORCHESTRATORMAXXING_FLEET_ENV:-$HOME/.config/orchestratormaxxing/fleet.env}"
+  local line value="" re='^ORCHESTRATORMAXXING_[A-Z_]+='
   [[ -f "$file" && -r "$file" ]] || return 0
   while IFS= read -r line || [[ -n "$line" ]]; do
     line="${line#export }"
@@ -202,15 +202,15 @@ c() {
   if [[ -n "$role" ]]; then base="claude-$name-$role"; fi
   _c_register_role() {
     [[ -z "$role" && -z "$feature" ]] && return 0
-    # Dashboard base URL: legacy ORCH_DASHBOARD_URL > CLAUDEMAXXING_DASHBOARD_URL (env,
+    # Dashboard base URL: legacy ORCH_DASHBOARD_URL > ORCHESTRATORMAXXING_DASHBOARD_URL (env,
     # else fleet.env) > not configured → no network at all.
-    local url="${ORCH_DASHBOARD_URL:-${CLAUDEMAXXING_DASHBOARD_URL:-$(_claudemaxxing_fleet_env CLAUDEMAXXING_DASHBOARD_URL)}}"
+    local url="${ORCH_DASHBOARD_URL:-${ORCHESTRATORMAXXING_DASHBOARD_URL:-$(_orchestratormaxxing_fleet_env ORCHESTRATORMAXXING_DASHBOARD_URL)}}"
     [[ -n "$url" ]] || return 0
     local token="" payload link_payload
     if [[ -n "${HERMES_DASHBOARD_TOKEN+x}" ]]; then
       token="$HERMES_DASHBOARD_TOKEN"
-    elif [[ -f "$HOME/.config/claudemaxxing/dashboard-token" ]]; then
-      token="$(<"$HOME/.config/claudemaxxing/dashboard-token")"
+    elif [[ -f "$HOME/.config/orchestratormaxxing/dashboard-token" ]]; then
+      token="$(<"$HOME/.config/orchestratormaxxing/dashboard-token")"
     fi
     payload="$(python3 - "$1" "$role" "$feature" <<'PY'
 import json, sys

@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "decision": "ADOPT + EXTEND: pin upstream payloads and deploy the native claudemaxxing workflows through the same deterministic target-aware four-host lifecycle.",
+  "decision": "ADOPT + EXTEND: pin upstream payloads and deploy the native orchestratormaxxing workflows through the same deterministic target-aware four-host lifecycle.",
   "skills": [
     {
       "name": "anti-slop-design",
       "kind": "internal-router",
-      "repo": "local://claudemaxxing",
+      "repo": "local://orchestratormaxxing",
       "commit": "0000000000000000000000000000000000000000",
       "path": "skills/anti-slop-design",
       "include": [
@@ -18,7 +18,7 @@
     {
       "name": "orchestration-practices",
       "kind": "internal-router",
-      "repo": "local://claudemaxxing",
+      "repo": "local://orchestratormaxxing",
       "commit": "0000000000000000000000000000000000000000",
       "path": "skills/orchestration-practices",
       "include": [
@@ -142,10 +142,10 @@
     },
     {
       "name": "cheap-delegate",
-      "kind": "claudemaxxing-workflow",
-      "repo": "local://claudemaxxing",
+      "kind": "orchestratormaxxing-workflow",
+      "repo": "local://orchestratormaxxing",
       "commit": "0000000000000000000000000000000000000000",
-      "path": "plugins/claudemaxxing/skills/cheap-delegate",
+      "path": "plugins/orchestratormaxxing/skills/cheap-delegate",
       "include": [
         "SKILL.md"
       ],
@@ -154,14 +154,14 @@
         "Hermes"
       ],
       "license": "MIT",
-      "tree_sha256": "8990c8e0c0d350a838cc6fb5c9a4dcadc448711a06a21102b54e0f3e753ca31d"
+      "tree_sha256": "aefe37e31b3776ed4868317ee8fc6952ace1f42fca9608905b61757069690428"
     },
     {
       "name": "fanout",
-      "kind": "claudemaxxing-workflow",
-      "repo": "local://claudemaxxing",
+      "kind": "orchestratormaxxing-workflow",
+      "repo": "local://orchestratormaxxing",
       "commit": "0000000000000000000000000000000000000000",
-      "path": "plugins/claudemaxxing/skills/fanout",
+      "path": "plugins/orchestratormaxxing/skills/fanout",
       "include": [
         "SKILL.md",
         "agents"
@@ -171,14 +171,14 @@
         "Hermes"
       ],
       "license": "MIT",
-      "tree_sha256": "a1db0362aa3b41ef581aa88560f50239decec5dd5dda9589c88733f2a055db22"
+      "tree_sha256": "9e4c0cd5f9fc7e52b4c3389085c0b6bfd5cfdd7c95c037cefd9709e46f543eec"
     },
     {
       "name": "gauntlet",
-      "kind": "claudemaxxing-workflow",
-      "repo": "local://claudemaxxing",
+      "kind": "orchestratormaxxing-workflow",
+      "repo": "local://orchestratormaxxing",
       "commit": "0000000000000000000000000000000000000000",
-      "path": "plugins/claudemaxxing/skills/gauntlet",
+      "path": "plugins/orchestratormaxxing/skills/gauntlet",
       "include": [
         "SKILL.md",
         "agents"
@@ -188,14 +188,14 @@
         "Hermes"
       ],
       "license": "MIT",
-      "tree_sha256": "55c70cd6951781c7d1f3e13658641092572cead005aa41b6baf7e68c2a38cee5"
+      "tree_sha256": "2ee511ca8a3562a103aa3ee7574be6eebbc5581f8408a846444b385923ffd0e9"
     },
     {
       "name": "i-have-adhd",
-      "kind": "claudemaxxing-workflow",
-      "repo": "local://claudemaxxing",
+      "kind": "orchestratormaxxing-workflow",
+      "repo": "local://orchestratormaxxing",
       "commit": "0000000000000000000000000000000000000000",
-      "path": "plugins/claudemaxxing/skills/i-have-adhd",
+      "path": "plugins/orchestratormaxxing/skills/i-have-adhd",
       "include": [
         "SKILL.md",
         "references"
@@ -209,10 +209,10 @@
     },
     {
       "name": "graduate",
-      "kind": "claudemaxxing-workflow",
-      "repo": "local://claudemaxxing",
+      "kind": "orchestratormaxxing-workflow",
+      "repo": "local://orchestratormaxxing",
       "commit": "0000000000000000000000000000000000000000",
-      "path": "plugins/claudemaxxing/skills/graduate",
+      "path": "plugins/orchestratormaxxing/skills/graduate",
       "include": [
         "SKILL.md",
         "agents"
@@ -222,14 +222,14 @@
         "Hermes"
       ],
       "license": "MIT",
-      "tree_sha256": "dbde9feeff90cc4062880611207eb51494b9bc71f088c9f27020139ae1325026"
+      "tree_sha256": "f8b2d0db4d7e7374caf4d51f146f96db7ae44f4b9ea21c0c5347d94159b338a2"
     },
     {
       "name": "ideas",
-      "kind": "claudemaxxing-workflow",
-      "repo": "local://claudemaxxing",
+      "kind": "orchestratormaxxing-workflow",
+      "repo": "local://orchestratormaxxing",
       "commit": "0000000000000000000000000000000000000000",
-      "path": "plugins/claudemaxxing/skills/ideas",
+      "path": "plugins/orchestratormaxxing/skills/ideas",
       "include": [
         "SKILL.md",
         "agents"
@@ -239,14 +239,14 @@
         "Hermes"
       ],
       "license": "MIT",
-      "tree_sha256": "71aa872e39096c8d71a0a11566ac93fb358ce0da0ba9927012dbe66a8809cfac"
+      "tree_sha256": "7b82e5a909bb2c19305326f7604f0fbad74c8fc28698b2a0c04b52d8f5f16605"
     },
     {
       "name": "memory",
-      "kind": "claudemaxxing-workflow",
-      "repo": "local://claudemaxxing",
+      "kind": "orchestratormaxxing-workflow",
+      "repo": "local://orchestratormaxxing",
       "commit": "0000000000000000000000000000000000000000",
-      "path": "plugins/claudemaxxing/skills/memory",
+      "path": "plugins/orchestratormaxxing/skills/memory",
       "include": [
         "SKILL.md",
         "agents"
@@ -256,14 +256,14 @@
         "Hermes"
       ],
       "license": "MIT",
-      "tree_sha256": "d0f3f9a3bc6de78cfdde7640dd25afbb95073901b1686d65ba8c102277923850"
+      "tree_sha256": "dc4faccd6cf2073cf85690bb134bd0c08ffe78cc9d4b4a58952835dc1a7e60a4"
     },
     {
       "name": "self-improve",
-      "kind": "claudemaxxing-workflow",
-      "repo": "local://claudemaxxing",
+      "kind": "orchestratormaxxing-workflow",
+      "repo": "local://orchestratormaxxing",
       "commit": "0000000000000000000000000000000000000000",
-      "path": "plugins/claudemaxxing/skills/self-improve",
+      "path": "plugins/orchestratormaxxing/skills/self-improve",
       "include": [
         "SKILL.md",
         "agents"
@@ -273,14 +273,14 @@
         "Hermes"
       ],
       "license": "MIT",
-      "tree_sha256": "fbc7678266210f3b139c7cba6d42e3ab77e737369463b8c5472d0d18d159f89e"
+      "tree_sha256": "ca680527b9a3e6e07039d4a3cf270620002d0b225bec8ce4396b05987bdfb209"
     },
     {
       "name": "solplan",
-      "kind": "claudemaxxing-workflow",
-      "repo": "local://claudemaxxing",
+      "kind": "orchestratormaxxing-workflow",
+      "repo": "local://orchestratormaxxing",
       "commit": "0000000000000000000000000000000000000000",
-      "path": "plugins/claudemaxxing/skills/solplan",
+      "path": "plugins/orchestratormaxxing/skills/solplan",
       "include": [
         "SKILL.md",
         "agents",
@@ -291,14 +291,14 @@
         "Hermes"
       ],
       "license": "MIT",
-      "tree_sha256": "feb6b6251f9a9569226ebd2b8a760d8e3bac5757d8cceedd16789c704c44240a"
+      "tree_sha256": "dca08a95a4da8851333a988697d326b0802300fd62de3b0261422cac95fe814a"
     },
     {
       "name": "wrap-up",
-      "kind": "claudemaxxing-workflow",
-      "repo": "local://claudemaxxing",
+      "kind": "orchestratormaxxing-workflow",
+      "repo": "local://orchestratormaxxing",
       "commit": "0000000000000000000000000000000000000000",
-      "path": "plugins/claudemaxxing/skills/wrap-up",
+      "path": "plugins/orchestratormaxxing/skills/wrap-up",
       "include": [
         "SKILL.md",
         "agents"
@@ -308,7 +308,7 @@
         "Hermes"
       ],
       "license": "MIT",
-      "tree_sha256": "d6c6361aef39bce0ff548a8af774651405fe4a0b5887655ba6d8711b55a0fe52"
+      "tree_sha256": "261252aeeb12e35bc981fe1dd58abbd022195e01e6441ae8646033ba86056802"
     }
   ]
 }

@@ -9,7 +9,7 @@ export PATH="$ROOT/bin:$PATH"
 fail() { printf 'cheap-delegate contract: %s\n' "$*" >&2; exit 1; }
 PB="$ROOT/knowledge/delegation-playbook.md"
 CMD="$ROOT/.claude/commands/cheap-delegate.md"
-SKILL="$ROOT/plugins/claudemaxxing/skills/cheap-delegate/SKILL.md"
+SKILL="$ROOT/plugins/orchestratormaxxing/skills/cheap-delegate/SKILL.md"
 HOST_DOCTRINE="$ROOT/CLAUDE.md"
 INSTALL="$ROOT/install.sh"
 NEG_DIR="$ROOT/tests/cheap-delegate/fixtures"

@@ -29,9 +29,9 @@ Choose the topology before the model; model strength never changes the shape:
 | Need | Route | Boundary |
 |---|---|---|
 | Design one nontrivial task | Claude → Fable · Codex → Sol Ultra · OpenCode → Kimi K3 (`/kimiplan`; `/oplan` is an alias) | Planner is read-only; Root reviews and executes |
-| Execute one bounded task | `/cheap-delegate` · `$claudemaxxing:cheap-delegate` | One bounded execution task, never planning or decomposition |
-| Execute independent chunks | `/fanout` · `$claudemaxxing:fanout` | Only after planning (or when design is clearly unnecessary) and with at least two disjoint chunks |
-| Divide a broad multi-deliverable goal | `/gauntlet` · `$claudemaxxing:gauntlet` | Divides WHAT before each increment enters its host-native planner |
+| Execute one bounded task | `/cheap-delegate` · `$orchestratormaxxing:cheap-delegate` | One bounded execution task, never planning or decomposition |
+| Execute independent chunks | `/fanout` · `$orchestratormaxxing:fanout` | Only after planning (or when design is clearly unnecessary) and with at least two disjoint chunks |
+| Divide a broad multi-deliverable goal | `/gauntlet` · `$orchestratormaxxing:gauntlet` | Divides WHAT before each increment enters its host-native planner |
 
 Model selection is orthogonal: DeepSeek V4 Pro handles dialogue, volume and
 first passes; GLM 5.3 is the explicit complex-reasoning escalation (bin/oll's

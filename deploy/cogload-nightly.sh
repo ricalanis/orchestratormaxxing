@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SOURCE OF TRUTH: repo template deploy/cogload-nightly.sh. install.sh copies this to
-# ~/.config/claudemaxxing/cogload-nightly.sh (copy, NOT symlink). Edit here, re-run ./install.sh.
+# ~/.config/orchestratormaxxing/cogload-nightly.sh (copy, NOT symlink). Edit here, re-run ./install.sh.
 #
 # Nightly maintenance so continuous cogload data survives without manual verbs.
 # Order: cogload digest -> cogload transcripts --since 45 -> rsync the Claude transcript

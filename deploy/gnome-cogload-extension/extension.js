@@ -16,7 +16,7 @@ import Gio from 'gi://Gio';
 
 const IFACE = `
 <node>
-  <interface name="org.claudemaxxing.Cogload">
+  <interface name="org.orchestratormaxxing.Cogload">
     <method name="Sample">
       <arg type="s" direction="out" name="app_id"/>
       <arg type="u" direction="out" name="open_windows"/>
@@ -27,9 +27,9 @@ const IFACE = `
 class CogloadSampler {
     enable() {
         this._dbus = Gio.DBusExportedObject.wrapJSObject(IFACE, this);
-        this._dbus.export(Gio.DBus.session, '/org/claudemaxxing/Cogload');
+        this._dbus.export(Gio.DBus.session, '/org/orchestratormaxxing/Cogload');
         this._owner = Gio.bus_own_name(
-            Gio.BusType.SESSION, 'org.claudemaxxing.Cogload',
+            Gio.BusType.SESSION, 'org.orchestratormaxxing.Cogload',
             Gio.BusNameOwnerFlags.NONE, null, null, null);
     }
 

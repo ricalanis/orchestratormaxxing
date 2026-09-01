@@ -117,15 +117,15 @@ EOF
 done
 : > "$CALLS"
 fleet_env_cleared() {
-  env -u HARNESS_LAN_PEER -u CLAUDEMAXXING_LAN_PEER -u CLAUDEMAXXING_FLEET_ENV \
-      -u HARNESS_LAN_USER -u CLAUDEMAXXING_SERVER_SSH -u HARNESS_LAN_IDENTITY \
+  env -u HARNESS_LAN_PEER -u ORCHESTRATORMAXXING_LAN_PEER -u ORCHESTRATORMAXXING_FLEET_ENV \
+      -u HARNESS_LAN_USER -u ORCHESTRATORMAXXING_SERVER_SSH -u HARNESS_LAN_IDENTITY \
       HOME="$1" PATH="$FAKEBIN:$PATH" "${@:2}"
 }
 set +e
 out="$(fleet_env_cleared "$EMPTYHOME" "$SYNC" lan-check 2>&1)"; rc=$?
 set -e
 [[ "$rc" -eq 2 ]] || fail "C8: unconfigured lan-check exited $rc, want 2:\n$out"
-[[ "$out" == *CLAUDEMAXXING_LAN_PEER* ]] || fail "C8: refusal does not name CLAUDEMAXXING_LAN_PEER:\n$out"
+[[ "$out" == *ORCHESTRATORMAXXING_LAN_PEER* ]] || fail "C8: refusal does not name ORCHESTRATORMAXXING_LAN_PEER:\n$out"
 [[ "$out" != *$'\n'* ]] || fail "C8: refusal must be one line:\n$out"
 out="$(fleet_env_cleared "$EMPTYHOME" "$SYNC" status 2>&1)" || fail "C8: unconfigured status failed:\n$out"
 [[ "$out" == *'lan: not configured'* ]] || fail "C8: status did not report the LAN section as unconfigured:\n$out"
@@ -133,9 +133,9 @@ out="$(fleet_env_cleared "$EMPTYHOME" "$SYNC" status 2>&1)" || fail "C8: unconfi
 
 # C9: fleet.env configures the peer and the fakes see exactly the old argv shape
 # (user from the fleet server's user@host); legacy HARNESS_LAN_PEER still wins.
-FLEETHOME="$SCRATCH/fleethome"; mkdir -p "$FLEETHOME/.config/claudemaxxing"
-printf '# fleet identity\nexport CLAUDEMAXXING_LAN_PEER="fleet-server.example"\nCLAUDEMAXXING_SERVER_SSH=fleet@fleet-server\n' \
-  > "$FLEETHOME/.config/claudemaxxing/fleet.env"
+FLEETHOME="$SCRATCH/fleethome"; mkdir -p "$FLEETHOME/.config/orchestratormaxxing"
+printf '# fleet identity\nexport ORCHESTRATORMAXXING_LAN_PEER="fleet-server.example"\nORCHESTRATORMAXXING_SERVER_SSH=fleet@fleet-server\n' \
+  > "$FLEETHOME/.config/orchestratormaxxing/fleet.env"
 : > "$CALLS"
 set +e
 out="$(fleet_env_cleared "$FLEETHOME" "$SYNC" lan-check 2>&1)"; rc=$?

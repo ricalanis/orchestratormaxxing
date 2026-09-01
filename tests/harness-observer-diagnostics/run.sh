@@ -87,7 +87,7 @@ SH
 # $1 = repo, rest = extra env assignments for the tick
 tick() {
   local repo="$1"; shift
-  ( cd "$repo" && env -u CLAUDEMAXXING_HARNESS_CHILD \
+  ( cd "$repo" && env -u ORCHESTRATORMAXXING_HARNESS_CHILD \
       HARNESS_VERIFY_TIMEOUT_SECONDS=30 LOOP_QUEUE_HOST=testhost "$@" \
       python3 "$ROOT/bin/loop-tick" --quiet >/dev/null 2>&1 )
 }

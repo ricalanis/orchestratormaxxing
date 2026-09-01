@@ -1,6 +1,6 @@
-# claudemaxxing — `o` OpenCode tmux session helper (SOURCE this file, don't run it).
+# orchestratormaxxing — `o` OpenCode tmux session helper (SOURCE this file, don't run it).
 # Source of truth: <repo>/shell/opencode-o.sh; `./install.sh` deploys a copy to
-# ~/.config/claudemaxxing/opencode-o.sh and sources it from bash/zsh startup files.
+# ~/.config/orchestratormaxxing/opencode-o.sh and sources it from bash/zsh startup files.
 #
 # `o` mirrors the useful lifecycle of `c`/`g` while respecting OpenCode's CLI:
 #   o [name]                         new interactive OpenCode TUI in tmux
@@ -145,15 +145,15 @@ _o_next_session() {
 
 # Fleet identity reader — identical copy in claude-c.sh / codex-g.sh / opencode-o.sh
 # so each installed file stays self-contained. Prints the value of one
-# CLAUDEMAXXING_* key from the fleet.env file ($CLAUDEMAXXING_FLEET_ENV, else
-# ~/.config/claudemaxxing/fleet.env) WITHOUT sourcing it: only `KEY=VALUE` lines
-# whose KEY matches CLAUDEMAXXING_[A-Z_]+ count, an optional `export ` prefix and
+# ORCHESTRATORMAXXING_* key from the fleet.env file ($ORCHESTRATORMAXXING_FLEET_ENV, else
+# ~/.config/orchestratormaxxing/fleet.env) WITHOUT sourcing it: only `KEY=VALUE` lines
+# whose KEY matches ORCHESTRATORMAXXING_[A-Z_]+ count, an optional `export ` prefix and
 # surrounding double quotes are stripped, nothing is expanded, comments/unknown
 # keys are ignored, last assignment wins. Missing/unreadable file or absent key
 # prints nothing (== not configured). Always returns 0. Portable bash/zsh.
-_claudemaxxing_fleet_env() {
-  local key="$1" file="${CLAUDEMAXXING_FLEET_ENV:-$HOME/.config/claudemaxxing/fleet.env}"
-  local line value="" re='^CLAUDEMAXXING_[A-Z_]+='
+_orchestratormaxxing_fleet_env() {
+  local key="$1" file="${ORCHESTRATORMAXXING_FLEET_ENV:-$HOME/.config/orchestratormaxxing/fleet.env}"
+  local line value="" re='^ORCHESTRATORMAXXING_[A-Z_]+='
   [[ -f "$file" && -r "$file" ]] || return 0
   while IFS= read -r line || [[ -n "$line" ]]; do
     line="${line#export }"
@@ -170,15 +170,15 @@ _claudemaxxing_fleet_env() {
 _o_register_role() {
   local session="$1" role="$2" feature="$3"
   [[ -z "$role" && -z "$feature" ]] && return 0
-  # Dashboard base URL: legacy ORCH_DASHBOARD_URL > CLAUDEMAXXING_DASHBOARD_URL (env,
+  # Dashboard base URL: legacy ORCH_DASHBOARD_URL > ORCHESTRATORMAXXING_DASHBOARD_URL (env,
   # else fleet.env) > not configured → no network at all.
-  local url="${ORCH_DASHBOARD_URL:-${CLAUDEMAXXING_DASHBOARD_URL:-$(_claudemaxxing_fleet_env CLAUDEMAXXING_DASHBOARD_URL)}}"
+  local url="${ORCH_DASHBOARD_URL:-${ORCHESTRATORMAXXING_DASHBOARD_URL:-$(_orchestratormaxxing_fleet_env ORCHESTRATORMAXXING_DASHBOARD_URL)}}"
   [[ -n "$url" ]] || return 0
   local token="" payload link_payload
   if [[ -n "${HERMES_DASHBOARD_TOKEN+x}" ]]; then
     token="$HERMES_DASHBOARD_TOKEN"
-  elif [[ -f "$HOME/.config/claudemaxxing/dashboard-token" ]]; then
-    token="$(<"$HOME/.config/claudemaxxing/dashboard-token")"
+  elif [[ -f "$HOME/.config/orchestratormaxxing/dashboard-token" ]]; then
+    token="$(<"$HOME/.config/orchestratormaxxing/dashboard-token")"
   fi
   payload="$(python3 - "$session" "$role" "$feature" <<'PY'
 import json, sys
@@ -340,9 +340,9 @@ _o_set_worker_option() {
 _o_owned_worker_session() {
   local sess="$1" tagged run_abs turn
   _o_exact_worker_session "$sess" && _o_has_session "$sess" || return 1
-  tagged="$(_o_worker_option "$sess" @claudemaxxing_delegated)"
-  run_abs="$(_o_worker_option "$sess" @claudemaxxing_run_dir)"
-  turn="$(_o_worker_option "$sess" @claudemaxxing_turn)"
+  tagged="$(_o_worker_option "$sess" @orchestratormaxxing_delegated)"
+  run_abs="$(_o_worker_option "$sess" @orchestratormaxxing_run_dir)"
+  turn="$(_o_worker_option "$sess" @orchestratormaxxing_turn)"
   [[ "$tagged" == 1 && "$run_abs" == /* && "$turn" =~ ^[1-9][0-9]*$ ]]
 }
 
@@ -354,7 +354,7 @@ _o_wait_ready() {
   while [[ "$i" -lt "$attempts" ]]; do
     # A plugin-bound idle event is the durable readiness signal after turn 1.
     # It survives alternate-screen redraws and localized/missing placeholders.
-    pending="$(_o_worker_option "$sess" @claudemaxxing_pending)"
+    pending="$(_o_worker_option "$sess" @orchestratormaxxing_pending)"
     bound="$(_o_worker_option "$sess" @opencode_session_id)"
     if [[ "$pending" == "0" && "$bound" == ses_* ]]; then
       return 0
@@ -405,14 +405,14 @@ _o_send_worker() {
     return "$rc"
   }
   _o_wait_ready "$sess" || { [[ "$as_json" == 1 ]] && _o_json_status not_ready "$sess" 'worker is busy or unreadable'; return 4; }
-  old_turn="$(_o_worker_option "$sess" @claudemaxxing_turn)"
+  old_turn="$(_o_worker_option "$sess" @orchestratormaxxing_turn)"
   [[ "$old_turn" =~ ^[0-9]+$ ]] || old_turn=0
   new_turn=$((old_turn + 1))
-  _o_set_worker_option "$sess" @claudemaxxing_turn "$new_turn" || return 4
-  _o_set_worker_option "$sess" @claudemaxxing_pending 1 || return 4
+  _o_set_worker_option "$sess" @orchestratormaxxing_turn "$new_turn" || return 4
+  _o_set_worker_option "$sess" @orchestratormaxxing_pending 1 || return 4
   if ! command tmux-send "$sess" "$prompt_text" >/dev/null; then
-    _o_set_worker_option "$sess" @claudemaxxing_turn "$old_turn" || true
-    _o_set_worker_option "$sess" @claudemaxxing_pending 0 || true
+    _o_set_worker_option "$sess" @orchestratormaxxing_turn "$old_turn" || true
+    _o_set_worker_option "$sess" @orchestratormaxxing_pending 0 || true
     [[ "$as_json" == 1 ]] && _o_json_status unconfirmed "$sess" 'submission not confirmed'
     return 1
   fi
@@ -448,13 +448,13 @@ _o_bind_worker_event() {
     [[ "$as_json" == 1 ]] && _o_json_status invalid_event "$sess" 'delegated opencode session required'
     return 2
   }
-  tagged="$(_o_worker_option "$sess" @claudemaxxing_delegated)"
+  tagged="$(_o_worker_option "$sess" @orchestratormaxxing_delegated)"
   [[ "$tagged" == "1" ]] || {
     [[ "$as_json" == 1 ]] && _o_json_status invalid_event "$sess" 'untagged session'
     return 2
   }
-  run_abs="$(_o_worker_option "$sess" @claudemaxxing_run_dir)"
-  turn="$(_o_worker_option "$sess" @claudemaxxing_turn)"
+  run_abs="$(_o_worker_option "$sess" @orchestratormaxxing_run_dir)"
+  turn="$(_o_worker_option "$sess" @orchestratormaxxing_turn)"
   [[ "$turn" =~ ^[1-9][0-9]*$ ]] || {
     [[ "$as_json" == 1 ]] && _o_json_status invalid_event "$sess" 'missing turn binding'
     return 2
@@ -529,7 +529,7 @@ print(o["opencode_session_id"]); print(o["message_id"])' "$run_abs/binding.json"
   message_id="${ids#*$'\n'}"
   _o_set_worker_option "$sess" @opencode_session_id "$oc_session" || return 4
   _o_set_worker_option "$sess" @opencode_message_id "$message_id" || return 4
-  _o_set_worker_option "$sess" @claudemaxxing_pending 0 || return 4
+  _o_set_worker_option "$sess" @orchestratormaxxing_pending 0 || return 4
   if [[ "$as_json" == 1 ]]; then
     printf '%s\n' "$bind_result"
   else
@@ -553,8 +553,8 @@ _o_handoff_worker() {
   _o_has_session "$sess" || { [[ "$as_json" == 1 ]] && _o_json_status missing "$sess" 'session absent'; return 3; }
   _o_owned_worker_session "$sess" || { [[ "$as_json" == 1 ]] && _o_json_status not_owned "$sess" 'delegation ownership binding required'; return 4; }
   local run_abs turn waited=0 ticks file pending
-  run_abs="$(_o_worker_option "$sess" @claudemaxxing_run_dir)"
-  turn="$(_o_worker_option "$sess" @claudemaxxing_turn)"
+  run_abs="$(_o_worker_option "$sess" @orchestratormaxxing_run_dir)"
+  turn="$(_o_worker_option "$sess" @orchestratormaxxing_turn)"
   [[ -n "$run_abs" && "$turn" =~ ^[1-9][0-9]*$ ]] || {
     [[ "$as_json" == 1 ]] && _o_json_status unbound "$sess" 'worker has no durable turn binding'
     return 4
@@ -569,7 +569,7 @@ raise SystemExit(0 if o.get("worker_session")==sys.argv[2] and o.get("turn")==in
       break
     fi
     [[ "$waited" -lt "$ticks" ]] || {
-      pending="$(_o_worker_option "$sess" @claudemaxxing_pending)"
+      pending="$(_o_worker_option "$sess" @orchestratormaxxing_pending)"
       [[ "$as_json" == 1 ]] && _o_json_status readiness_failure "$sess" "turn $turn pending=${pending:-unknown}"
       return 4
     }
@@ -773,10 +773,10 @@ _o_reap_workers() {
     activity="$(tmux display-message -p -t "$(_o_tmux_target "$_s"):" '#{window_activity}' 2>/dev/null || true)"
     [[ "$activity" =~ ^[0-9]+$ ]] || continue
     [[ $(( now - activity )) -ge "$threshold" ]] || continue
-    pending="$(_o_worker_option "$_s" @claudemaxxing_pending)"
+    pending="$(_o_worker_option "$_s" @orchestratormaxxing_pending)"
     [[ "$pending" == "0" ]] || continue
-    run_abs="$(_o_worker_option "$_s" @claudemaxxing_run_dir)"
-    turn="$(_o_worker_option "$_s" @claudemaxxing_turn)"
+    run_abs="$(_o_worker_option "$_s" @orchestratormaxxing_run_dir)"
+    turn="$(_o_worker_option "$_s" @orchestratormaxxing_turn)"
     handoff="$run_abs/handoff.json"
     python3 -c 'import json,sys
 try:
@@ -897,21 +897,21 @@ while True:
   # Mark the OpenCode process tree at birth. The global event plugin runs for
   # ordinary human sessions too; only delegation-born workers may bridge idle
   # and error events into `o bind-event`.
-  sess="$(CLAUDEMAXXING_O_DELEGATED=1 o "$name" --detach --agent "$agent" --auto)" || return 1
+  sess="$(ORCHESTRATORMAXXING_O_DELEGATED=1 o "$name" --detach --agent "$agent" --auto)" || return 1
   # Bind ownership before readiness or submission. A human opencode-* TUI has
   # the same name shape, so prefix matching alone is never deletion authority.
-  if ! _o_set_worker_option "$sess" @claudemaxxing_delegated 1 \
-      || ! _o_set_worker_option "$sess" @claudemaxxing_run_dir "$run_abs" \
-      || ! _o_set_worker_option "$sess" @claudemaxxing_turn 1 \
-      || ! _o_set_worker_option "$sess" @claudemaxxing_pending 0 \
-      || ! _o_set_worker_option "$sess" @claudemaxxing_turn1_mode "$turn1_mode" \
-      || ! _o_set_worker_option "$sess" @claudemaxxing_agent "$agent" \
-      || ! _o_set_worker_option "$sess" @claudemaxxing_model "$model"; then
+  if ! _o_set_worker_option "$sess" @orchestratormaxxing_delegated 1 \
+      || ! _o_set_worker_option "$sess" @orchestratormaxxing_run_dir "$run_abs" \
+      || ! _o_set_worker_option "$sess" @orchestratormaxxing_turn 1 \
+      || ! _o_set_worker_option "$sess" @orchestratormaxxing_pending 0 \
+      || ! _o_set_worker_option "$sess" @orchestratormaxxing_turn1_mode "$turn1_mode" \
+      || ! _o_set_worker_option "$sess" @orchestratormaxxing_agent "$agent" \
+      || ! _o_set_worker_option "$sess" @orchestratormaxxing_model "$model"; then
     tmux kill-session -t "$(_o_tmux_target "$sess")" 2>/dev/null || true
     [[ "$as_json" == 1 ]] && _o_json_status ownership_failure "$sess" 'worker ownership binding failed; exact new session closed'
     return 4
   fi
-  if [[ -n "$profile" ]] && ! _o_set_worker_option "$sess" @claudemaxxing_profile "$profile"; then
+  if [[ -n "$profile" ]] && ! _o_set_worker_option "$sess" @orchestratormaxxing_profile "$profile"; then
     tmux kill-session -t "$(_o_tmux_target "$sess")" 2>/dev/null || true
     [[ "$as_json" == 1 ]] && _o_json_status ownership_failure "$sess" 'worker profile binding failed; exact new session closed'
     return 4
@@ -920,7 +920,7 @@ while True:
     [[ "$as_json" == 1 ]] && _o_json_status not_ready "$sess" "worker preserved; attach with o ls $sess"
     return 4
   fi
-  _o_set_worker_option "$sess" @claudemaxxing_pending 1 || return 4
+  _o_set_worker_option "$sess" @orchestratormaxxing_pending 1 || return 4
   if [[ "$turn1_mode" == "marked" ]]; then
     prompt_text="You are a delegated OpenCode worker in this project. Read the Root-authored brief at $brief and acceptance contract at $contract. Execute the complete bounded assignment inside the o-delegate-turn-1 marker block now."
   else
@@ -1029,9 +1029,9 @@ o() {
   [[ -z "${WARP_CLIENT_VERSION:-}" ]] || env_args+=("WARP_CLIENT_VERSION=$WARP_CLIENT_VERSION")
   [[ -z "${WARP_FOCUS_URL:-}" ]] || env_args+=("WARP_FOCUS_URL=$WARP_FOCUS_URL")
   env_args+=("WARP_DISABLE_AUTO_TITLE=$WARP_DISABLE_AUTO_TITLE")
-  env_args+=("CLAUDEMAXXING_HARNESS_CHILD=1")
-  [[ "${CLAUDEMAXXING_O_DELEGATED:-}" == "1" ]] \
-    && env_args+=("CLAUDEMAXXING_O_DELEGATED=1")
+  env_args+=("ORCHESTRATORMAXXING_HARNESS_CHILD=1")
+  [[ "${ORCHESTRATORMAXXING_O_DELEGATED:-}" == "1" ]] \
+    && env_args+=("ORCHESTRATORMAXXING_O_DELEGATED=1")
   local opencode_bin
   opencode_bin="$(command -v opencode 2>/dev/null)" || {
     echo "o: opencode is not installed or not on PATH" >&2

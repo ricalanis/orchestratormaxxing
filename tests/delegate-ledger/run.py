@@ -36,7 +36,7 @@ def run(args, store, now=None, expect=0):
     env = dict(os.environ)
     env["DELEGATE_LEDGER_DIR"] = store
     env["DELEGATE_LEDGER_NOW"] = iso(now or NOW)
-    env.pop("CLAUDEMAXXING_HARNESS_CHILD", None)
+    env.pop("ORCHESTRATORMAXXING_HARNESS_CHILD", None)
     p = subprocess.run([sys.executable, TOOL] + args, env=env,
                        capture_output=True, text=True)
     if expect is not None and p.returncode != expect:
@@ -274,7 +274,7 @@ def c9():
         env = dict(os.environ)
         env["DELEGATE_LEDGER_DIR"] = store
         env["DELEGATE_LEDGER_NOW"] = iso(NOW)
-        env.pop("CLAUDEMAXXING_HARNESS_CHILD", None)
+        env.pop("ORCHESTRATORMAXXING_HARNESS_CHILD", None)
         procs = [
             subprocess.Popen(
                 [sys.executable, TOOL, "record", "--run-id", f"conc-{i}",

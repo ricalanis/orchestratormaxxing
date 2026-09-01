@@ -11,7 +11,7 @@
 #   systemctl --user enable --now cogload-nightly.timer
 #   sudo loginctl enable-linger "$USER"   # once: so it fires without an active login
 [Unit]
-Description=claudemaxxing nightly cogload maintenance timer (23:57 local)
+Description=orchestratormaxxing nightly cogload maintenance timer (23:57 local)
 
 [Timer]
 OnCalendar=*-*-* 23:57:00

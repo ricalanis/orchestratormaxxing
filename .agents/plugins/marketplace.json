@@ -5,10 +5,10 @@
   },
   "plugins": [
     {
-      "name": "claudemaxxing",
+      "name": "orchestratormaxxing",
       "source": {
         "source": "local",
-        "path": "./plugins/claudemaxxing"
+        "path": "./plugins/orchestratormaxxing"
       },
       "policy": {
         "installation": "AVAILABLE",

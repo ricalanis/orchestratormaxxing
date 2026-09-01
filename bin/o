@@ -3,7 +3,7 @@
 # shells do not load interactive rc files, so they need a real PATH executable.
 set -euo pipefail
 
-source_file="${CLAUDEMAXXING_O_SHELL:-$HOME/.config/claudemaxxing/opencode-o.sh}"
+source_file="${ORCHESTRATORMAXXING_O_SHELL:-$HOME/.config/orchestratormaxxing/opencode-o.sh}"
 if [[ ! -r "$source_file" ]]; then
   printf 'o: launcher source unavailable: %s\n' "$source_file" >&2
   exit 127

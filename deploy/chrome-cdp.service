@@ -1,6 +1,6 @@
 [Unit]
 Description=Shared human + agent Chrome with CDP on loopback :18800
-Documentation=file://%h/dev/claudemaxxing/knowledge/opencode-browser-connector.md
+Documentation=file://%h/dev/orchestratormaxxing/knowledge/opencode-browser-connector.md
 # Headed on purpose (2026-07-13): a real window on the desktop session, so the human's
 # physical keyboard/mouse work alongside the agents' CDP calls (headless Chrome can never
 # receive OS input — the DevTools screencast only re-encodes mouse well, keyboard badly).

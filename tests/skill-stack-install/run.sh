@@ -59,7 +59,7 @@ if os.path.exists(fleet_p):
 unslop = next(item for item in data["skills"] if item["name"] == "unslop-ui")
 assert unslop["repo"] == "https://github.com/JCarterJohnson/vibecoded-design-tells.git"
 PY
-ok "production manifest pins the general and claudemaxxing workflow stacks"
+ok "production manifest pins the general and orchestratormaxxing workflow stacks"
 
 # Build a tiny pinned upstream and a repo-local router fixture. No network is
 # allowed in this contract; --source is the deterministic source injection.
@@ -89,7 +89,7 @@ def digest(root):
 data = {
     "schema_version": 1,
     "skills": [
-        {"name": "anti-slop-design", "repo": "local://claudemaxxing", "commit": "0" * 40,
+        {"name": "anti-slop-design", "repo": "local://orchestratormaxxing", "commit": "0" * 40,
          "path": "skills/anti-slop-design", "include": ["SKILL.md"], "license": "MIT",
          "tree_sha256": digest(pathlib.Path(harness) / "skills/anti-slop-design")},
         {"name": "sample", "repo": "fixture://upstream", "commit": commit,
@@ -123,7 +123,7 @@ run_sync "$HOME1" > "$TMP/install.out"
 for root in "$HOME1/.claude/skills" "$HOME1/custom-codex/skills" \
             "$HOME1/.config/opencode/skills" "$HOME1/.hermes/skills"; do
   test -f "$root/sample/SKILL.md" || fail "four-host install"
-  test -f "$root/anti-slop-design/.claudemaxxing-source.json" || fail "four-host provenance"
+  test -f "$root/anti-slop-design/.orchestratormaxxing-source.json" || fail "four-host provenance"
 done
 test ! -e "$HOME1/.claude/skills/open-hermes" || fail "target filter leaked into Claude"
 test ! -e "$HOME1/custom-codex/skills/open-hermes" || fail "target filter leaked into Codex"
@@ -171,11 +171,11 @@ git -C "$FIXTURE_REPO" checkout -q -- skill/SKILL.md
 for rules in "$HOME1/.claude/CLAUDE.md" "$HOME1/custom-codex/AGENTS.md" \
              "$HOME1/.config/opencode/AGENTS.md" "$HOME1/.hermes/AGENTS.md"; do
   grep -q 'Automatic anti-slop UI generation' "$rules" || fail "global generation trigger"
-  test "$(grep -c 'claudemaxxing:anti-slop-design:begin' "$rules")" -eq 1 || fail "idempotent doctrine marker"
+  test "$(grep -c 'orchestratormaxxing:anti-slop-design:begin' "$rules")" -eq 1 || fail "idempotent doctrine marker"
 done
 grep -q 'preserve me' "$HOME1/.claude/CLAUDE.md" || fail "existing doctrine preservation"
 run_sync "$HOME1" > "$TMP/reinstall.out"
-test "$(grep -c 'claudemaxxing:anti-slop-design:begin' "$HOME1/.claude/CLAUDE.md")" -eq 1 || fail "doctrine reinstall idempotency"
+test "$(grep -c 'orchestratormaxxing:anti-slop-design:begin' "$HOME1/.claude/CLAUDE.md")" -eq 1 || fail "doctrine reinstall idempotency"
 grep -q 'PRE_ANTI_SLOP_PROMPT,' "$ROOT/install.sh" || fail "OpenCode prompt migration"
 grep -q 'load the anti-slop-design skill automatically' "$ROOT/install.sh" || fail "OpenCode generation trigger"
 ok "generation-time routing is wired into every host"
@@ -191,7 +191,7 @@ HOME5="$TMP/home-relocated"
 HOME="$HOME5" CODEX_HOME="$HOME5/custom-codex" \
   "$RELOCATED/sync-agent-skills" \
     --manifest "$TMP/manifest.json" \
-    --source "local://claudemaxxing=$TMP/harness" \
+    --source "local://orchestratormaxxing=$TMP/harness" \
     --source "fixture://upstream=$FIXTURE_REPO" \
     --no-hermes > "$TMP/relocated.out" \
   || fail "relocated command local source override"

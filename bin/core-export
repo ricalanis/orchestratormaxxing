@@ -10,6 +10,8 @@ allowlist-driven projection of a committed tree-ish of the private repo:
 
   select   only tracked paths named by `include` lines, minus `exclude` globs
   strip    <!-- tenant:begin --> … <!-- tenant:end --> blocks from `strip` files
+  rename   <private identifier> → <public identifier> in every text file and path (all case
+           forms), so the public tree is internally consistent; skill manifests re-hashed
   gate     every `block` regex must match nothing; gitleaks must find nothing
   write    an atomic tree + EXPORT-MANIFEST.json (source commit, per-file sha256)
   push     (opt-in) sync the tree into a checkout of the public remote, commit, push
@@ -89,6 +91,7 @@ class Manifest:
         self.remote: str | None = None
         self.branch: str = "main"
         self.gitleaks_config: str | None = None
+        self.renames: list[tuple[str, str]] = []   # (private token, public token), applied to paths + text
 
     @classmethod
     def parse(cls, text: str, source: str) -> "Manifest":
@@ -121,6 +124,11 @@ class Manifest:
                 m.branch = arg
             elif verb == "gitleaks-config":
                 m.gitleaks_config = arg
+            elif verb == "rename":
+                parts2 = arg.split()
+                if len(parts2) != 2 or not all(re.fullmatch(r"[a-z][a-z0-9]+", t) for t in parts2) or parts2[0] == parts2[1]:
+                    raise ExportError(f"{source}:{n}: rename needs two distinct lowercase identifiers: rename <private> <public>", 2)
+                m.renames.append((parts2[0], parts2[1]))
             else:
                 raise ExportError(f"{source}:{n}: unknown verb `{verb}`", 2)
         if not m.include:
@@ -202,6 +210,111 @@ def strip_tenant_blocks(text: str, label: str) -> tuple[str, int]:
 
 def is_text(data: bytes) -> bool:
     return b"\0" not in data[:8192]
+
+
+def _variants(src: str, dst: str) -> list[tuple[str, str]]:
+    """lower, UPPER and Capitalized spellings — the three forms an identifier takes in
+    paths, env vars, and prose; applied longest-first so UPPER never gets half-mapped."""
+    return [(src.upper(), dst.upper()), (src.capitalize(), dst.capitalize()), (src, dst)]
+
+
+def rename_identity(text: str, renames: list[tuple[str, str]]) -> str:
+    for src, dst in renames:
+        for a, b in _variants(src, dst):
+            text = text.replace(a, b)
+    return text
+
+
+def apply_renames(tree: Path, files: list[str], renames: list[tuple[str, str]]) -> tuple[list[str], dict]:
+    """Rewrite text contents and relocate paths so the public identity is internally
+    consistent. Returns the new relative file list and a summary. Deterministic and
+    total: every occurrence in every text file, every path component."""
+    if not renames:
+        return files, {"files_rewritten": 0, "paths_renamed": 0}
+    rewritten = 0
+    for rel in files:
+        p = tree / rel
+        if p.is_symlink():
+            target = os.readlink(p)
+            new_target = rename_identity(target, renames)
+            if new_target != target:
+                p.unlink(); os.symlink(new_target, p); rewritten += 1
+            continue
+        data = p.read_bytes()
+        if not is_text(data):
+            continue
+        text = data.decode("utf-8", "surrogateescape")
+        new = rename_identity(text, renames)
+        if new != text:
+            p.write_bytes(new.encode("utf-8", "surrogateescape")); rewritten += 1
+    # paths: deepest first so a renamed directory does not orphan its children
+    moved = 0
+    new_files = []
+    mapping = {}
+    for rel in files:
+        new_rel = rename_identity(rel, renames)
+        mapping[rel] = new_rel
+    for rel in sorted(files, key=lambda r: r.count("/"), reverse=True):
+        new_rel = mapping[rel]
+        if new_rel != rel:
+            src, dst = tree / rel, tree / new_rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(src, dst); moved += 1
+    # prune emptied directories left behind by moves
+    for d in sorted({str((tree / r).parent) for r in files if mapping[r] != r}, key=len, reverse=True):
+        dp = Path(d)
+        while dp != tree and dp.exists() and not any(dp.iterdir()):
+            dp.rmdir(); dp = dp.parent
+    new_files = [mapping[r] for r in files]
+    return new_files, {"files_rewritten": rewritten, "paths_renamed": moved}
+
+
+def _tree_digest(base: Path, includes: list[str]) -> str:
+    """Same algorithm as bin/sync-agent-skills.tree_digest: sorted (relpath\0sha256\n)."""
+    chosen = set()
+    for inc in includes:
+        p = base / inc
+        if p.is_file():
+            chosen.add(p)
+        elif p.is_dir():
+            chosen |= {q for q in p.rglob("*") if q.is_file()}
+    d = hashlib.sha256()
+    for f in sorted(chosen, key=lambda q: q.relative_to(base).as_posix()):
+        d.update(f.relative_to(base).as_posix().encode()); d.update(b"\0")
+        d.update(hashlib.sha256(f.read_bytes()).hexdigest().encode()); d.update(b"\n")
+    return d.hexdigest()
+
+
+def rehash_skill_manifests(tree: Path, files: list[str]) -> dict:
+    """A rename changes the bytes of local:// skill payloads, so every governed skill
+    manifest in the export gets its tree_sha256 recomputed over the exported payload —
+    otherwise sync-agent-skills would refuse the public install as payload drift."""
+    updated = {}
+    for rel in files:
+        if not (rel.startswith("skills/") and rel.endswith(".json")):
+            continue
+        p = tree / rel
+        try:
+            doc = json.loads(p.read_text())
+        except (ValueError, OSError):
+            continue
+        items = doc.get("skills") if isinstance(doc, dict) else None
+        if not isinstance(items, list):
+            continue
+        changed = 0
+        for it in items:
+            if not (isinstance(it, dict) and str(it.get("repo", "")).startswith("local://") and it.get("path")):
+                continue
+            base = tree / it["path"]
+            if not base.is_dir():
+                continue
+            h = _tree_digest(base, it.get("include", ["."]))
+            if h != it.get("tree_sha256"):
+                it["tree_sha256"] = h; changed += 1
+        if changed:
+            p.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+            updated[rel] = changed
+    return updated
 
 
 def gate_literals(tree: Path, files: list[str], m: Manifest) -> list[str]:
@@ -370,8 +483,33 @@ def sync_and_push(tree: Path, repo_dir: Path, remote: str, branch: str, commit: 
             "public_commit": git(repo_dir, "rev-parse", "HEAD").stdout.decode().strip()}
 
 
+def source_subjects(repo: Path, repo_dir: Path, base: str, commit: str, m: Manifest) -> list[str]:
+    """Sanitized private commit subjects since the last graduated source commit: the provenance
+    a public reader can follow. A subject matching any `block` regex is DROPPED (never rewritten),
+    and the survivors speak the public identity via the rename map. Best-effort: absent or
+    worktree provenance yields an empty list."""
+    prev = None
+    show = git(repo_dir, "show", f"origin/{base}:{MANIFEST_NAME}", check=False)
+    if show.returncode == 0:
+        try:
+            prev = json.loads(show.stdout.decode()).get("source_commit")
+        except ValueError:
+            prev = None
+    if not prev or prev.startswith("worktree:") or commit.startswith("worktree:"):
+        return []
+    log_ = git(repo, "log", "--format=%s", f"{prev}..{commit}", check=False)
+    if log_.returncode != 0:
+        return []
+    out = []
+    for subj in log_.stdout.decode("utf-8", "replace").splitlines():
+        if any(rx.search(subj) for _, rx in m.block):
+            continue
+        out.append(rename_identity(subj, m.renames))
+    return out[:20]
+
+
 def sync_and_pr(tree: Path, repo_dir: Path, remote: str, base: str, pr_branch: str, commit: str,
-                summary: dict, *, dry: bool) -> dict:
+                summary: dict, *, dry: bool, subjects: list[str] | None = None) -> dict:
     """Publish the export as a rolling pull request: force-update the tool-owned branch
     `pr_branch` from origin/<base>, then create or refresh the ONE open PR for it."""
     gh = _gh()
@@ -396,9 +534,11 @@ def sync_and_pr(tree: Path, repo_dir: Path, remote: str, base: str, pr_branch: s
     push = git(repo_dir, "push", "--quiet", "--force", "origin", f"{pr_branch}:{pr_branch}", check=False)
     if push.returncode != 0:
         raise ExportError(f"push of {pr_branch} failed: {(push.stderr or b'').decode().strip()}")
+    prov = "".join(f"- {t}\n" for t in (subjects or []))
     body = (
         f"Automated graduation from the private repo by `core-export --pr`.\n\n"
-        f"- source commit: `{commit}`\n- files: {summary.get('files')}\n"
+        + (f"Source changes since the last graduation:\n{prov}\n" if prov else "")
+        + f"- source commit: `{commit}`\n- files: {summary.get('files')}\n"
         f"- tenant blocks stripped: {summary.get('stripped_files')} file(s)\n"
         f"- gate: {json.dumps(summary.get('gate'))}\n- manifest sha256: `{summary.get('manifest_sha256')}`\n\n"
         f"This branch is tool-owned and force-updated on every graduation; review, then merge with "
@@ -428,7 +568,7 @@ def sync_and_pr(tree: Path, repo_dir: Path, remote: str, base: str, pr_branch: s
             "public_commit": git(repo_dir, "rev-parse", "HEAD").stdout.decode().strip()}
 
 
-def absorb_pr(repo: Path, remote: str, number: int, chosen: set, *, apply: bool) -> dict:
+def absorb_pr(repo: Path, remote: str, number: int, chosen: set, *, apply: bool, renames=None) -> dict:
     """Bring a public-repo pull request back into the PRIVATE working tree (the source of truth).
 
     Paths are identical on both sides for graduated files, so the PR diff applies directly.
@@ -446,7 +586,8 @@ def absorb_pr(repo: Path, remote: str, number: int, chosen: set, *, apply: bool)
     if view.returncode != 0:
         raise ExportError(f"gh pr view failed: {(view.stderr or b'').decode().strip()}", 4)
     meta = json.loads(view.stdout.decode() or "{}")
-    files = [f.get("path") for f in meta.get("files", []) if f.get("path")]
+    inverse = [(dst, src) for src, dst in (renames or [])]   # public token -> private token
+    files = [rename_identity(f.get("path"), inverse) for f in meta.get("files", []) if f.get("path")]
     ignored = [f for f in files if f == MANIFEST_NAME]
     outside = sorted(f for f in files if f not in chosen and f != MANIFEST_NAME)
     if outside:
@@ -457,6 +598,9 @@ def absorb_pr(repo: Path, remote: str, number: int, chosen: set, *, apply: bool)
     if diff.returncode != 0:
         raise ExportError(f"gh pr diff failed: {(diff.stderr or b'').decode().strip()}", 4)
     patch = diff.stdout
+    if inverse:
+        # the public tree speaks the public identity; the private tree speaks its own
+        patch = rename_identity(patch.decode("utf-8", "surrogateescape"), inverse).encode("utf-8", "surrogateescape")
     apply_cmd = ["git", "-C", str(repo), "apply", "--3way", f"--exclude={MANIFEST_NAME}"]
     check = run(apply_cmd + ["--check"], input_bytes=patch, check=False)
     applies = check.returncode == 0
@@ -577,6 +721,8 @@ def main(argv=None) -> int:
                 if is_text(data) and any(MARKER_RE.match(l) for l in data.decode("utf-8", "replace").splitlines()):
                     raise ExportError(f"{rel}: tenant markers present but file is not covered by a `strip` line", 2)
 
+            present, rename_summary = apply_renames(tree, present, m.renames)
+            rehashed = rehash_skill_manifests(tree, present) if m.renames else {}
             hits = gate_literals(tree, present, m)
             wants_push = a.push or a.dry_push or a.pr
             if a.push and a.pr:
@@ -601,12 +747,16 @@ def main(argv=None) -> int:
             summary = {
                 "source_commit": commit, "files": len(present), "stripped_files": len(stripped),
                 "gate": gate, "manifest_sha256": manifest_sha, "out": None, "push": None,
+                "renames": [f"{a_}->{b_}" for a_, b_ in m.renames], "rename": rename_summary,
+                "rehashed_manifests": rehashed,
             }
             if a.absorb_pr is not None:
                 remote = a.remote or m.remote
                 if not remote:
                     raise ExportError("--absorb-pr needs --remote or a manifest `remote` line", 2)
-                summary["absorb"] = absorb_pr(repo, remote, a.absorb_pr, set(present), apply=a.apply)
+                # `present` holds PUBLIC paths after renaming; the private selection is the pre-rename set
+                private_selection = {rename_identity(p_, [(d_, s_) for s_, d_ in m.renames]) for p_ in present}
+                summary["absorb"] = absorb_pr(repo, remote, a.absorb_pr, private_selection, apply=a.apply, renames=m.renames)
                 log(f"absorb: {json.dumps({k: v for k, v in summary['absorb'].items() if k != 'files'})}")
                 if a.json:
                     print(json.dumps(summary, indent=2, sort_keys=True))
@@ -633,7 +783,8 @@ def main(argv=None) -> int:
                     branch = a.branch or m.branch
                     repo_dir = Path(a.repo_dir) if a.repo_dir else (repo.parent / DEFAULT_PUBLIC_PROJECT)
                     if a.pr:
-                        summary["push"] = sync_and_pr(out, repo_dir, remote, branch, a.pr_branch, commit, summary, dry=a.dry_push)
+                        subs = source_subjects(repo, repo_dir, branch, commit, m) if (repo_dir / ".git").is_dir() else []
+                        summary["push"] = sync_and_pr(out, repo_dir, remote, branch, a.pr_branch, commit, summary, dry=a.dry_push, subjects=subs)
                     else:
                         summary["push"] = sync_and_push(out, repo_dir, remote, branch, commit, dry=a.dry_push)
                     log(f"push: {summary['push']}")

@@ -20,7 +20,7 @@ the endpoint definition in the account). So it is resolved from Warp's own histo
 the most recent `ai_queries.model_id` that is neither a catalog entry nor an `auto*`
 router. That self-heals the id when the endpoint is re-added under a new UUID.
 
-Resolution order: `~/.config/claudemaxxing/warp-model.conf` → discovered from history
+Resolution order: `~/.config/orchestratormaxxing/warp-model.conf` → discovered from history
 → refuse (exit 2). It never falls back to a catalog id such as `glm-5.2-fireworks`:
 same model family, opposite billing, so a silent fallback would undo the point.
 
@@ -68,7 +68,7 @@ LAYOUT = _layout()
 PREFS = os.environ.get("WARP_MODEL_PIN_PREFS") or LAYOUT["prefs"]
 SETTINGS = os.environ.get("WARP_MODEL_PIN_SETTINGS") or LAYOUT["settings"]
 DB = os.environ.get("WARP_MODEL_PIN_DB") or LAYOUT["db"]
-CONF = os.path.expanduser("~/.config/claudemaxxing/warp-model.conf")
+CONF = os.path.expanduser("~/.config/orchestratormaxxing/warp-model.conf")
 
 # Warp's own routers; their ids are prefixes, not exact values.
 ROUTER_PREFIXES = ("auto", "cli-agent", "computer-use-agent")

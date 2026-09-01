@@ -50,11 +50,27 @@ printf 'leak: fleet-server\n' > bad/secret.md
 ln -s CLAUDE.md AGENTS.md
 printf 'TOKEN=never\n' > .env
 printf 'deep core\n' > shell/nested/deep/file.txt
+mkdir -p "plugins/acmelab/skills/hello" skills
+printf -- '---\nname: hello\n---\nUse $acmelab:hello on the ACMELAB fleet (Acmelab docs).\n' > plugins/acmelab/skills/hello/SKILL.md
+python3 - <<'PYH'
+import hashlib, json, os
+base = "plugins/acmelab/skills/hello"
+d = hashlib.sha256()
+for f in sorted(os.listdir(base)):
+    p = os.path.join(base, f)
+    d.update(f.encode()); d.update(b"\0"); d.update(hashlib.sha256(open(p,"rb").read()).hexdigest().encode()); d.update(b"\n")
+json.dump({"schema_version": 1, "skills": [{"name": "hello", "repo": "local://acmelab", "commit": "0"*40,
+          "path": "plugins/acmelab/skills/hello", "include": ["SKILL.md"], "license": "MIT",
+          "tree_sha256": d.hexdigest()}]}, open("skills/external-stack.json", "w"), indent=2)
+PYH
 printf '[allowlist]\n' > .gitleaks.toml
 printf '.env\n.results/\n' > .gitignore
 cat > deploy/graduation.manifest <<'MF'
 include bin
 include shell
+include plugins
+include skills
+rename acmelab publiclab
 include CLAUDE.md
 include AGENTS.md
 exclude bin/fleet-tool
@@ -83,7 +99,7 @@ python3 - "$OUT/EXPORT-MANIFEST.json" "$SRC_SHA" <<'PY' || fail "C1 manifest wro
 import json, sys, hashlib, os
 m = json.load(open(sys.argv[1])); assert m["source_commit"] == sys.argv[2], m["source_commit"]
 paths = sorted(e["path"] for e in m["files"])
-assert paths == ["AGENTS.md", "CLAUDE.md", "bin/tool", "shell/nested/deep/file.txt"], paths
+assert paths == ["AGENTS.md", "CLAUDE.md", "bin/tool", "plugins/publiclab/skills/hello/SKILL.md", "shell/nested/deep/file.txt", "skills/external-stack.json"], paths
 assert m["stripped"] == {"CLAUDE.md": 1}, m["stripped"]
 assert m["gate"]["literal_hits"] == 0 and m["gate"]["gitleaks"] == "clean", m["gate"]
 tree = os.path.dirname(sys.argv[1])
@@ -321,4 +337,63 @@ git -C "$SRC" diff --quiet HEAD || fail "C14 refused absorb touched the tree"
 pass "C14 --absorb-pr: check-only, --apply uncommitted, outside-selection refused"
 unset GIT_CONFIG_GLOBAL
 
+
+# ── C15: rename-at-graduation — contents, paths, skill-manifest rehash, inverse absorb ─
+rm -rf "$OUT"
+PATH="$PATH_WITH" "$TOOL" --repo "$SRC" --out "$OUT" --json > "$SCRATCH/c15.json" 2>/dev/null || fail "C15 export with rename failed"
+[[ -f "$OUT/plugins/publiclab/skills/hello/SKILL.md" ]] || fail "C15 path not renamed"
+[[ ! -e "$OUT/plugins/acmelab" ]] || fail "C15 private-named path survived"
+grep -q '\$publiclab:hello' "$OUT/plugins/publiclab/skills/hello/SKILL.md" || fail "C15 lower token not renamed"
+grep -q 'PUBLICLAB fleet' "$OUT/plugins/publiclab/skills/hello/SKILL.md" || fail "C15 UPPER token not renamed"
+grep -q 'Publiclab docs' "$OUT/plugins/publiclab/skills/hello/SKILL.md" || fail "C15 Capitalized token not renamed"
+! grep -riq acmelab "$OUT" --exclude=EXPORT-MANIFEST.json && true || fail "C15 private identity leaked into the public tree"
+python3 - "$OUT" <<'PYH' || fail "C15 skill manifest hash not recomputed over the renamed payload"
+import hashlib, json, os, sys
+out = sys.argv[1]
+doc = json.load(open(os.path.join(out, "skills/external-stack.json")))
+it = doc["skills"][0]
+assert it["path"] == "plugins/publiclab/skills/hello", it["path"]
+base = os.path.join(out, it["path"])
+d = hashlib.sha256()
+for f in sorted(os.listdir(base)):
+    p = os.path.join(base, f)
+    d.update(f.encode()); d.update(b"\0"); d.update(hashlib.sha256(open(p,"rb").read()).hexdigest().encode()); d.update(b"\n")
+assert it["tree_sha256"] == d.hexdigest(), (it["tree_sha256"], d.hexdigest())
+PYH
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["renames"]==["acmelab->publiclab"] and d["rename"]["paths_renamed"]>=1 and d["rehashed_manifests"], d' "$SCRATCH/c15.json" || fail "C15 summary wrong"
+# inverse absorb: a public PR touching the renamed path + tokens lands on the private names
+cat > "$SCRATCH/pr15.diff" <<'DIFF'
+diff --git a/plugins/publiclab/skills/hello/SKILL.md b/plugins/publiclab/skills/hello/SKILL.md
+--- a/plugins/publiclab/skills/hello/SKILL.md
++++ b/plugins/publiclab/skills/hello/SKILL.md
+@@ -1,4 +1,5 @@
+ ---
+ name: hello
+ ---
+ Use $publiclab:hello on the PUBLICLAB fleet (Publiclab docs).
++Contributed line about $publiclab:hello.
+DIFF
+export FAKE_GH_DIFF="$SCRATCH/pr15.diff"
+FAKE_GH_FILES='[{"path":"plugins/publiclab/skills/hello/SKILL.md"}]' PATH="$PATH_WITH" "$TOOL" --repo "$SRC" --absorb-pr 7 --apply --remote "$PUBURL" --json > "$SCRATCH/c15b.json" 2>/dev/null || fail "C15 inverse absorb failed"
+grep -q 'Contributed line about \$acmelab:hello' "$SRC/plugins/acmelab/skills/hello/SKILL.md" || fail "C15 absorbed content not inverse-renamed"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["absorb"]; assert d["files"]==["plugins/acmelab/skills/hello/SKILL.md"], d' "$SCRATCH/c15b.json" || fail "C15 absorbed file list not inverse-renamed"
+git -C "$SRC" checkout -q HEAD -- plugins 2>/dev/null || true
+pass "C15 rename-at-graduation: contents+paths renamed, manifests rehashed, absorb inverse-mapped"
+
+# ── C16: PR body carries sanitized, publicly-named source subjects; blocked ones dropped ─
+git -C "$SRC" commit -q --allow-empty -m "feat: acmelab learns a trick"
+git -C "$SRC" commit -q --allow-empty -m "fix: secret client fleet-server tuning"
+: > "$FAKE_GH_LOG"; unset FAKE_GH_OPEN_PR
+export GIT_CONFIG_GLOBAL="$SCRATCH/gitconfig"   # re-arm the scoped URL rewrite (C14 unset it)
+PATH="$PATH_WITH" "$TOOL" --repo "$SRC" --out "$OUT" --pr --remote "$PUBURL" --repo-dir "$REPO_DIR" --json > "$SCRATCH/c16.json" 2> "$SCRATCH/c16.err" || fail "C16 provenance --pr failed: $(tail -3 "$SCRATCH/c16.err" | tr '\n' ' ')"
+python3 - "$FAKE_GH_LOG" <<'PY' || fail "C16 provenance body wrong"
+import json, sys
+calls = [json.loads(l) for l in open(sys.argv[1])]
+create = next(c for c in calls if c[:2] == ["pr", "create"])
+body = create[create.index("--body") + 1]
+assert "feat: publiclab learns a trick" in body, body[:400]
+assert "fleet-server" not in body and "acmelab" not in body, body[:400]
+PY
+pass "C16 provenance: renamed subjects in the PR body, blocked subjects dropped"
+unset GIT_CONFIG_GLOBAL
 echo "core-export contract: all cases passed"

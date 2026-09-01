@@ -18,8 +18,8 @@ import tempfile
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 TARGET_LABELS = {"Claude", "Codex", "OpenCode", "Hermes"}
-DOCTRINE_BEGIN = "<!-- claudemaxxing:anti-slop-design:begin -->"
-DOCTRINE_END = "<!-- claudemaxxing:anti-slop-design:end -->"
+DOCTRINE_BEGIN = "<!-- orchestratormaxxing:anti-slop-design:begin -->"
+DOCTRINE_END = "<!-- orchestratormaxxing:anti-slop-design:end -->"
 DOCTRINE_BLOCK = f"""{DOCTRINE_BEGIN}
 ## Automatic anti-slop UI generation
 
@@ -138,13 +138,13 @@ def managed_destination_ok(destination: Path, name: str) -> bool:
         return True
     if not destination.is_dir() or destination.is_symlink():
         return False
-    marker = destination / ".claudemaxxing-source.json"
+    marker = destination / ".orchestratormaxxing-source.json"
     try:
         data = json.loads(marker.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
     return (
-        data.get("managed_by") == "claudemaxxing/bin/sync-agent-skills"
+        data.get("managed_by") == "orchestratormaxxing/bin/sync-agent-skills"
         and data.get("name") == name
     )
 
@@ -171,7 +171,7 @@ def copy_skill(
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_file, target)
         provenance = {
-            "managed_by": "claudemaxxing/bin/sync-agent-skills",
+            "managed_by": "orchestratormaxxing/bin/sync-agent-skills",
             "name": name,
             "repo": skill["repo"],
             "commit": skill["commit"],
@@ -179,7 +179,7 @@ def copy_skill(
             "license": skill["license"],
             "tree_sha256": skill["tree_sha256"],
         }
-        (stage / ".claudemaxxing-source.json").write_text(
+        (stage / ".orchestratormaxxing-source.json").write_text(
             json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
         backup = destination_root / f".{name}.previous"
@@ -277,7 +277,7 @@ def main() -> int:
     parser.add_argument(
         "--cache-dir",
         type=Path,
-        default=Path(os.environ.get("CLAUDEMAXXING_SKILL_CACHE", Path.home() / ".cache/claudemaxxing/skill-sources")),
+        default=Path(os.environ.get("ORCHESTRATORMAXXING_SKILL_CACHE", Path.home() / ".cache/orchestratormaxxing/skill-sources")),
     )
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -327,7 +327,7 @@ def main() -> int:
         key = (skill["repo"], skill["commit"])
         if key not in sources:
             override = overrides.get(skill["repo"])
-            if skill["repo"] == "local://claudemaxxing":
+            if skill["repo"] == "local://orchestratormaxxing":
                 # The globally installed command lives under ~/.local/bin, so
                 # __file__ cannot identify the repository.  install.sh passes
                 # its resolved REPO_DIR explicitly; tests may instead locate

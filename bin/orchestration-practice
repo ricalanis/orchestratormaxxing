@@ -72,7 +72,7 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     # This executable remains relocatable within a checkout/install tree.
     repo_root = Path(__file__).resolve().parent.parent
-    installed_root = repo_root / "share" / "claudemaxxing"
+    installed_root = repo_root / "share" / "orchestratormaxxing"
     sys.path.insert(0, str(repo_root if (repo_root / "orchestration_practices").is_dir()
                            else installed_root))
     import orchestration_practices as core

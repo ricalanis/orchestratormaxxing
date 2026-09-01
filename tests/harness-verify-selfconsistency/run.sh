@@ -47,7 +47,7 @@ probe() {  # $1=json array of hook command strings -> prints the flagged command
   # The guard returns early unless this install marker exists ("not deployed ->
   # nothing to check"). Without it every probe comes back empty and E1/E2 pass
   # while measuring nothing — a false green that E3 is here to expose.
-  mkdir -p "$home/.config/claudemaxxing"
+  mkdir -p "$home/.config/orchestratormaxxing"
   python3 - "$home" "$cmds" <<'PY'
 import json, os, sys
 home, cmds = sys.argv[1], json.loads(sys.argv[2])

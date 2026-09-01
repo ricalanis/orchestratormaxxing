@@ -9,17 +9,17 @@ app-switch rate) under GNOME Wayland, where every other route is closed:
 
 ## Install
 
-    mkdir -p ~/.local/share/gnome-shell/extensions/cogload@claudemaxxing.local
+    mkdir -p ~/.local/share/gnome-shell/extensions/cogload@orchestratormaxxing.local
     cp metadata.json extension.js \
-       ~/.local/share/gnome-shell/extensions/cogload@claudemaxxing.local/
+       ~/.local/share/gnome-shell/extensions/cogload@orchestratormaxxing.local/
     # Wayland cannot restart the shell in place — log out and back in, then:
-    gnome-extensions enable cogload@claudemaxxing.local
+    gnome-extensions enable cogload@orchestratormaxxing.local
 
 ## Verify
 
-    gdbus call --session --dest org.claudemaxxing.Cogload \
-      --object-path /org/claudemaxxing/Cogload \
-      --method org.claudemaxxing.Cogload.Sample
+    gdbus call --session --dest org.orchestratormaxxing.Cogload \
+      --object-path /org/orchestratormaxxing/Cogload \
+      --method org.orchestratormaxxing.Cogload.Sample
     # -> ('org.gnome.Nautilus.desktop', 7)
 
 `cogload channels --redeclare` then flips `screen` back to true on its own;

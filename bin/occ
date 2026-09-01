@@ -24,7 +24,7 @@
 # Env: OPENCODE_BIN to override the opencode binary.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
-export CLAUDEMAXXING_HARNESS_CHILD=1
+export ORCHESTRATORMAXXING_HARNESS_CHILD=1
 
 AGENT="glm-coder"
 TIMEOUT=120

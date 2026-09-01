@@ -1,4 +1,4 @@
-# claudemaxxing — exact Warp terminal recovery (SOURCE this file, don't run it).
+# orchestratormaxxing — exact Warp terminal recovery (SOURCE this file, don't run it).
 #
 # Recovery is armed while the user's rc file is sourced, then claimed from the
 # first prompt hook. This ordering is load-bearing: replacing the shell from an

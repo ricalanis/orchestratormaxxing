@@ -52,7 +52,7 @@ transport behind `o`. OpenCode supplies tools and persistence, not better model 
    | Codex | `codex exec --ephemeral --skip-git-repo-check -s read-only -m <tier> -c model_reasoning_effort=<e> '<brief + contract>'` | Three tiers, cheap→strong: `-m gpt-5.6-luna` (`low`, the default rung) → `gpt-5.6-terra` (`medium`) → `gpt-5.6-sol` (`high`, only after the cheaper tiers are inadequate) |
    | Claude | `provider-ask anthropic "<brief + contract>"` | Cross-family opinion or refutation |
 
-   Independent multi-chunk work belongs in `$claudemaxxing:fanout`.
+   Independent multi-chunk work belongs in `$orchestratormaxxing:fanout`.
    `o output <session> --json` is bounded transport observation only; it never
    accepts or repairs content. Keep repairs in the returned session with `o send`;
    a second `o delegate` is a new run, not a repair.

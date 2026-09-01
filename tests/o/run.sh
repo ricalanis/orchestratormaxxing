@@ -50,7 +50,7 @@ SH
 chmod +x "$STUBS/agent-tab-status"
 
 export PATH="$STUBS:$ROOT/bin:/usr/bin:/bin"
-export CLAUDEMAXXING_O_SHELL="${O_SHELL_UNDER_TEST:-$ROOT/shell/opencode-o.sh}"
+export ORCHESTRATORMAXXING_O_SHELL="${O_SHELL_UNDER_TEST:-$ROOT/shell/opencode-o.sh}"
 export O_READY_TIMEOUT_SECONDS=5
 export OPENCODE_ARGS_LOG="$SCRATCH/opencode-args.log"
 
@@ -60,7 +60,7 @@ export OPENCODE_ARGS_LOG="$SCRATCH/opencode-args.log"
 # real PTY: the fake exits red unless a client already exists at process birth.
 startup_capture="$SCRATCH/startup-capture.log"
 export OPENCODE_STARTUP_MARKER="$SCRATCH/startup-born"
-if ! python3 - "$CLAUDEMAXXING_O_SHELL" "$startup_capture" <<'PY'
+if ! python3 - "$ORCHESTRATORMAXXING_O_SHELL" "$startup_capture" <<'PY'
 import errno
 import os
 import pty
@@ -112,7 +112,7 @@ fi
 
 # A human-started interactive session keeps OpenCode's normal permission mode.
 # Auto-approval belongs only to sessions born through `o delegate`.
-bash -c 'source "$1"; CLAUDEMAXXING_HARNESS_CHILD=1 TMUX=1 o interactive-control --agent glm-coder </dev/null' \
+bash -c 'source "$1"; ORCHESTRATORMAXXING_HARNESS_CHILD=1 TMUX=1 o interactive-control --agent glm-coder </dev/null' \
   _ "$ROOT/shell/opencode-o.sh" >/dev/null
 grep -Fxq -- '--agent glm-coder' "$OPENCODE_ARGS_LOG" \
   || fail 'ordinary interactive OpenCode launch did not preserve normal permission mode'
@@ -379,7 +379,7 @@ chmod +x "$FAKE_TMUX"
 mkdir -p "$SCRATCH/unreadable-bin"
 ln -s "$FAKE_TMUX" "$SCRATCH/unreadable-bin/tmux"
 set +e
-unreadable="$(PATH="$SCRATCH/unreadable-bin:/usr/bin:/bin" CLAUDEMAXXING_O_SHELL="$ROOT/shell/opencode-o.sh" "$O" output opencode-broken --json 2>/dev/null)"
+unreadable="$(PATH="$SCRATCH/unreadable-bin:/usr/bin:/bin" ORCHESTRATORMAXXING_O_SHELL="$ROOT/shell/opencode-o.sh" "$O" output opencode-broken --json 2>/dev/null)"
 unreadable_rc=$?
 set -e
 [[ "$unreadable_rc" -eq 4 && "$unreadable" == *'"status":"unreadable"'* ]] || fail 'unreadable pane collapsed into empty/missing'

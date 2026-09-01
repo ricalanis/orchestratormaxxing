@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# claudemaxxing — autonomous self-improve heartbeat (daily; invoked by launchd on macOS,
+# orchestratormaxxing — autonomous self-improve heartbeat (daily; invoked by launchd on macOS,
 # systemd --user timer on Linux — same wrapper, scheduler differs per OS).
 #
 # SOURCE OF TRUTH: this file is a TEMPLATE in the repo (deploy/loop-cron.sh). The live
-# copy at $HOME/.config/claudemaxxing/loop-cron.sh is deployed by install.sh (copy, NOT
+# copy at $HOME/.config/orchestratormaxxing/loop-cron.sh is deployed by install.sh (copy, NOT
 # symlink — __REPO__ is substituted at deploy time). Edit here, then re-run ./install.sh.
 #
 # BOTH computers can arm this loop — it's idempotent across machines via a per-day git claim,
@@ -38,7 +38,7 @@ set -uo pipefail
 
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 REPO="__REPO__"
-CFG="$HOME/.config/claudemaxxing"
+CFG="$HOME/.config/orchestratormaxxing"
 # Export keys (XAI_API_KEY, …) from the standalone .env into this process so the
 # headless `claude` round and every Bash shell / workflow agent it spawns inherit
 # them. Without this the loop's children have no $XAI_API_KEY in-env — xsearch still

@@ -11,7 +11,7 @@ intentionally absent after the the Google AI subscription subscription was suspe
 | `ollama` | `bin/oll` | `deepseek-v4-flash:0731` | OpenCode auth store | Dialogue, execution, volume, and first-pass drafts; `oll --reasoning` selects GLM 5.2 |
 | `openai` | `codex exec` | `gpt-5.5` | ChatGPT Plus OAuth, no API key | Strong reasoning, code review, careful analysis |
 | `anthropic` | `claude -p` | `sonnet` (`MODEL=opus` upgrades) | Claude subscription CLI login | Opus/Sonnet second opinions for non-Claude hosts (OpenCode `/opus` `/sonnet`); never an in-OpenCode Anthropic provider (ToS) |
-| `xai` | `vibe-tools ask` / `xsearch` | `grok-4-latest` | claudemaxxing environment file | Web and X retrieval when credits are available |
+| `xai` | `vibe-tools ask` / `xsearch` | `grok-4-latest` | orchestratormaxxing environment file | Web and X retrieval when credits are available |
 
 All routes use `provider-ask <provider> "prompt"`; stdin is appended as context.
 `multi-council` and `cross-review` fan out over this primitive and degrade

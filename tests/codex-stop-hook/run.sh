@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TOOL="$ROOT/bin/codex-stop-hook"
-HOOKS="$ROOT/plugins/claudemaxxing/hooks/hooks.json"
+HOOKS="$ROOT/plugins/orchestratormaxxing/hooks/hooks.json"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
