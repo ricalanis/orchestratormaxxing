@@ -16,6 +16,8 @@ fail() { printf 'warp-model-pin contract: %s\n' "$*" >&2; exit 1; }
 [ -x "$TOOL" ] || fail "bin/warp-model-pin missing or not executable"
 
 SCRATCH="$(mktemp -d)"; trap 'rm -rf "$SCRATCH"' EXIT
+# Fixtures use the Linux layout on every OS (hermetic); C11 exercises the Darwin layout explicitly.
+export WARP_MODEL_PIN_LAYOUT=linux
 UUID="5f2c1a7e-0b3d-4c88-9a1e-6d4f2b8c0e11"
 STALE="6095c7ee-9a9c-4892-b10f-d6f32cdf3bbc"
 
@@ -175,4 +177,16 @@ except Exception:
     print("REJECTS")
 TOMLCHK
 
-printf 'warp-model-pin contract: PASS (C1-C10)\n'
+
+# C11: macOS layout — ~/.warp/settings.toml + the Group-Container warp.sqlite, no prefs file
+# (the catalog is then empty and discovery leans on the database join). Same pin outcome.
+H="$SCRATCH/c11"; make_home "$H" "$STALE" "auto-genius $UUID=deepseek-v4-flash:0731 auto"
+GC="$H/Library/Group Containers/2BBY89MBSN.dev.warp/Library/Application Support/dev.warp.Warp-Stable"
+mkdir -p "$H/.warp" "$GC"
+mv "$H/.config/warp-terminal/settings.toml" "$H/.warp/settings.toml"
+mv "$H/.local/state/warp-terminal/warp.sqlite" "$GC/warp.sqlite"
+rm -f "$H/.config/warp-terminal/user_preferences.json"
+env HOME="$H" WARP_MODEL_PIN_LAYOUT=darwin WARP_MODEL_PIN_FAKE_RUNNING=0 "$TOOL" >/dev/null 2>&1 || fail "C11: darwin-layout pin failed"
+[ "$(grep -E '^base_model' "$H/.warp/settings.toml" | sed 's/.*"\(.*\)".*/\1/')" = "$UUID" ] || fail "C11: darwin-layout base_model not pinned"
+[ ! -e "$H/.config/warp-terminal/settings.toml" ] || fail "C11: darwin layout must not touch the Linux path"
+printf 'warp-model-pin contract: PASS (C1-C11)\n'

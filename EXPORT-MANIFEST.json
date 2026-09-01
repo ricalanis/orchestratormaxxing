@@ -89,7 +89,7 @@
     {
       "mode": "file",
       "path": "CLAUDE.md",
-      "sha256": "964f1fbde8d96daf064e498cc79fcdb9657ee4e1b74bd514b71b6b65a093e4db"
+      "sha256": "9b729cdb556ea2448fff863d91703f577c1bacac773b4fc4721929e91335c5de"
     },
     {
       "mode": "file",
@@ -314,7 +314,7 @@
     {
       "mode": "exec",
       "path": "bin/warp-model-pin",
-      "sha256": "4f4a3dd5fb1cca26e1bbed5a381d4ba99ab4887c9e19e6f60b8706bf22ab6ad6"
+      "sha256": "b56c8138e4fcc5736a22e1a3683ee6121d4a9d7bf501938091c926137b241005"
     },
     {
       "mode": "exec",
@@ -1199,7 +1199,7 @@
     {
       "mode": "exec",
       "path": "tests/warp-model-pin/run.sh",
-      "sha256": "ce5f863e2bc4cdf7b498b237f1a9d086157e8bf8e636ef769bd027accdc51e45"
+      "sha256": "e84af6f523c09a3a776af4062260714b71976e692d453e5b58391ecd659b69e4"
     },
     {
       "mode": "exec",
@@ -1229,7 +1229,7 @@
   },
   "manifest": "deploy/graduation.manifest",
   "manifest_sha256": "7e5df7f3666bd19d0e9660c2ce8c484dcfceb0407e382ea8f3a210088588704f",
-  "source_commit": "074d6a2483f4bb5621b341e53253faee3c88802c",
+  "source_commit": "265c8c9085be99dead0508366c56bd7d25914b57",
   "source_tree_ish": "HEAD",
   "stripped": {
     "CLAUDE.md": 4,
