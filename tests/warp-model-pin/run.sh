@@ -85,7 +85,8 @@ run "$H" >/dev/null 2>&1 || fail "C1: pin failed"
 grep -q "osc52_clipboard_access" "$H/.config/warp-terminal/settings.toml" || fail "C1: lost unrelated settings"
 grep -q "is_settings_sync_enabled" "$H/.config/warp-terminal/settings.toml" || fail "C1: lost trailing section"
 grep -q "pattern = " "$H/.config/warp-terminal/settings.toml" || fail "C1: mangled the secret regex table"
-[ "$(stat -c '%a' "$H/.config/warp-terminal/settings.toml")" = "600" ] || fail "C1: mode not preserved"
+mode_of() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }   # GNU, then BSD
+[ "$(mode_of "$H/.config/warp-terminal/settings.toml")" = "600" ] || fail "C1: mode not preserved"
 
 # C2: refuse while Warp runs (it rewrites settings from memory on exit)
 H="$SCRATCH/c2"; make_home "$H" "$STALE" "$UUID=deepseek-v4-flash:0731"; before="$(sumf "$H")"
