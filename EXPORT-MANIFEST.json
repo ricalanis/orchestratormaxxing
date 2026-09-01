@@ -109,7 +109,7 @@
     {
       "mode": "file",
       "path": "README.md",
-      "sha256": "97af8ba1e38d99ca5b25f7b2a66f7be1df31a3a0e2a488f95dd8c8b134301cc4"
+      "sha256": "9b59217f5ce1aa9d4aa85018b9c1985e029f0fd3d49c68167c937a44bb1e9e9a"
     },
     {
       "mode": "file",
@@ -3254,7 +3254,7 @@
   },
   "manifest": "deploy/graduation.manifest",
   "manifest_sha256": "a117faf05daa2df1e9f6b59b7dc036376846fa91101712ccc41db168e0d4141d",
-  "source_commit": "68729e3698b88293d8c2deb6e920c9e8874b9cc6",
+  "source_commit": "4f25afefdf2e9b66c92187f3e646075c7d175e0a",
   "source_tree_ish": "HEAD",
   "stripped": {
     "CLAUDE.md": 7,
