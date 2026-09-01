@@ -1199,7 +1199,7 @@
     {
       "mode": "exec",
       "path": "tests/warp-model-pin/run.sh",
-      "sha256": "63ad22c2f2c57df170f8d3bb9ed4a6300ac1eb09dbf32d349c59e65932b9dbda"
+      "sha256": "ce5f863e2bc4cdf7b498b237f1a9d086157e8bf8e636ef769bd027accdc51e45"
     },
     {
       "mode": "exec",
@@ -1229,7 +1229,7 @@
   },
   "manifest": "deploy/graduation.manifest",
   "manifest_sha256": "7e5df7f3666bd19d0e9660c2ce8c484dcfceb0407e382ea8f3a210088588704f",
-  "source_commit": "8af2153994ead33b5ef3723da535bcdd76abd9ec",
+  "source_commit": "074d6a2483f4bb5621b341e53253faee3c88802c",
   "source_tree_ish": "HEAD",
   "stripped": {
     "CLAUDE.md": 4,
