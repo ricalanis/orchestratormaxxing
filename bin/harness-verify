@@ -2828,7 +2828,11 @@ def audit(root):
     # backup, no funnel snapshot and no Friday brief. A unit that only exists because
     # somebody once ran `cp` is not deployed — it is remembered.
     orch_deploy = os.path.join(root, "orchestrator", "deploy")
-    if os.path.isdir(orch_deploy):
+    # The units are deployed by the FLEET half (install-fleet.sh). In a graduated
+    # core tree that half never ships, so the units are documentation templates a
+    # public operator arms per orchestrator/README — reference coverage only
+    # applies where the fleet installer exists to carry it.
+    if os.path.isdir(orch_deploy) and fleet_present:
         # Only systemd units: the compose files and helper scripts in that directory
         # are consumed by docker/cron directly and have no business in install.sh.
         for f in sorted(os.listdir(orch_deploy)):

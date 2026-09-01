@@ -147,6 +147,7 @@ cp "$REPO_DIR/.claude/commands/self-improve.md" "$CLAUDE_DIR/commands/self-impro
 cp "$REPO_DIR/.claude/commands/wrap-up.md"     "$CLAUDE_DIR/commands/wrap-up.md"
 cp "$REPO_DIR/.claude/commands/fableplan.md"   "$CLAUDE_DIR/commands/fableplan.md"
 cp "$REPO_DIR/.claude/commands/gauntlet.md"    "$CLAUDE_DIR/commands/gauntlet.md"
+cp "$REPO_DIR/.claude/commands/graduate.md"    "$CLAUDE_DIR/commands/graduate.md"
 cp "$REPO_DIR/.claude/commands/cheap-delegate.md" "$CLAUDE_DIR/commands/cheap-delegate.md"
 
 say "Governed skill stack → Claude, Codex, OpenCode, and production Hermes"

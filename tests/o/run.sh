@@ -439,7 +439,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$worker_pid" 2>/dev/null || break; sl
 # every in-flight fake run process must be gone (the trap forwards TERM to the group)
 sleep 1
 for ip in $inflight_pids; do
-  if kill -0 "$ip" 2>/dev/null && ps -o args= -p "$ip" 2>/dev/null | grep -Eq 'NO_EVENT|turn-.*\.prompt'; then
+  if kill -0 "$ip" 2>/dev/null && ps -o args= -p "$ip" 2>/dev/null | grep -E 'NO_EVENT|turn-.*\.prompt' >/dev/null; then
     fail "close left an in-flight turn process running: $(ps -o pid=,pgid=,ppid=,args= -p "$ip" 2>/dev/null)"
   fi
 done
