@@ -1,0 +1,71 @@
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    if: github.repository == 'ricalanis/orchestratormaxxing'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+      fail-fast: false
+    timeout-minutes: 40
+    env:
+      ORCHESTRATORMAXXING_SKIP_EXTERNAL_SKILLS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install tmux
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get install -y tmux
+          else
+            brew install tmux
+          fi
+      - name: Configure git
+        run: |
+          git config --global user.email "verify@example.com"
+          git config --global user.name "verify"
+      - name: Run harness-verify
+        run: |
+          # capture the exit code without letting the shell's -e kill the step:
+          # 1 = errors (fail below) · 2 = inconclusive (report, don't fail)
+          rc=0
+          bin/harness-verify --json > hv.json || rc=$?
+          echo "rc=$rc" >> "$GITHUB_ENV"
+          echo "rc=$rc"
+      - name: Print summary
+        run: |
+          python3 - <<'EOF'
+          import json
+          with open("hv.json") as f:
+              data = json.load(f)
+          print("errors:", data.get("errors", 0))
+          print("warnings:", data.get("warnings", 0))
+          print("inconclusive:", data.get("inconclusive", 0))
+          print("skipped:", data.get("skipped", 0))
+          EOF
+      - name: Upload hv.json
+        uses: actions/upload-artifact@v4
+        with:
+          name: hv-json
+          path: hv.json
+      - name: Fail on errors only
+        if: env.rc == '1'
+        run: |
+          echo "harness-verify reported errors; failing."
+          exit 1
+      - name: Report inconclusive
+        if: env.rc == '2'
+        run: |
+          echo "harness-verify reported inconclusive results; not failing. See hv.json artifact."
