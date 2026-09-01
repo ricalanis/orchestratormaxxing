@@ -3,8 +3,8 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-NIGHTLY="$ROOT/deploy/com.claudemaxxing.cogload-nightly.plist"
-CATCHUP_PLIST="$ROOT/deploy/com.claudemaxxing.cogload-catchup.plist"
+NIGHTLY="$ROOT/deploy/com.orchestratormaxxing.cogload-nightly.plist"
+CATCHUP_PLIST="$ROOT/deploy/com.orchestratormaxxing.cogload-catchup.plist"
 CATCHUP_SH="$ROOT/deploy/cogload-catchup.sh"
 INSTALL="$ROOT/install.sh"
 SETUP="$ROOT/deploy/cogload-mac-setup.sh"
@@ -33,7 +33,7 @@ nightly = plistlib.loads(nightly_path.read_bytes())
 assert nightly["StartCalendarInterval"] == {"Hour": 21, "Minute": 20}
 assert nightly["RunAtLoad"] is False
 assert nightly["ProgramArguments"] == [
-    "/bin/bash", "__HOME__/.config/claudemaxxing/cogload-nightly.sh"]
+    "/bin/bash", "__HOME__/.config/orchestratormaxxing/cogload-nightly.sh"]
 
 catchup = plistlib.loads(catchup_path.read_bytes())
 assert catchup["RunAtLoad"] is True
@@ -41,7 +41,7 @@ assert catchup["KeepAlive"] == {"SuccessfulExit": False}
 assert catchup["ThrottleInterval"] == 300
 assert "StartCalendarInterval" not in catchup
 assert catchup["ProgramArguments"] == [
-    "/bin/bash", "__HOME__/.config/claudemaxxing/cogload-catchup.sh"]
+    "/bin/bash", "__HOME__/.config/orchestratormaxxing/cogload-catchup.sh"]
 assert catchup["StandardOutPath"].endswith("/cogload/catchup.log")
 assert catchup["StandardErrorPath"] == catchup["StandardOutPath"]
 PY
@@ -96,7 +96,7 @@ SH
 }
 
 wiring_contract() {
-  for token in cogload-catchup.sh com.claudemaxxing.cogload-catchup.plist; do
+  for token in cogload-catchup.sh com.orchestratormaxxing.cogload-catchup.plist; do
     grep -q "$token" "$INSTALL" || return 1
     grep -q "$token" "$SETUP" || return 1
   done

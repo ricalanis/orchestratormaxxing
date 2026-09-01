@@ -15,7 +15,7 @@ codex = (root / ".codex/agents/ollama-worker.toml").read_text()
 oll = runpy.run_path(root / "bin/oll")
 playbook = (root / "knowledge/delegation-playbook.md").read_text()
 claude_lane = (root / ".claude/commands/cheap-delegate.md").read_text()
-codex_lane = (root / "plugins/claudemaxxing/skills/cheap-delegate/SKILL.md").read_text()
+codex_lane = (root / "plugins/orchestratormaxxing/skills/cheap-delegate/SKILL.md").read_text()
 oplanner = (root / "opencode/agents/oplanner.md").read_text()
 
 for text, label in ((routing, "provider routing"), (claude, "Claude worker"), (codex, "Codex worker")):

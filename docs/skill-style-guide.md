@@ -1,6 +1,6 @@
 # Skill style guide
 
-Authoring contract for `plugins/claudemaxxing/skills/*/SKILL.md`.
+Authoring contract for `plugins/orchestratormaxxing/skills/*/SKILL.md`.
 
 Harvested 2026-07-25 from gentle-ai's `skill-creator/references/skill-style-guide.md`
 during the example-client-install audit. Adopted selectively — what we rejected, and why, is at
@@ -62,7 +62,7 @@ session. It should be the **smallest**, not the largest.
 
 ## Enforcement
 
-`bin/harness-verify` warns when any `plugins/claudemaxxing/skills/*/SKILL.md` body
+`bin/harness-verify` warns when any `plugins/orchestratormaxxing/skills/*/SKILL.md` body
 exceeds the 1000-token hard maximum. Everything else here is convention, and is stated
 as convention rather than dressed up as a gate — prose that claims to be binding without
 an exit code behind it is the failure mode this whole audit was about.

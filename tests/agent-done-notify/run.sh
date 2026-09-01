@@ -21,21 +21,21 @@ fail() { printf 'agent-done-notify contract: %s\n' "$*" >&2; exit 1; }
 # without changing the production notifier.
 wc() { command wc "$@" | tr -d '[:space:]'; }
 
-mkdir -p "$TMP/bin" "$TMP/home/.config/claudemaxxing"
+mkdir -p "$TMP/bin" "$TMP/home/.config/orchestratormaxxing"
 export HOME="$TMP/home"
 # fleet.env fixture — exercises the parser's whole grammar (comment, bare
 # KEY=VALUE, `export ` prefix, double quotes) with tenant-neutral values.
-FLEET_ENV="$HOME/.config/claudemaxxing/fleet.env"
+FLEET_ENV="$HOME/.config/orchestratormaxxing/fleet.env"
 cat > "$FLEET_ENV" <<'ENV'
-# claudemaxxing fleet identity (contract fixture)
-CLAUDEMAXXING_NOTIFY_TARGET=telegram:100:4242
-export CLAUDEMAXXING_NOTIFY_RELAY="user@fleet-server"
-CLAUDEMAXXING_DASHBOARD_URL=https://fleet-server.example:5555
-CLAUDEMAXXING_SERVER_HOSTNAME=fleet-server
+# orchestratormaxxing fleet identity (contract fixture)
+ORCHESTRATORMAXXING_NOTIFY_TARGET=telegram:100:4242
+export ORCHESTRATORMAXXING_NOTIFY_RELAY="user@fleet-server"
+ORCHESTRATORMAXXING_DASHBOARD_URL=https://fleet-server.example:5555
+ORCHESTRATORMAXXING_SERVER_HOSTNAME=fleet-server
 ENV
 # The real machine's fleet identity must never leak into the fixture.
-unset CLAUDEMAXXING_FLEET_ENV CLAUDEMAXXING_NOTIFY_TARGET CLAUDEMAXXING_NOTIFY_RELAY \
-      CLAUDEMAXXING_DASHBOARD_URL CLAUDEMAXXING_SERVER_HOSTNAME 2>/dev/null || true
+unset ORCHESTRATORMAXXING_FLEET_ENV ORCHESTRATORMAXXING_NOTIFY_TARGET ORCHESTRATORMAXXING_NOTIFY_RELAY \
+      ORCHESTRATORMAXXING_DASHBOARD_URL ORCHESTRATORMAXXING_SERVER_HOSTNAME 2>/dev/null || true
 # The tool asks tmux for the session name only when $TMUX is set; keep the
 # baseline cases tmux-free so the test is hermetic inside a real tmux session.
 unset TMUX 2>/dev/null || true
@@ -79,7 +79,7 @@ payload=$(python3 -c "import json;print(json.dumps({
   'transcript_path':'$TRANSCRIPT'}))")
 out="$(printf '%s' "$payload" | PATH="$BASEPATH" "$TOOL")" || fail 'Stop run failed'
 [[ -z "$out" ]] || fail 'stdout must stay empty (hook safety)'
-grep -q -- '--to telegram:100:4242' "$CALLS" || fail 'target must come from fleet.env CLAUDEMAXXING_NOTIFY_TARGET'
+grep -q -- '--to telegram:100:4242' "$CALLS" || fail 'target must come from fleet.env ORCHESTRATORMAXXING_NOTIFY_TARGET'
 msg="$(cat "$MSGDIR"/msg.1)"
 printf '%s' "$msg" | grep 'miproyecto' >/dev/null || fail 'message must name the project'
 printf '%s' "$msg" | grep 'Terminé el fix de sessions.py' >/dev/null || fail 'message must carry the summary extract'
@@ -88,10 +88,10 @@ printf '%s' "$msg" | grep $'\x1b' >/dev/null && fail 'ANSI escapes must be strip
 [[ "$(printf '%s' "$msg" | wc -c)" -le 600 ]] || fail 'message must stay bounded'
 
 # --- 2. notify-target file overrides the destination ---
-printf 'telegram:100:9999\n' > "$HOME/.config/claudemaxxing/notify-target"
+printf 'telegram:100:9999\n' > "$HOME/.config/orchestratormaxxing/notify-target"
 printf '%s' "$payload" | PATH="$BASEPATH" "$TOOL" || fail 'override run failed'
 grep -q -- '--to telegram:100:9999' "$CALLS" || fail 'notify-target file must override the destination'
-rm -f "$HOME/.config/claudemaxxing/notify-target"
+rm -f "$HOME/.config/orchestratormaxxing/notify-target"
 
 # --- 3. Notification → needs-input message, then a cooldown swallows repeats ---
 note=$(python3 -c "import json;print(json.dumps({
@@ -131,7 +131,7 @@ msg="$(cat "$MSGDIR"/msg.$after)"
 printf '%s' "$msg" | grep 'Refactor listo' >/dev/null || fail 'codex message must carry last_assistant_message'
 printf '%s' "$msg" | grep 'otroproyecto' >/dev/null || fail 'codex message must name the project'
 
-# --- 5b. OpenCode stop (claudemaxxing-notify plugin payload) → notifies ---
+# --- 5b. OpenCode stop (orchestratormaxxing-notify plugin payload) → notifies ---
 # Same shape as Codex: the host hands the final text directly.
 oc=$(python3 -c "import json;print(json.dumps({
   'hook_event_name':'Stop','session_id':'oc1','cwd':'/tmp/otroproyecto',
@@ -144,7 +144,7 @@ msg="$(cat "$MSGDIR"/msg.$after)"
 printf '%s' "$msg" | grep 'Investigación terminada' >/dev/null || fail 'opencode message must carry last_assistant_message'
 printf '%s' "$msg" | grep 'OpenCode' >/dev/null || fail 'opencode message must name the OpenCode host'
 
-# --- 6. No hermes → relays over `tailscale ssh <CLAUDEMAXXING_NOTIFY_RELAY>`; message intact ---
+# --- 6. No hermes → relays over `tailscale ssh <ORCHESTRATORMAXXING_NOTIFY_RELAY>`; message intact ---
 rm -f "$TMP/bin/hermes"
 cat > "$TMP/bin/tailscale" <<'SH'
 #!/bin/sh
@@ -168,7 +168,7 @@ printf '%s' "$msg" | grep 'Terminé el fix de sessions.py' >/dev/null || fail 'r
 # Proven red against the pre-fleet.env tool, which relayed to a built-in
 # tenant target through tailscale whenever hermes was missing.
 mv "$FLEET_ENV" "$FLEET_ENV.off"
-rm -f "$TMP/bin/hermes" "$HOME/.config/claudemaxxing/notify-target"
+rm -f "$TMP/bin/hermes" "$HOME/.config/orchestratormaxxing/notify-target"
 export TSLOG="$TMP/tailscale.log"; : > "$TSLOG"
 cat > "$TMP/bin/tailscale" <<'SH'
 #!/bin/sh
@@ -182,14 +182,14 @@ t1=$(python3 -c 'import time;print(int(time.time()*1000))')
 [[ -z "$out" ]] || fail 'unconfigured run must stay silent'
 [[ ! -s "$TSLOG" ]] || fail "unconfigured machine must spawn no transport (tailscale got: $(head -1 "$TSLOG"))"
 [[ $((t1 - t0)) -lt 1000 ]] || fail "unconfigured run must return in < 1 s (took $((t1 - t0)) ms)"
-# control: the same run with CLAUDEMAXXING_FLEET_ENV naming the moved file
+# control: the same run with ORCHESTRATORMAXXING_FLEET_ENV naming the moved file
 # relays again — the empty log above came from the absent file, not a dead
 # shim; and an unreadable fleet.env (a directory) degrades to not configured.
 : > "$TSLOG"
-printf '%s' "$payload" | CLAUDEMAXXING_FLEET_ENV="$FLEET_ENV.off" PATH="$BASEPATH" "$TOOL" || fail 'env-path run failed'
-grep -q 'ssh user@fleet-server' "$TSLOG" || fail 'CLAUDEMAXXING_FLEET_ENV must select the fleet.env path'
+printf '%s' "$payload" | ORCHESTRATORMAXXING_FLEET_ENV="$FLEET_ENV.off" PATH="$BASEPATH" "$TOOL" || fail 'env-path run failed'
+grep -q 'ssh user@fleet-server' "$TSLOG" || fail 'ORCHESTRATORMAXXING_FLEET_ENV must select the fleet.env path'
 : > "$TSLOG"
-printf '%s' "$payload" | CLAUDEMAXXING_FLEET_ENV="$TMP" PATH="$BASEPATH" "$TOOL" || fail 'unreadable fleet.env run failed'
+printf '%s' "$payload" | ORCHESTRATORMAXXING_FLEET_ENV="$TMP" PATH="$BASEPATH" "$TOOL" || fail 'unreadable fleet.env run failed'
 [[ ! -s "$TSLOG" ]] || fail 'an unreadable fleet.env must degrade to not configured'
 rm -f "$TMP/bin/tailscale"
 mv "$FLEET_ENV.off" "$FLEET_ENV"
@@ -232,7 +232,7 @@ cat > "$TMP/bin/tmux" <<'SH'
 printf 'claude-sesiontest\n'
 SH
 chmod +x "$TMP/bin/tmux"
-printf 'local\n' > "$HOME/.config/claudemaxxing/notify-host-key"
+printf 'local\n' > "$HOME/.config/orchestratormaxxing/notify-host-key"
 before=$(wc -l < "$CALLS")
 printf '%s' "$payload" | TMUX=dummy PATH="$BASEPATH" "$TOOL" || fail 'link run failed'
 after=$(wc -l < "$CALLS")
@@ -250,12 +250,12 @@ after=$(wc -l < "$CALLS")
 tail -1 "$MSGDIR/msg.$after" | grep "open=local/claude-sesiontest" >/dev/null || \
   fail 'needs-input message must carry the deep-link'
 
-# host label: a session on the fleet server (CLAUDEMAXXING_SERVER_HOSTNAME,
+# host label: a session on the fleet server (ORCHESTRATORMAXXING_SERVER_HOSTNAME,
 # env override > fleet.env) is labelled "local"; any other machine keeps its
 # own short hostname; the notify-host-key file still wins over both.
-rm -f "$HOME/.config/claudemaxxing/notify-host-key"
+rm -f "$HOME/.config/orchestratormaxxing/notify-host-key"
 me="$(python3 -c 'import socket;print(socket.gethostname().lower().split(".",1)[0])')"
-printf '%s' "$payload" | TMUX=dummy CLAUDEMAXXING_SERVER_HOSTNAME="$me" PATH="$BASEPATH" "$TOOL" || \
+printf '%s' "$payload" | TMUX=dummy ORCHESTRATORMAXXING_SERVER_HOSTNAME="$me" PATH="$BASEPATH" "$TOOL" || \
   fail 'server-host run failed'
 after=$(wc -l < "$CALLS")
 tail -1 "$MSGDIR/msg.$after" | grep 'open=local/claude-sesiontest' >/dev/null || \
@@ -265,7 +265,7 @@ after=$(wc -l < "$CALLS")
 me_q="$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$me")"
 tail -1 "$MSGDIR/msg.$after" | grep "open=$me_q/claude-sesiontest" >/dev/null || \
   fail "a machine that is not the fleet server keeps its hostname (got: $(tail -1 "$MSGDIR/msg.$after"))"
-printf 'local\n' > "$HOME/.config/claudemaxxing/notify-host-key"
+printf 'local\n' > "$HOME/.config/orchestratormaxxing/notify-host-key"
 
 # a session name needing quoting is percent-encoded
 cat > "$TMP/bin/tmux" <<'SH'
@@ -293,23 +293,23 @@ tail -1 "$MSGDIR/msg.$after" | grep '^https://otra.base:9999/?tab=sessions' >/de
   fail 'DASHBOARD_URL env must override the link base'
 
 # dashboard-url file set to off → no link at all
-printf 'off\n' > "$HOME/.config/claudemaxxing/dashboard-url"
+printf 'off\n' > "$HOME/.config/orchestratormaxxing/dashboard-url"
 printf '%s' "$payload" | PATH="$BASEPATH" "$TOOL" || fail 'link-off run failed'
 after=$(wc -l < "$CALLS")
 grep -q 'https://' "$MSGDIR/msg.$after" && fail 'dashboard-url=off must suppress the link'
-rm -f "$HOME/.config/claudemaxxing/dashboard-url" "$HOME/.config/claudemaxxing/notify-host-key"
+rm -f "$HOME/.config/orchestratormaxxing/dashboard-url" "$HOME/.config/orchestratormaxxing/notify-host-key"
 
 # no built-in tenant default: with fleet.env absent and only the legacy
 # notify-target file set, the message still goes out (the legacy override
 # wins) but carries NO dashboard link — there is no default base to fall to.
 mv "$FLEET_ENV" "$FLEET_ENV.off"
-printf 'telegram:100:4242\n' > "$HOME/.config/claudemaxxing/notify-target"
+printf 'telegram:100:4242\n' > "$HOME/.config/orchestratormaxxing/notify-target"
 before=$(wc -l < "$CALLS")
 printf '%s' "$payload" | PATH="$BASEPATH" "$TOOL" || fail 'legacy-target run failed'
 after=$(wc -l < "$CALLS")
 [[ "$after" -eq $((before + 1)) ]] || fail 'legacy notify-target must still deliver without fleet.env'
 grep -q 'https://' "$MSGDIR/msg.$after" && fail 'without fleet.env there must be no default dashboard link'
-rm -f "$HOME/.config/claudemaxxing/notify-target"
+rm -f "$HOME/.config/orchestratormaxxing/notify-target"
 mv "$FLEET_ENV.off" "$FLEET_ENV"
 
 # --- 11. The legacy generic project hook is gone (dedupe: ONE notifier) ---
@@ -317,7 +317,7 @@ grep -q 'Session completed' "$ROOT/.claude/settings.json" && \
   fail 'repo settings still register the generic Session completed hook'
 
 # --- 12. OpenCode plugin: permission.asked → needs-input via the REAL tool ---
-# Executes the actual claudemaxxing-notify.js under node/bun (lq-3c820901):
+# Executes the actual orchestratormaxxing-notify.js under node/bun (lq-3c820901):
 # the plugin must bridge OpenCode's permission.asked EVENT (verified emitted at
 # runtime; the 'permission.ask' plugin HOOK is dead code and must NOT be
 # registered) into a PermissionRequest payload, which then flows through the
@@ -333,8 +333,8 @@ for cand in /opt/homebrew/bin/node /usr/local/bin/node "$HOME/.local/bin/node" \
 done
 [[ -n "$JSRUN" ]] || fail 'no node/bun runtime found — cannot verify the OpenCode plugin'
 {
-  PLUGIN="$ROOT/opencode/plugins/claudemaxxing-notify.js"
-  [[ -f "$PLUGIN" ]] || fail 'claudemaxxing-notify.js plugin missing'
+  PLUGIN="$ROOT/opencode/plugins/orchestratormaxxing-notify.js"
+  [[ -f "$PLUGIN" ]] || fail 'orchestratormaxxing-notify.js plugin missing'
   cat > "$TMP/plugin-harness.mjs" <<'JS'
 import { pathToFileURL } from "node:url"
 import { writeFileSync } from "node:fs"
@@ -351,7 +351,7 @@ const client = { session: { messages: async () => ({ data: [
     parts: [{ type: "text", text: "listo el análisis" }] },
 ] }) } }
 const mod = await import(pathToFileURL(pluginPath).href)
-const hooks = await mod.ClaudemaxxingNotify({ directory: "/tmp/ocproyecto", client, $ })
+const hooks = await mod.OrchestratormaxxingNotify({ directory: "/tmp/ocproyecto", client, $ })
 if (Object.prototype.hasOwnProperty.call(hooks, "permission.ask")) {
   console.error("plugin registers the never-fired permission.ask hook (dead code)")
   process.exit(1)
@@ -363,8 +363,8 @@ await hooks.event({ event: { type: "permission.asked", properties: {
 const permCalls = calls.length
 await hooks.event({ event: { type: "session.idle", properties: { sessionID: "oc-idle-1" } } })
 const interactiveBindCalls = calls.filter((c) => c.text.includes("o bind-event --json")).length
-process.env.CLAUDEMAXXING_O_DELEGATED = "1"
-const delegatedHooks = await mod.ClaudemaxxingNotify({ directory: "/tmp/ocproyecto", client, $ })
+process.env.ORCHESTRATORMAXXING_O_DELEGATED = "1"
+const delegatedHooks = await mod.OrchestratormaxxingNotify({ directory: "/tmp/ocproyecto", client, $ })
 await delegatedHooks.event({ event: { type: "session.idle", properties: { sessionID: "oc-idle-1" } } })
 // Malformed events must not crash the handler (best-effort contract): a
 // permission.asked with no properties still alerts with the fallback reason.

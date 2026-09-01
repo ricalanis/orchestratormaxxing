@@ -16,7 +16,7 @@
 #   ollama    -> bin/oll            (Ollama Cloud, V4 Pro)       key: opencode auth.json
 #   openai    -> codex exec         (ChatGPT Plus, gpt-5.5)      auth: ~/.codex/auth.json
 #   anthropic -> claude -p          (Claude Pro/Max, sonnet)     auth: claude CLI login
-#   xai       -> vibe-tools ask     (Grok 4)                     key: ~/.config/claudemaxxing/.env
+#   xai       -> vibe-tools ask     (Grok 4)                     key: ~/.config/orchestratormaxxing/.env
 #
 # anthropic rides Anthropic's OWN CLI on purpose: Claude Pro/Max OAuth inside
 # third-party harnesses is prohibited (OpenCode removed it in 1.3.0), so any
@@ -26,11 +26,11 @@
 # Flags: --model M  --system S  --max-tokens N  --timeout SECS
 # Exit: 0 + answer on stdout | 1 + reason on stderr (unavailable / error).
 set -uo pipefail
-export CLAUDEMAXXING_HARNESS_CHILD=1
+export ORCHESTRATORMAXXING_HARNESS_CHILD=1
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OLL="$REPO/bin/oll"
-CLAUDEMAXXING_ENV="$HOME/.config/claudemaxxing/.env"
+ORCHESTRATORMAXXING_ENV="$HOME/.config/orchestratormaxxing/.env"
 CODEX_AUTH="$HOME/.codex/auth.json"
 OPENCODE_AUTH="$HOME/.local/share/opencode/auth.json"
 
@@ -111,8 +111,8 @@ vibe_ask() { # $1=provider $2=default-model
   local provider="$1" model="${MODEL:-$2}"
   local prompt; prompt="$(cat)"
   [ -n "$SYSTEM" ] && prompt="$SYSTEM"$'\n\n'"$prompt"
-  # The xAI key lives in the claudemaxxing env, so export it explicitly for Grok.
-  local xai; xai="$(readenv "$CLAUDEMAXXING_ENV" XAI_API_KEY)"
+  # The xAI key lives in the orchestratormaxxing env, so export it explicitly for Grok.
+  local xai; xai="$(readenv "$ORCHESTRATORMAXXING_ENV" XAI_API_KEY)"
   local err; err="$(mktemp)"
   local ans
   ans="$(export XAI_API_KEY="${xai:-${XAI_API_KEY:-}}"; with_timeout \

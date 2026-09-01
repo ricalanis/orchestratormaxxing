@@ -496,8 +496,8 @@ def _row_channel_expectation(recs: list[dict]) -> tuple[bool, bool]:
     return (screen_exp, light_exp)
 
 
-GNOME_BUS = "org.claudemaxxing.Cogload"
-GNOME_PATH = "/org/claudemaxxing/Cogload"
+GNOME_BUS = "org.orchestratormaxxing.Cogload"
+GNOME_PATH = "/org/orchestratormaxxing/Cogload"
 # Coarser than the X11 sampler's 3 s, and that is a STATED TRADE-OFF, not a
 # free win: each sample forks gdbus (~8 ms measured for the sibling `tmux ls`
 # fork), so 3 s would cost ~0.27% of a core — more than the entire daemon
@@ -1378,7 +1378,7 @@ def cmd_daemon(args) -> int:
 # --------------------------------------------------------------------- reading
 
 
-MAC_AGENT = "com.claudemaxxing.cogload-keys"
+MAC_AGENT = "com.orchestratormaxxing.cogload-keys"
 
 
 def _is_mac() -> bool:

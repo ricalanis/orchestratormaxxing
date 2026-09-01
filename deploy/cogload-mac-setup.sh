@@ -7,21 +7,21 @@
 # — it is the one step in the whole harness that cannot be automated.
 set -uo pipefail
 
-# The fleet hub is tenant identity: COGLOAD_HUB env, else CLAUDEMAXXING_SERVER_SSH from
-# ~/.config/claudemaxxing/fleet.env (env > fleet.env > empty). No built-in default.
-_fleet_env="${CLAUDEMAXXING_FLEET_ENV:-$HOME/.config/claudemaxxing/fleet.env}"
+# The fleet hub is tenant identity: COGLOAD_HUB env, else ORCHESTRATORMAXXING_SERVER_SSH from
+# ~/.config/orchestratormaxxing/fleet.env (env > fleet.env > empty). No built-in default.
+_fleet_env="${ORCHESTRATORMAXXING_FLEET_ENV:-$HOME/.config/orchestratormaxxing/fleet.env}"
 _fleet_val(){ [ -f "$_fleet_env" ] && awk -F= -v k="$1" '$0 !~ /^[[:space:]]*#/ && $1 ~ ("^(export[[:space:]]+)?" k "$") {v=$2; gsub(/^["'"'"']|["'"'"']$/, "", v); print v; exit}' "$_fleet_env"; }
-HUB="${COGLOAD_HUB:-${CLAUDEMAXXING_SERVER_SSH:-$(_fleet_val CLAUDEMAXXING_SERVER_SSH)}}"
+HUB="${COGLOAD_HUB:-${ORCHESTRATORMAXXING_SERVER_SSH:-$(_fleet_val ORCHESTRATORMAXXING_SERVER_SSH)}}"
 if [ -z "$HUB" ]; then
-  echo "cogload-mac-setup: no fleet hub configured (set COGLOAD_HUB or CLAUDEMAXXING_SERVER_SSH in $_fleet_env)" >&2
+  echo "cogload-mac-setup: no fleet hub configured (set COGLOAD_HUB or ORCHESTRATORMAXXING_SERVER_SSH in $_fleet_env)" >&2
   exit 2
 fi
 STORE="$HOME/.local/share/cogload"
 VENV="$STORE/venv"
 BIN="$HOME/.local/bin/cogload"
-PLIST="$HOME/Library/LaunchAgents/com.claudemaxxing.cogload-keys.plist"
-NIGHTLY_PLIST="$HOME/Library/LaunchAgents/com.claudemaxxing.cogload-nightly.plist"
-CATCHUP_PLIST="$HOME/Library/LaunchAgents/com.claudemaxxing.cogload-catchup.plist"
+PLIST="$HOME/Library/LaunchAgents/com.orchestratormaxxing.cogload-keys.plist"
+NIGHTLY_PLIST="$HOME/Library/LaunchAgents/com.orchestratormaxxing.cogload-nightly.plist"
+CATCHUP_PLIST="$HOME/Library/LaunchAgents/com.orchestratormaxxing.cogload-catchup.plist"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 say() { printf '\n\033[1;36m▸ %s\033[0m\n' "$*"; }
@@ -62,7 +62,7 @@ echo "  guarantee. Keys and mouse are collected honestly instead."
 
 say "4/7  collector launch agent"
 mkdir -p "$HOME/Library/LaunchAgents"
-sed "s|__HOME__|$HOME|g" "$REPO/deploy/com.claudemaxxing.cogload-keys.plist" > "$PLIST"
+sed "s|__HOME__|$HOME|g" "$REPO/deploy/com.orchestratormaxxing.cogload-keys.plist" > "$PLIST"
 ok "$PLIST"
 
 say "5/7  join the fleet (digest rows only, ~1 KB/day over Tailscale)"
@@ -71,17 +71,17 @@ if "$BIN" fleet push --dry-run >/dev/null 2>&1; then ok "hub reachable: $HUB"
 else bad "hub not reachable yet — fix SSH to $HUB, then: cogload fleet push"; fi
 
 say "6/7  close-of-day + login catch-up"
-mkdir -p "$HOME/.config/claudemaxxing"
+mkdir -p "$HOME/.config/orchestratormaxxing"
 install -m 0755 "$REPO/deploy/cogload-nightly.sh" \
-  "$HOME/.config/claudemaxxing/cogload-nightly.sh"
+  "$HOME/.config/orchestratormaxxing/cogload-nightly.sh"
 install -m 0755 "$REPO/deploy/cogload-catchup.sh" \
-  "$HOME/.config/claudemaxxing/cogload-catchup.sh"
-sed "s|__HOME__|$HOME|g" "$REPO/deploy/com.claudemaxxing.cogload-nightly.plist" \
+  "$HOME/.config/orchestratormaxxing/cogload-catchup.sh"
+sed "s|__HOME__|$HOME|g" "$REPO/deploy/com.orchestratormaxxing.cogload-nightly.plist" \
   > "$NIGHTLY_PLIST"
-sed "s|__HOME__|$HOME|g" "$REPO/deploy/com.claudemaxxing.cogload-catchup.plist" \
+sed "s|__HOME__|$HOME|g" "$REPO/deploy/com.orchestratormaxxing.cogload-catchup.plist" \
   > "$CATCHUP_PLIST"
 for job in nightly catchup; do
-  label="com.claudemaxxing.cogload-$job"
+  label="com.orchestratormaxxing.cogload-$job"
   plist="$HOME/Library/LaunchAgents/$label.plist"
   launchctl bootout "gui/$UID/$label" >/dev/null 2>&1 || true
   if launchctl bootstrap "gui/$UID" "$plist"; then ok "$label armed"

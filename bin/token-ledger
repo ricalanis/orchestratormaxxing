@@ -39,7 +39,7 @@ _INTERPRETERS = frozenset((
 # marker followed by `/` or `.` is a PATH COMPONENT, not an invocation.
 # Both false positives were measured on the real host, and both inflated the one
 # number this ledger exists to make trustworthy — the list of loops with no cap:
-#   `claudemaxxing`        → substring of the deploy directory, flagged every
+#   `orchestratormaxxing`        → substring of the deploy directory, flagged every
 #                            hermes-* and cogload-* timer (9 phantom rows)
 #   `~/.claude/projects`   → cogload-nightly READS transcripts and spends zero
 #                            model tokens; it was the last phantom left
@@ -291,7 +291,7 @@ def _read_service_chain(service_path):
     """Return (exec_start_args, wrapper_script_text). One level deep.
 
     exec_start_args is the ExecStart value MINUS the first token (the script
-    path) — a path like ~/.config/claudemaxxing/loop-cron.sh contains "claude"
+    path) — a path like ~/.config/orchestratormaxxing/loop-cron.sh contains "claude"
     as a substring of the directory name, which would make every unit in that
     directory falsely agent-invoking. The path is only used to locate the
     script; markers are searched in the script's CONTENTS and any ExecStart
@@ -332,7 +332,7 @@ def _read_service_chain(service_path):
             idx = 1 if len(parts) > 1 else 0
     script_path = parts[idx] if parts and idx < len(parts) else None
     # Markers are searched in the script's CONTENTS and in the arguments AROUND
-    # it — never in the script's own path, because ~/.config/claudemaxxing/…
+    # it — never in the script's own path, because ~/.config/orchestratormaxxing/…
     # contains "claude" as a substring of the directory name and would make
     # every unit deployed there falsely agent-invoking.
     exec_args = " ".join(p for i, p in enumerate(parts) if i != idx)

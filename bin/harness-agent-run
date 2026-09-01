@@ -103,7 +103,7 @@ PY
     run_bounded "${CODEX_BIN:-codex}" exec \
       --dangerously-bypass-approvals-and-sandbox \
       --dangerously-bypass-hook-trust \
-      'Use $claudemaxxing:self-improve to run exactly one governed round. Obey its unattended/load-bearing PROPOSED gate.'
+      'Use $orchestratormaxxing:self-improve to run exactly one governed round. Obey its unattended/load-bearing PROPOSED gate.'
     ;;
   *)
     echo "Unknown HARNESS_HOST '$HOST' (want claude or codex)" >&2

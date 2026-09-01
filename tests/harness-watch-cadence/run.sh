@@ -54,7 +54,7 @@ mk_repo() {
 #!/usr/bin/env python3
 import json, os, time
 with open("$repo/hv.log", "a") as fh:
-    fh.write("invoked marker=%s\n" % os.environ.get("CLAUDEMAXXING_HARNESS_CHILD", "unset"))
+    fh.write("invoked marker=%s\n" % os.environ.get("ORCHESTRATORMAXXING_HARNESS_CHILD", "unset"))
 time.sleep($sleep_s)
 print(json.dumps({"errors": 0, "warnings": 0, "inconclusive": 0,
                   "issues": [], "contract_results": []}))
@@ -77,7 +77,7 @@ SH
   printf '%s' "$repo"
 }
 hv_count() { wc -l < "$1/hv.log" | tr -d ' '; }
-tick() { ( cd "$1" && shift && env -u CLAUDEMAXXING_HARNESS_CHILD "$@" \
+tick() { ( cd "$1" && shift && env -u ORCHESTRATORMAXXING_HARNESS_CHILD "$@" \
              python3 "$ROOT/bin/loop-tick" --gate --quiet >/dev/null 2>&1; echo $? ); }
 
 # ── D1: a cold tick watches ──────────────────────────────────────────────────
@@ -184,7 +184,7 @@ fi
 # ── D6: single-flight — N concurrent ticks produce at most ONE watch ─────────
 repo="$(mk_repo d6 0 6)"        # slow verifier so the ticks genuinely overlap
 for _ in 1 2 3 4 5; do
-  ( cd "$repo" && env -u CLAUDEMAXXING_HARNESS_CHILD \
+  ( cd "$repo" && env -u ORCHESTRATORMAXXING_HARNESS_CHILD \
       python3 "$ROOT/bin/loop-tick" --gate --quiet >/dev/null 2>&1 ) &
 done
 wait
@@ -199,7 +199,7 @@ fi
 # The old code mapped "I could not measure it in time" onto "the observer is
 # broken" and enqueued a flaw for it, 611 times in one day.
 repo="$(mk_repo d7 0 25)"
-( cd "$repo" && env -u CLAUDEMAXXING_HARNESS_CHILD HARNESS_VERIFY_TIMEOUT_SECONDS=3 \
+( cd "$repo" && env -u ORCHESTRATORMAXXING_HARNESS_CHILD HARNESS_VERIFY_TIMEOUT_SECONDS=3 \
     python3 "$ROOT/bin/loop-tick" --gate >"$repo/out.txt" 2>&1 )
 if grep -qi 'timed*.out\|timeout' "$repo/out.txt" "$ROOT/knowledge/loop-tick.log" 2>/dev/null; then
   ok D7 "a slow verifier is reported as a timeout"
@@ -237,7 +237,7 @@ fi
 # drops the work cannot pass on latency alone.
 repo="$(mk_repo d9 0 3)"
 start_ms="$(python3 -c 'import time; print(int(time.monotonic() * 1000))')"
-( cd "$repo" && env -u CLAUDEMAXXING_HARNESS_CHILD \
+( cd "$repo" && env -u ORCHESTRATORMAXXING_HARNESS_CHILD \
     python3 "$ROOT/bin/loop-tick" --kick --quiet >/dev/null 2>&1 )
 kick_rc=$?
 end_ms="$(python3 -c 'import time; print(int(time.monotonic() * 1000))')"
@@ -279,7 +279,7 @@ def capture(*args, **kwargs):
     seen["kwargs"] = kwargs
     return object()
 mod.subprocess.Popen = capture
-os.environ["CLAUDEMAXXING_HARNESS_CHILD"] = "1"
+os.environ["ORCHESTRATORMAXXING_HARNESS_CHILD"] = "1"
 assert mod.kick_watch(False) == 0
 kw = seen["kwargs"]
 assert kw["stdin"] is subprocess.DEVNULL
@@ -287,7 +287,7 @@ assert kw["stdout"] is subprocess.DEVNULL
 assert kw["stderr"] is subprocess.DEVNULL
 assert kw["start_new_session"] is True
 assert kw["close_fds"] is True
-assert "CLAUDEMAXXING_HARNESS_CHILD" not in kw["env"]
+assert "ORCHESTRATORMAXXING_HARNESS_CHILD" not in kw["env"]
 assert seen["args"][0][-2:] == ["--gate", "--quiet"]
 
 def fail(*args, **kwargs):
@@ -309,7 +309,7 @@ else
 fi
 
 repo="$(mk_repo d10guard 0 0)"
-( cd "$repo" && env CLAUDEMAXXING_HARNESS_CHILD=1 \
+( cd "$repo" && env ORCHESTRATORMAXXING_HARNESS_CHILD=1 \
     python3 "$ROOT/bin/loop-tick" --kick --quiet >/dev/null 2>&1 )
 guard_rc=$?
 sleep 0.3
@@ -318,7 +318,7 @@ if [ "$guard_rc" -eq 0 ] && [ ! -s "$repo/hv.log" ]; then
 else
   bad D10b "marked SessionStart kick spawned work or returned $guard_rc"
 fi
-( cd "$repo" && env CLAUDEMAXXING_HARNESS_CHILD=1 \
+( cd "$repo" && env ORCHESTRATORMAXXING_HARNESS_CHILD=1 \
     python3 "$ROOT/bin/loop-tick" --gate --quiet >/dev/null 2>&1 )
 marked_gate_rc=$?
 if [ "$marked_gate_rc" -eq 1 ]; then

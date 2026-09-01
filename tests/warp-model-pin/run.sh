@@ -23,7 +23,7 @@ STALE="6095c7ee-9a9c-4892-b10f-d6f32cdf3bbc"
 
 make_home() {   # $1 home · $2 seeded base_model · $3 history model_ids
   local home="$1" seed="$2" history="$3"
-  mkdir -p "$home/.config/warp-terminal" "$home/.local/state/warp-terminal" "$home/.config/claudemaxxing"
+  mkdir -p "$home/.config/warp-terminal" "$home/.local/state/warp-terminal" "$home/.config/orchestratormaxxing"
   # Includes the multi-line inline table with a trailing comma that Warp really
   # writes and stdlib tomllib rejects (see C10).
   cat > "$home/.config/warp-terminal/settings.toml" <<TOML
@@ -134,7 +134,7 @@ set +e; run "$H" --check >/dev/null 2>&1; rc=$?; set -e
 
 # C7: explicit config override outranks discovery
 H="$SCRATCH/c7"; make_home "$H" "$STALE" "$UUID=deepseek-v4-flash:0731"
-printf '# pin\nfrom-conf-id\n' > "$H/.config/claudemaxxing/warp-model.conf"
+printf '# pin\nfrom-conf-id\n' > "$H/.config/orchestratormaxxing/warp-model.conf"
 [ "$(run "$H" --resolve)" = "from-conf-id" ] || fail "C7: config override ignored"
 
 # C8: idempotent

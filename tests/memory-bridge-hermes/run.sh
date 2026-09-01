@@ -44,7 +44,7 @@ ARGS=(--source-dir "$SOURCE" --memory-file "$HERMES/MEMORY.md" --today 2026-08-0
 user_before="$(sha256sum "$HERMES/USER.md")"
 "$TOOL" "${ARGS[@]}" > "$TMP/first.out"
 grep -q '^Hermes-native fact.$' "$HERMES/MEMORY.md"
-grep -q '^\[claudemaxxing\] \[provider-routing\] Provider routing uses Ollama and OpenAI\.$' "$HERMES/MEMORY.md"
+grep -q '^\[orchestratormaxxing\] \[provider-routing\] Provider routing uses Ollama and OpenAI\.$' "$HERMES/MEMORY.md"
 grep -q '^§$' "$HERMES/MEMORY.md"
 ! grep -qE 'provider-old|dashboard-endpoint|private-tool-config|user-routing|inactive-service|unrelated-theory' "$HERMES/MEMORY.md"
 [ "$user_before" = "$(sha256sum "$HERMES/USER.md")" ]
@@ -54,7 +54,7 @@ grep -q 'added=1 updated=0 removed=0' "$TMP/bridge.log"
 memory_before="$(sha256sum "$HERMES/MEMORY.md")"
 "$TOOL" "${ARGS[@]}" > "$TMP/second.out"
 [ "$memory_before" = "$(sha256sum "$HERMES/MEMORY.md")" ]
-[ "$(grep -c '\[claudemaxxing\] \[provider-routing\]' "$HERMES/MEMORY.md")" -eq 1 ]
+[ "$(grep -c '\[orchestratormaxxing\] \[provider-routing\]' "$HERMES/MEMORY.md")" -eq 1 ]
 python3 - "$SOURCE/MEMORY.md" "$SOURCE/provider-routing.md" <<'PY'
 from pathlib import Path
 import sys
@@ -66,7 +66,7 @@ for raw in sys.argv[1:]:
 PY
 "$TOOL" "${ARGS[@]}" > "$TMP/update.out"
 grep -q 'updated=1' "$TMP/update.out"
-[ "$(grep -c '\[claudemaxxing\] \[provider-routing\]' "$HERMES/MEMORY.md")" -eq 1 ]
+[ "$(grep -c '\[orchestratormaxxing\] \[provider-routing\]' "$HERMES/MEMORY.md")" -eq 1 ]
 grep -q 'Provider routing now uses OpenAI and Ollama.' "$HERMES/MEMORY.md"
 
 # C4/C5: dry-run never mutates; the hard character budget omits managed entries.

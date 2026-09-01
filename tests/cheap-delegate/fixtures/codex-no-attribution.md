@@ -7,7 +7,7 @@ Route exactly one task. Keep root Codex as contract author, verifier, and final
 decision-maker.
 
 This routes one bounded execution task. It does not plan or decompose: invoke
-`$claudemaxxing:solplan` for design and fanout only for independent chunks.
+`$orchestratormaxxing:solplan` for design and fanout only for independent chunks.
 
 1. Read `knowledge/delegation-playbook.md` (`## Codex lanes`), then run
    `win-log match --class <c>` and `delegate-ledger stats --class <c> --json`.
@@ -59,7 +59,7 @@ transport behind `o`. OpenCode supplies tools and persistence, not better model 
    An HTTP 500 from GLM is `infra`, not content failure. Retry the same lane
    once, then change runtime/family without consuming a content-repair round.
 
-   Independent multi-chunk work belongs in `$claudemaxxing:fanout`.
+   Independent multi-chunk work belongs in `$orchestratormaxxing:fanout`.
    `o handoff <session> --json` waits for the current turn's typed terminal
    result; `o output <session> --json` is diagnostic observation only. Neither
    accepts or repairs content. Keep repairs in the returned session with `o send`;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""harness-verify — deterministic self-check for the claudemaxxing harness itself.
+"""harness-verify — deterministic self-check for the orchestratormaxxing harness itself.
 
 This is the *verifier* for the self-improvement loop (Claude command + Codex plugin skill).
 The research is explicit (Retrospective Harness Optimization, arXiv:2606.05922) that a
@@ -447,7 +447,7 @@ def run_behavioral_contract(contract_id, command, *, timeout_seconds=30,
             # everything a contract spawns, runs marked as a harness child. This
             # is what stops a contract from starting an agent session whose
             # SessionStart hook re-enters this verifier (incident 2026-08-12).
-            env["CLAUDEMAXXING_HARNESS_CHILD"] = "1"
+            env["ORCHESTRATORMAXXING_HARNESS_CHILD"] = "1"
             env["HARNESS_CONTRACT_ATTEMPT"] = str(number)
             env["HARNESS_TRACE_FILE"] = trace_path
             # Private, per-attempt, invented by this verifier: the only thing a
@@ -992,7 +992,7 @@ def loop_tick_persistence_ok(root):
             # This test drives the real WATCH path, so it must opt out of the
             # harness-child marker main() sets — otherwise the tick under test
             # correctly no-ops and every assertion below fails for the wrong reason.
-            genv.pop("CLAUDEMAXXING_HARNESS_CHILD", None)
+            genv.pop("ORCHESTRATORMAXXING_HARNESS_CHILD", None)
             subprocess.run(["git", "-C", d, "init"], capture_output=True, env=genv, timeout=30)
             proc = subprocess.run([sys.executable, os.path.join(bind, "loop-tick"), "--quiet"],
                                   capture_output=True, text=True, env=genv, cwd=d, timeout=90)
@@ -1111,7 +1111,7 @@ def loop_tick_backpressure_ok(root):
                                      "source": "research", "flaw": "seed %d" % i}) + "\n")
         genv = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
                     GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
-        genv.pop("CLAUDEMAXXING_HARNESS_CHILD", None)   # drives the real watch path
+        genv.pop("ORCHESTRATORMAXXING_HARNESS_CHILD", None)   # drives the real watch path
         subprocess.run(["git", "-C", d, "init"], capture_output=True, env=genv, timeout=30)
         subprocess.run([sys.executable, os.path.join(bind, "loop-tick"), "--intake", "--gate", "--quiet"],
                        capture_output=True, text=True, env=genv, cwd=d, timeout=90)
@@ -1180,7 +1180,7 @@ def loop_tick_ttl_wired_ok(root):
                     GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
         genv.pop("LOOP_QUEUE_DIR", None)
         genv.pop("LOOP_QUEUE_TS", None)
-        genv.pop("CLAUDEMAXXING_HARNESS_CHILD", None)   # drives the real watch path
+        genv.pop("ORCHESTRATORMAXXING_HARNESS_CHILD", None)   # drives the real watch path
         subprocess.run(["git", "-C", d, "init"], capture_output=True, env=genv, timeout=30)
         subprocess.run([sys.executable, os.path.join(bind, "loop-tick"),
                         "--intake", "--gate", "--quiet"],
@@ -1708,8 +1708,8 @@ def shared_memory_behavior_ok(root):
 # comparison is impossible on purpose: install.sh injects a Codex-only routing line,
 # so the three deployed blocks legitimately differ. These phrases are the load-bearing
 # content — their absence means the block was truncated or overwritten.
-DOCTRINE_BEGIN = "<!-- claudemaxxing:orchestrator:begin -->"
-DOCTRINE_END = "<!-- claudemaxxing:orchestrator:end -->"
+DOCTRINE_BEGIN = "<!-- orchestratormaxxing:orchestrator:begin -->"
+DOCTRINE_END = "<!-- orchestratormaxxing:orchestrator:end -->"
 DOCTRINE_SENTINELS = (
     "Frontier orchestrator workers",
     "Iron rule of verification",
@@ -1781,8 +1781,8 @@ KNOWN_CODEX_MARKETPLACE_SOURCES = {
     # "personal" is deliberately NOT pinned to a literal path: the checkout lives at
     # ~/dev on Ubuntu, ~/Dev on the Mac, and harness-verify itself runs from loop
     # worktrees — a realpath pin would manufacture phantom warns (signal-vs-artifact).
-    # Its identity is CONTENT: the source must be a claudemaxxing checkout, verified by
-    # _is_claudemaxxing_checkout below.
+    # Its identity is CONTENT: the source must be a orchestratormaxxing checkout, verified by
+    # _is_orchestratormaxxing_checkout below.
 }
 
 
@@ -1812,9 +1812,9 @@ def _codex_marketplace_identity(entry):
     return f"{kind}:{value}"
 
 
-def _is_claudemaxxing_checkout(path):
-    """True iff `path` is a claudemaxxing checkout: its .agents/plugins/marketplace.json
-    declares the claudemaxxing plugin. Content identity, not a path compare, so the check
+def _is_orchestratormaxxing_checkout(path):
+    """True iff `path` is a orchestratormaxxing checkout: its .agents/plugins/marketplace.json
+    declares the orchestratormaxxing plugin. Content identity, not a path compare, so the check
     holds across machines and worktrees. Unreadable/absent/foreign all return False —
     a clobbered registration must never read as genuine because the payload was odd."""
     if not isinstance(path, str) or not path:
@@ -1826,7 +1826,7 @@ def _is_claudemaxxing_checkout(path):
     except Exception:
         return False
     plugins = manifest.get("plugins") if isinstance(manifest, dict) else None
-    return any(isinstance(p, dict) and p.get("name") == "claudemaxxing"
+    return any(isinstance(p, dict) and p.get("name") == "orchestratormaxxing"
                for p in (plugins if isinstance(plugins, list) else []))
 
 
@@ -1979,7 +1979,7 @@ def deployed_host_state_ok(root, home=None):
     on 2026-07-24 a third-party installer wrote a compaction override into
     ~/.codex/config.toml and widened agents.max_depth to 2, and this gate reported green
     because it only ever read <repo>/.codex/config.toml. It also deleted the deployed
-    claudemaxxing doctrine block from ~/.codex/AGENTS.md, unnoticed for 2h40m.
+    orchestratormaxxing doctrine block from ~/.codex/AGENTS.md, unnoticed for 2h40m.
 
     Skips entirely when the harness is not installed on this machine, so a fresh clone
     or CI checkout stays green. Absent individual files are skipped, never failed.
@@ -1988,7 +1988,7 @@ def deployed_host_state_ok(root, home=None):
     home = home or os.path.expanduser("~")
 
     # Install marker: install.sh writes the shell helpers here. No marker -> not deployed.
-    if not os.path.isdir(os.path.join(home, ".config", "claudemaxxing")):
+    if not os.path.isdir(os.path.join(home, ".config", "orchestratormaxxing")):
         return issues
 
     # --- P1: deployed host configs carry no compaction pin and no widened fan-out ---
@@ -2043,10 +2043,10 @@ def deployed_host_state_ok(root, home=None):
                     if name == "personal":
                         src = entry.get("source") if isinstance(entry, dict) else None
                         if (not ident or not ident.startswith("local:")
-                                or not _is_claudemaxxing_checkout(src)):
+                                or not _is_orchestratormaxxing_checkout(src)):
                             issues.append(("warn", "~/.codex/config.toml",
                                            f"[marketplaces.personal] does not point at a "
-                                           f"claudemaxxing checkout (source={src!r}) — a foreign "
+                                           f"orchestratormaxxing checkout (source={src!r}) — a foreign "
                                            f"registration is reusing the reserved name"))
                     elif name in KNOWN_CODEX_MARKETPLACE_SOURCES:
                         if ident not in KNOWN_CODEX_MARKETPLACE_SOURCES[name]:
@@ -2085,7 +2085,7 @@ def deployed_host_state_ok(root, home=None):
         start, stop = text.find(DOCTRINE_BEGIN), text.find(DOCTRINE_END)
         if start == -1 or stop == -1:
             issues.append(("error", label,
-                           "claudemaxxing doctrine block missing from a deployed context file "
+                           "orchestratormaxxing doctrine block missing from a deployed context file "
                            "— something overwrote it; re-run ./install.sh"))
             continue
         block = text[start:stop]
@@ -2260,7 +2260,7 @@ def audit(root):
     codex_agent_dir = os.path.join(root, ".codex", "agents")
     codex_config = os.path.join(root, ".codex", "config.toml")
     codex_design = os.path.join(root, "knowledge", "codex-harness-design.md")
-    plugin_dir = os.path.join(root, "plugins", "claudemaxxing")
+    plugin_dir = os.path.join(root, "plugins", "orchestratormaxxing")
     plugin_manifest = os.path.join(plugin_dir, ".codex-plugin", "plugin.json")
     plugin_hooks = os.path.join(plugin_dir, "hooks", "hooks.json")
     plugin_skills = os.path.join(plugin_dir, "skills")
@@ -2277,15 +2277,12 @@ def audit(root):
     if fleet_present:
         install_txt = install_txt + "\n" + open(fleet_install).read()
 
-    # --- Execution/Tool layer: every bin/* tool + xsearch.py parses, exec, shebang ---
+    # --- Execution/Tool layer: every bin/* tool parses, exec, shebang ---
     tools = []
     if os.path.isdir(bindir):
         tools = [os.path.join("bin", f) for f in sorted(os.listdir(bindir))
                  if os.path.isfile(os.path.join(bindir, f))
                  and not f.endswith((".mut-lock", ".mut-orig"))]
-    xs = os.path.join(root, "xsearch.py")
-    if os.path.isfile(xs):
-        tools.append("xsearch.py")
 
     for rel in tools:
         p = os.path.join(root, rel)
@@ -2389,7 +2386,7 @@ def audit(root):
                 err(f".claude/agents/{f}", "agent not wired into install.sh")
 
     # Hermes skills (skills/<name>/SKILL.md) and Codex plugin skills
-    # (plugins/claudemaxxing/skills/<name>/SKILL.md) had NO deploy coverage
+    # (plugins/orchestratormaxxing/skills/<name>/SKILL.md) had NO deploy coverage
     # until 2026-08-05, which is a measured hole and not a hypothetical one:
     # ~/.hermes/skills/plan-to-repo/SKILL.md exists on this box as a hand-placed
     # file with no source in any tree, so nothing could re-deploy or review it.
@@ -2409,7 +2406,7 @@ def audit(root):
                 pass
     for skills_root, label in (
         (os.path.join(root, "skills"), "skills"),
-        (os.path.join(root, "plugins", "claudemaxxing", "skills"), "plugins/claudemaxxing/skills"),
+        (os.path.join(root, "plugins", "orchestratormaxxing", "skills"), "plugins/orchestratormaxxing/skills"),
     ):
         if not os.path.isdir(skills_root) or not install_txt:
             continue
@@ -2419,7 +2416,7 @@ def audit(root):
                 continue
             # The Codex lane ships as one plugin: a reference to the plugin
             # directory covers every skill inside it, so accept either form.
-            if name in install_txt or "plugins/claudemaxxing" in install_txt and label.startswith("plugins/"):
+            if name in install_txt or "plugins/orchestratormaxxing" in install_txt and label.startswith("plugins/"):
                 continue
             if f"{label}/{name}" in manifest_paths:
                 continue
@@ -2566,8 +2563,8 @@ def audit(root):
         err(".codex/config.toml", "missing Codex project adapter")
 
     # Plugin package: manifest, marketplace, hooks, and every skill frontmatter.
-    for path, rel in ((plugin_manifest, "plugins/claudemaxxing/.codex-plugin/plugin.json"),
-                      (plugin_hooks, "plugins/claudemaxxing/hooks/hooks.json"),
+    for path, rel in ((plugin_manifest, "plugins/orchestratormaxxing/.codex-plugin/plugin.json"),
+                      (plugin_hooks, "plugins/orchestratormaxxing/hooks/hooks.json"),
                       (marketplace, ".agents/plugins/marketplace.json")):
         if not os.path.isfile(path):
             err(rel, "missing")
@@ -2581,20 +2578,20 @@ def audit(root):
 
     if os.path.isfile(plugin_manifest):
         manifest = json.load(open(plugin_manifest))
-        if manifest.get("name") != "claudemaxxing" or manifest.get("skills") != "./skills/":
-            err("plugins/claudemaxxing/.codex-plugin/plugin.json",
-                "manifest must name claudemaxxing and point skills at ./skills/")
-        plugin_install_contract = ("claudemaxxing@personal", "codex plugin add",
+        if manifest.get("name") != "orchestratormaxxing" or manifest.get("skills") != "./skills/":
+            err("plugins/orchestratormaxxing/.codex-plugin/plugin.json",
+                "manifest must name orchestratormaxxing and point skills at ./skills/")
+        plugin_install_contract = ("orchestratormaxxing@personal", "codex plugin add",
                                    "codex plugin list --json", 'p.get("installed") is True',
                                    'p.get("enabled") is True')
         if any(token not in install_txt for token in plugin_install_contract):
-            err("plugins/claudemaxxing",
+            err("plugins/orchestratormaxxing",
                 "install.sh must register, install, and verify the plugin is installed+enabled")
         prompts = (manifest.get("interface") or {}).get("defaultPrompt") or []
-        sol_i = next((i for i, p in enumerate(prompts) if "$claudemaxxing:solplan" in p), None)
-        fan_i = next((i for i, p in enumerate(prompts) if "$claudemaxxing:fanout" in p), None)
+        sol_i = next((i for i, p in enumerate(prompts) if "$orchestratormaxxing:solplan" in p), None)
+        fan_i = next((i for i, p in enumerate(prompts) if "$orchestratormaxxing:fanout" in p), None)
         if sol_i is None or fan_i is None or sol_i >= fan_i:
-            err("plugins/claudemaxxing/.codex-plugin/plugin.json",
+            err("plugins/orchestratormaxxing/.codex-plugin/plugin.json",
                 "default prompts must prioritize solplan before fanout")
         if "EXPECTED_PLUGIN_VERSION" not in install_txt or 'p.get("version") == expected' not in install_txt:
             err("install.sh", "Codex plugin install must verify the exact manifest version")
@@ -2605,17 +2602,17 @@ def audit(root):
                                 "PreToolUse", "PostToolUse", "Stop"}
         missing_hook_events = required_hook_events - set(hooks)
         if missing_hook_events:
-            err("plugins/claudemaxxing/hooks/hooks.json",
+            err("plugins/orchestratormaxxing/hooks/hooks.json",
                 f"missing lifecycle hooks: {', '.join(sorted(missing_hook_events))}")
         hook_text = open(plugin_hooks).read()
         for command in ("mem-audit", "loop-tick", "session-log", "agent-tab-status",
                         "warp-agent-event", "warp-agent-recovery", "codex-stop-hook"):
             if command not in hook_text:
-                err("plugins/claudemaxxing/hooks/hooks.json", f"missing {command} lifecycle wiring")
+                err("plugins/orchestratormaxxing/hooks/hooks.json", f"missing {command} lifecycle wiring")
         hook_commands = [hook.get("command", "") for phase in hooks.values()
                          for group in phase for hook in group.get("hooks", [])]
         if any("SOLPLAN_CHILD" not in command for command in hook_commands):
-            err("plugins/claudemaxxing/hooks/hooks.json",
+            err("plugins/orchestratormaxxing/hooks/hooks.json",
                 "every lifecycle hook must skip bounded Solplan children")
         loop_hooks = [hook for group in hooks.get("SessionStart", [])
                       for hook in group.get("hooks", [])
@@ -2624,10 +2621,10 @@ def audit(root):
                 or any("loop-tick --kick --quiet" not in hook.get("command", "")
                        or "loop-tick --gate" in hook.get("command", "")
                        for hook in loop_hooks)):
-            err("plugins/claudemaxxing/hooks/hooks.json",
+            err("plugins/orchestratormaxxing/hooks/hooks.json",
                 "SessionStart watcher must kick the verifier asynchronously, never gate inline")
         if any(not 0 < hook.get("timeout", 0) <= 15 for hook in loop_hooks):
-            err("plugins/claudemaxxing/hooks/hooks.json",
+            err("plugins/orchestratormaxxing/hooks/hooks.json",
                 "asynchronous loop-tick hook budget must stay within 15s")
         if ('loop-tick --kick --quiet >/dev/null 2>&1' not in install_txt
                 or '"timeout": 5, "statusMessage": "Watching harness health' not in install_txt):
@@ -2642,12 +2639,12 @@ def audit(root):
             required.add("product-manager")   # Hermes roadmap/kanban role: fleet-only
         missing = required - set(skills)
         if missing:
-            err("plugins/claudemaxxing/skills", f"missing skills: {', '.join(sorted(missing))}")
+            err("plugins/orchestratormaxxing/skills", f"missing skills: {', '.join(sorted(missing))}")
         if "fableplan" in skills:
-            err("plugins/claudemaxxing/skills/fableplan",
+            err("plugins/orchestratormaxxing/skills/fableplan",
                 "Fableplan is Claude-only; the Codex plugin must expose solplan")
         for name in skills:
-            rel = f"plugins/claudemaxxing/skills/{name}/SKILL.md"
+            rel = f"plugins/orchestratormaxxing/skills/{name}/SKILL.md"
             path = os.path.join(root, rel)
             if not os.path.isfile(path):
                 err(rel, "missing SKILL.md")
@@ -2663,7 +2660,7 @@ def audit(root):
         # never accept — if either host's surface drops the sentence (or the
         # tool reference), the doctrine silently inverts into an LLM gate.
         for rel in (".claude/commands/gauntlet.md",
-                    "plugins/claudemaxxing/skills/gauntlet/SKILL.md"):
+                    "plugins/orchestratormaxxing/skills/gauntlet/SKILL.md"):
             path = os.path.join(root, rel)
             text = open(path).read() if os.path.isfile(path) else ""
             if "gauntlet-judge" not in text or "promotes, never accepts" not in text:
@@ -2674,28 +2671,28 @@ def audit(root):
         # It divides the WHAT; fableplan/solplan keep the HOW. If a surface
         # drops the positioning, the loop drifts back into a planning layer.
         for rel, token in ((".claude/commands/gauntlet.md", "one step BEFORE planning"),
-                           ("plugins/claudemaxxing/skills/gauntlet/SKILL.md", "one step BEFORE planning"),
+                           ("plugins/orchestratormaxxing/skills/gauntlet/SKILL.md", "one step BEFORE planning"),
                            ("CLAUDE.md", "one step BEFORE planning"),
-                           ("plugins/claudemaxxing/.codex-plugin/plugin.json",
+                           ("plugins/orchestratormaxxing/.codex-plugin/plugin.json",
                             "gauntlet first to divide it into incremental parts")):
             path = os.path.join(root, rel)
             text = open(path).read() if os.path.isfile(path) else ""
             if token not in text:
                 err(rel, f"gauntlet intake positioning missing (needs {token!r})")
         routing_contract = {
-            "solplan": ("Prioritize this before $claudemaxxing:fanout", "EXECUTION SHAPE"),
-            "fanout": ("Use only after planning is complete", "invoke `$claudemaxxing:solplan`"),
+            "solplan": ("Prioritize this before $orchestratormaxxing:fanout", "EXECUTION SHAPE"),
+            "fanout": ("Use only after planning is complete", "invoke `$orchestratormaxxing:solplan`"),
         }
         for name, tokens in routing_contract.items():
             path = os.path.join(plugin_skills, name, "SKILL.md")
             text = open(path).read() if os.path.isfile(path) else ""
             if any(token not in text for token in tokens):
-                err(f"plugins/claudemaxxing/skills/{name}/SKILL.md",
+                err(f"plugins/orchestratormaxxing/skills/{name}/SKILL.md",
                     "missing Codex plan-before-fanout routing contract")
             ui = os.path.join(plugin_skills, name, "agents", "openai.yaml")
             ui_text = open(ui).read() if os.path.isfile(ui) else ""
             if "planning" not in ui_text.lower() and "plan " not in ui_text.lower():
-                err(f"plugins/claudemaxxing/skills/{name}/agents/openai.yaml",
+                err(f"plugins/orchestratormaxxing/skills/{name}/agents/openai.yaml",
                     "UI metadata must state the planning phase")
         # Body budget (docs/skill-style-guide.md). A skill body is charged on every turn
         # it is offered, so an over-budget skill is a permanent tax — worst for an
@@ -2709,13 +2706,13 @@ def audit(root):
                           count=1, flags=re.S)
             approx_tokens = int(len(body.split()) * 1.33)
             if approx_tokens > 1000:
-                warn(f"plugins/claudemaxxing/skills/{name}/SKILL.md",
+                warn(f"plugins/orchestratormaxxing/skills/{name}/SKILL.md",
                      f"body ~{approx_tokens} tokens exceeds the 1000-token hard maximum "
                      f"(docs/skill-style-guide.md) — move detail into references/")
 
         weakest_guard = "VALIDITY-FIRST / WEAKEST-SUFFICIENT"
         for rel in (".claude/commands/self-improve.md",
-                    "plugins/claudemaxxing/skills/self-improve/SKILL.md",
+                    "plugins/orchestratormaxxing/skills/self-improve/SKILL.md",
                     "bin/win-log", "knowledge/hermes-strategic-evolution-plan.md"):
             path = os.path.join(root, rel)
             try:
@@ -2728,7 +2725,7 @@ def audit(root):
 
         sol_runner = os.path.join(plugin_skills, "solplan", "scripts", "run_solplan.py")
         if not os.path.isfile(sol_runner):
-            err("plugins/claudemaxxing/skills/solplan/scripts/run_solplan.py",
+            err("plugins/orchestratormaxxing/skills/solplan/scripts/run_solplan.py",
                 "missing bounded Solplan runner")
         else:
             runner_text = open(sol_runner).read()
@@ -2740,17 +2737,17 @@ def audit(root):
                                "terminate_process_group", "JsonlFramer",
                                "MAX_EVENT_BYTES", "MAX_PLAN_BYTES", "O_NOFOLLOW")
             if any(token not in runner_text for token in runner_contract):
-                err("plugins/claudemaxxing/skills/solplan/scripts/run_solplan.py",
+                err("plugins/orchestratormaxxing/skills/solplan/scripts/run_solplan.py",
                     "runner must stay Ultra, delegation-bounded, observable, cancellable, stdin-closed, and validated")
             if "timeout_seconds" in runner_text or "--timeout-seconds" in runner_text:
-                err("plugins/claudemaxxing/skills/solplan/scripts/run_solplan.py",
+                err("plugins/orchestratormaxxing/skills/solplan/scripts/run_solplan.py",
                     "runner must not impose a wall-clock deadline on Sol Ultra")
             if "dangerously-bypass-hook-trust" in runner_text:
-                err("plugins/claudemaxxing/skills/solplan/scripts/run_solplan.py",
+                err("plugins/orchestratormaxxing/skills/solplan/scripts/run_solplan.py",
                     "bounded planner must not force unrelated user hooks")
-            runner_test = os.path.join(root, "orchestrator", "tests", "test_solplan_runner.py")
+            runner_test = os.path.join(root, "tests", "solplan-runner", "test_solplan_runner.py")
             if not os.path.isfile(runner_test):
-                err("orchestrator/tests/test_solplan_runner.py",
+                err("tests/solplan-runner/test_solplan_runner.py",
                     "missing focused Solplan runner contract")
             else:
                 test_env = os.environ.copy()
@@ -2761,15 +2758,15 @@ def audit(root):
                         capture_output=True, text=True, timeout=30,
                     )
                 except subprocess.TimeoutExpired:
-                    err("orchestrator/tests/test_solplan_runner.py",
+                    err("tests/solplan-runner/test_solplan_runner.py",
                         "focused Solplan runner contract timed out")
                 else:
                     if result.returncode:
                         tail = "\n".join((result.stdout + result.stderr).splitlines()[-20:])
-                        err("orchestrator/tests/test_solplan_runner.py",
+                        err("tests/solplan-runner/test_solplan_runner.py",
                             f"focused Solplan runner contract failed:\n{tail}")
     else:
-        err("plugins/claudemaxxing/skills", "missing")
+        err("plugins/orchestratormaxxing/skills", "missing")
 
     # Shell adapters are sourced rather than executed, but still require syntax
     # checks and install coverage. zsh is checked when present.
@@ -2813,7 +2810,7 @@ def audit(root):
                       "'copy-mode -e; send-keys -X -N 5 scroll-up'"):
             if token not in tmux_text:
                 err("shell/tmux.conf", f"missing scrolling contract: {token}")
-        for token in ("shell/tmux.conf", "claudemaxxing:tmux", "tmux source-file"):
+        for token in ("shell/tmux.conf", "orchestratormaxxing:tmux", "tmux source-file"):
             if token not in install_txt:
                 err("install.sh", f"tmux defaults not fully deployed: missing {token}")
 
@@ -2878,8 +2875,8 @@ def audit(root):
 
     # --- install.sh orchestrator block markers must be present + balanced ---
     if install_txt:
-        b = install_txt.count("claudemaxxing:orchestrator:begin")
-        e = install_txt.count("claudemaxxing:orchestrator:end")
+        b = install_txt.count("orchestratormaxxing:orchestrator:begin")
+        e = install_txt.count("orchestratormaxxing:orchestrator:end")
         if b == 0 or e == 0:
             err("install.sh", "orchestrator block markers missing (begin/end)")
         elif b != e:
@@ -2992,8 +2989,8 @@ def audit(root):
     baseline_surfaces = (
         "CLAUDE.md", "README.md", ".claude/commands/fanout.md",
         ".claude/agents/ollama-worker.md", ".codex/agents/ollama-worker.toml",
-        "plugins/claudemaxxing/skills/fanout/SKILL.md",
-        "knowledge/provider-routing.md", "claudemaxxing-architecture.svg",
+        "plugins/orchestratormaxxing/skills/fanout/SKILL.md",
+        "knowledge/provider-routing.md", "orchestratormaxxing-architecture.svg",
     )
     operational_surfaces = baseline_surfaces + (
         "SETUP.md", "bootstrap.sh", "install.sh", "bin/oll-council",
@@ -3029,7 +3026,7 @@ def audit(root):
     else:
         err("CLAUDE.md", "missing")
 
-    if not os.path.isfile(codex_design) or "routes nontrivial unplanned work through `$claudemaxxing:solplan` first" not in open(codex_design).read():
+    if not os.path.isfile(codex_design) or "routes nontrivial unplanned work through `$orchestratormaxxing:solplan` first" not in open(codex_design).read():
         err("knowledge/codex-harness-design.md",
             "Codex design must document solplan-before-fanout routing")
 
@@ -3256,7 +3253,7 @@ def audit(root):
         ("codex-stop-hook", "tests/codex-stop-hook/run.sh", "bin/codex-stop-hook", 15),
         # Telegram done/needs-input notifier + the OpenCode plugin bridge.
         # Fully shimmed transport (fake hermes/tailscale/tmux on PATH, fixture
-        # HOME); the plugin cases execute the real claudemaxxing-notify.js under
+        # HOME); the plugin cases execute the real orchestratormaxxing-notify.js under
         # node/bun and pipe its actual payload through the real tool. Proven red
         # against the pre-fix plugin that ignored permission.asked (lq-3c820901).
         ("agent-done-notify", "tests/agent-done-notify/run.sh", "bin/agent-done-notify", 30),
@@ -3445,7 +3442,7 @@ def audit(root):
 
 
 def main():
-    os.environ["CLAUDEMAXXING_HARNESS_CHILD"] = "1"
+    os.environ["ORCHESTRATORMAXXING_HARNESS_CHILD"] = "1"
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo")

@@ -1,7 +1,7 @@
 # Doctrine contradiction audit — procedure and caps (2026-08-16)
 
 **What this is.** The bounded MINE procedure for the monthly doctrine-contradiction
-audit seeded by `deploy/claudemaxxing-doctrine-audit.sh`. It is read by the
+audit seeded by `deploy/orchestratormaxxing-doctrine-audit.sh`. It is read by the
 `/self-improve` round that drains the queued item; it is not itself executed by
 the seeder.
 

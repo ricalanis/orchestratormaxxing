@@ -69,7 +69,7 @@ SH
 mk_machine() {
   local name="$1" origin="$2" dirty="$3" mode="${4:-}" okey="${5:-}"
   local repo="$TMP/$name/repo" home="$TMP/$name/home"
-  mkdir -p "$TMP/$name" "$home/.config/claudemaxxing" "$home/.local/bin"
+  mkdir -p "$TMP/$name" "$home/.config/orchestratormaxxing" "$home/.local/bin"
   git clone -q -b main "$origin" "$repo"
   git -C "$repo" config user.email loop@test
   git -C "$repo" config user.name  loop
@@ -143,16 +143,16 @@ chmod 000 proposed-blocked.txt
 SH
   fi
   chmod +x "$home/.local/bin/"*
-  sed "s#__REPO__#$repo#g" "$WRAPPER_SRC" > "$home/.config/claudemaxxing/loop-cron.sh"
+  sed "s#__REPO__#$repo#g" "$WRAPPER_SRC" > "$home/.config/orchestratormaxxing/loop-cron.sh"
 }
 
 run_machine() {
   local name="$1"
-  HOME="$TMP/$name/home" bash "$TMP/$name/home/.config/claudemaxxing/loop-cron.sh" \
+  HOME="$TMP/$name/home" bash "$TMP/$name/home/.config/orchestratormaxxing/loop-cron.sh" \
     >>"$TMP/$name/stdout.log" 2>&1
 }
 
-mlog()  { cat "$TMP/$1/home/.config/claudemaxxing/loop-cron.log" 2>/dev/null; }
+mlog()  { cat "$TMP/$1/home/.config/orchestratormaxxing/loop-cron.log" 2>/dev/null; }
 claim_on_origin() { git -C "$1" show main:knowledge/loop-claim 2>/dev/null; }
 
 # ── Scenario 1: dirty tree (worktree / detached HEAD) + a second machine ─────

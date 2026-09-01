@@ -1,4 +1,0 @@
-interface:
-  display_name: "Ideas"
-  short_description: "Help with Ideas tasks and workflows"
-  default_prompt: "Use $claudemaxxing:ideas to generate diverse approaches and recommend one."

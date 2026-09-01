@@ -27,7 +27,7 @@ def state_dir() -> Path:
     if override:
         return Path(override)
     xdg = os.environ.get("XDG_STATE_HOME")
-    return Path(xdg) / "claudemaxxing" if xdg else Path.home() / ".local/state/claudemaxxing"
+    return Path(xdg) / "orchestratormaxxing" if xdg else Path.home() / ".local/state/orchestratormaxxing"
 
 
 def config_dir() -> Path:
@@ -35,7 +35,7 @@ def config_dir() -> Path:
     if override:
         return Path(override)
     xdg = os.environ.get("XDG_CONFIG_HOME")
-    return Path(xdg) / "claudemaxxing" if xdg else Path.home() / ".config/claudemaxxing"
+    return Path(xdg) / "orchestratormaxxing" if xdg else Path.home() / ".config/orchestratormaxxing"
 
 
 def ensure_state_dir() -> Path:

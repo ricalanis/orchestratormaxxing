@@ -1,4 +1,0 @@
-interface:
-  display_name: "Shared Memory"
-  short_description: "Governed memory shared by Claude and Codex"
-  default_prompt: "Use $claudemaxxing:memory to recall or update shared project memory."

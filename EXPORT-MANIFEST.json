@@ -4,7 +4,7 @@
     {
       "mode": "file",
       "path": ".agents/plugins/marketplace.json",
-      "sha256": "6a279f5ec6565d9643565b1aec6e1f09ac293d33d1f1a22c22dddfc31b5671c5"
+      "sha256": "ed14ddfbef32db3f63f0a145eaafe44c152694ebad90b8921cbe03e573a89035"
     },
     {
       "mode": "file",
@@ -39,7 +39,7 @@
     {
       "mode": "file",
       "path": ".claude/commands/graduate.md",
-      "sha256": "ba09747aa7d95711d0ff0e19409b2397977a90c22712737926257f10c58339f7"
+      "sha256": "ba9edf9e395e4df88730782b59e78a5c6779b91f187f882b448419f6e94887d3"
     },
     {
       "mode": "file",
@@ -69,7 +69,7 @@
     {
       "mode": "file",
       "path": ".codex/agents/sol-planner.toml",
-      "sha256": "7ad56f847c55904288d6a56fd950bed2ec9c4445460f381aca6db525ee9eb1e0"
+      "sha256": "2d13eab7420b81d032845dcbd76aed9153b45df4f9a7187c9ffbd25264d079ff"
     },
     {
       "mode": "file",
@@ -89,7 +89,7 @@
     {
       "mode": "file",
       "path": "CLAUDE.md",
-      "sha256": "9b729cdb556ea2448fff863d91703f577c1bacac773b4fc4721929e91335c5de"
+      "sha256": "4b11b0741b638af7d61c9bf38cfdeeb78a443d3e65e82b227a51cc6d32b49feb"
     },
     {
       "mode": "file",
@@ -99,17 +99,17 @@
     {
       "mode": "file",
       "path": "README.md",
-      "sha256": "c1221fbeda49efbe876387ae6a86d4899cbf2b62b2b951d663696c32cded0e29"
+      "sha256": "0ff3cdde69ca1f8a5ac7662bb6d1f49cacbbf7c37f28f35650a2a605bdc24f6a"
     },
     {
       "mode": "file",
       "path": "SETUP.md",
-      "sha256": "53357f4bc7c9c23d640054952928dad2ed5d8a35709f6e532871927faf23a350"
+      "sha256": "d10bab62e25fe6fe6ee7fce49fbd4adc6bc9dbc98598e127a84c4ebc5a7ab959"
     },
     {
       "mode": "exec",
       "path": "bin/agent-done-notify",
-      "sha256": "a9ac96e3414a82aa0d038c07cd561defd41fd380bd64bb9f22d1517ae8a04ced"
+      "sha256": "822c10e5eb6bfec9ae18e0b9d1c33e6b0e1c04f375b99f67784ea7a154f5e77d"
     },
     {
       "mode": "exec",
@@ -139,12 +139,12 @@
     {
       "mode": "exec",
       "path": "bin/cogload",
-      "sha256": "2cf173be340ca963987bff31358cd3a190ead86b334d0f85a411d48a4c3e4101"
+      "sha256": "ea63ba99f35d36f08c3cea0186266a8852cd18249c5aef03be6dd4388f4f5dd7"
     },
     {
       "mode": "exec",
       "path": "bin/core-export",
-      "sha256": "193165b682fe9ee91281a08b78b77e89c6ea9291e76de722c84f8dfdb9d56c76"
+      "sha256": "c2d9802c7ee040d1b8d14220f9ac4e72a3f852942b81e4faf887be8c0e218294"
     },
     {
       "mode": "exec",
@@ -164,7 +164,7 @@
     {
       "mode": "exec",
       "path": "bin/harness-agent-run",
-      "sha256": "b8124a543a5c1a8b4b5573331ff8879022f4a66ae013e95e1eb6ce907e6dca5c"
+      "sha256": "0766e6c8ec4de2a70e4236c9f5bbcf0df1c445e36739c5d67c08fd6475185e16"
     },
     {
       "mode": "exec",
@@ -174,12 +174,12 @@
     {
       "mode": "exec",
       "path": "bin/harness-sync",
-      "sha256": "07af29357f33270df2a05277db388e4c96aeef5a0048c339ea0ed79ce32bea0d"
+      "sha256": "2c576cb2c52fc5de5bb014e1a0147d73b6e3f8c797cd88142835f3fe9c63d1b5"
     },
     {
       "mode": "exec",
       "path": "bin/harness-verify",
-      "sha256": "6bd8aeefa0d8ff9c30be2e9e3f8733c90cd848163f507a91d6e91f27e3d0902b"
+      "sha256": "ee806ae2438de0116600164a7b4a9f8c4e219fe6e13eb3b72ae31de5c4426742"
     },
     {
       "mode": "exec",
@@ -194,7 +194,7 @@
     {
       "mode": "exec",
       "path": "bin/loop-tick",
-      "sha256": "bbe02a5d227341a125a876ea2bc05376778a0692f69f5dfde59b3eead3a1c8d0"
+      "sha256": "ceff731145b5b88eaea47165ed15349ff58fec8431e2da681837a4eb6b2f2dc3"
     },
     {
       "mode": "exec",
@@ -204,7 +204,7 @@
     {
       "mode": "exec",
       "path": "bin/memoryctl",
-      "sha256": "0d3567fc47c580b5ea4f04b51fbe3feec1703e7eb1ab0b26409e8e205d882f8d"
+      "sha256": "9c7deddd274936ba875444e663c7ee8c1d662df69ef1926378ce4a49c5be3ef5"
     },
     {
       "mode": "exec",
@@ -214,7 +214,7 @@
     {
       "mode": "exec",
       "path": "bin/model-catalog",
-      "sha256": "16a6465b4c0dc505078dfccafc90f7ce18f3909097958bdeafab320b036d1e21"
+      "sha256": "678875d1f0b95d399d9913143d5e3cc2f6b89c750e503b468e75f7cb40176125"
     },
     {
       "mode": "exec",
@@ -234,17 +234,17 @@
     {
       "mode": "exec",
       "path": "bin/o",
-      "sha256": "a7254949071a6e6d607d09cce19c5dc8fc865e8d603dc65aa6c7c325a7a3d249"
+      "sha256": "c0d3673a51f8308d06bcac1ccbaa8477293e9451d77810c23bbb712fc7a0b383"
     },
     {
       "mode": "exec",
       "path": "bin/occ",
-      "sha256": "4c5cad056ec7b579f44322ff2e774bfe5bc3a0e32f87bfb3110cc2982acff2a8"
+      "sha256": "1dac5c54280c4324021ee04c02f982f3b56a01fcb77009061ee66116373e2920"
     },
     {
       "mode": "exec",
       "path": "bin/oll",
-      "sha256": "222bd06511e63f37179e92f86439fa5382e29292c7ca7a0cd4772c851633f74d"
+      "sha256": "d82c6d98f3c8ec39e434f2892da9564a0f88c3309e78306903232daa52510d0a"
     },
     {
       "mode": "exec",
@@ -259,27 +259,27 @@
     {
       "mode": "exec",
       "path": "bin/opencode-browser-mcp",
-      "sha256": "ca7e7903454034ad8ee2a98fbfa7ec5a6802ed726201d9807812f889f73ab145"
+      "sha256": "e7f331146cfe39d97dd31b7a0977855ec9cea03f7b2a87845913149bd2c67613"
     },
     {
       "mode": "exec",
       "path": "bin/orchestration-practice",
-      "sha256": "b60e7d8526127de725ed4649b22d7ad35d63037bd0b86d85fd1a7c8015eecc90"
+      "sha256": "99f787b219b9897b168c40cf933c00183f8a391d3d738f57598ba3a2e766a15a"
     },
     {
       "mode": "exec",
       "path": "bin/provider-ask",
-      "sha256": "cad985d1f7c95eac5183eaf1a898c070040faf440598ac98006eacac02a0021a"
+      "sha256": "e9702bd00250c5f7b4d5f556123cb42d50194cc1ffdd66169e1d6422400ec260"
     },
     {
       "mode": "exec",
       "path": "bin/session-log",
-      "sha256": "ee62e3dc7ccd60e0c596935b44906a63ecdf4dfb8e91cd9c2e1b9ceca1034359"
+      "sha256": "0d256a87454472a4a008b302501c6513f30aab0187d17d2c16c2f8668bfa6e0e"
     },
     {
       "mode": "exec",
       "path": "bin/sync-agent-skills",
-      "sha256": "58cdf858618a971d3528caa1167ddee062ffeefbb9c32fd75e4d9454319c27c6"
+      "sha256": "6f9df963df524240f892d93dc17caa3249761cdf6c15326f32efa5f9ad6a53fe"
     },
     {
       "mode": "exec",
@@ -299,7 +299,7 @@
     {
       "mode": "exec",
       "path": "bin/token-ledger",
-      "sha256": "0268939584a74334b30e15e4bbcbd60b1e23e864639a3eacc890a7a4680670e7"
+      "sha256": "98183d7d950b5eaa826afb0ddc5ac8012d8e3fef797fb0dbdf035dea842aa20b"
     },
     {
       "mode": "exec",
@@ -309,12 +309,12 @@
     {
       "mode": "exec",
       "path": "bin/warp-agent-recovery",
-      "sha256": "275f1deb20b5cd72350d0a5501935ca84edc804597efb87364ff50aef3098248"
+      "sha256": "87461dc490bf826b3e662811da560763d8c3cfd77f739854f17f080888f18034"
     },
     {
       "mode": "exec",
       "path": "bin/warp-model-pin",
-      "sha256": "b56c8138e4fcc5736a22e1a3683ee6121d4a9d7bf501938091c926137b241005"
+      "sha256": "20103373e3e9c3d3fa59a15f6a6d90b28c3515db501b0e702b0e0af5803fc03e"
     },
     {
       "mode": "exec",
@@ -328,53 +328,23 @@
     },
     {
       "mode": "exec",
+      "path": "bin/xsearch",
+      "sha256": "ace027ba3ab4edb32d9c068216560b7a2ba4e4b1b9eba596f9d467f9fd894485"
+    },
+    {
+      "mode": "exec",
       "path": "bin/zed-setup",
       "sha256": "a1a01fcb1be3bdf5764a2bd53f176b69346ced07811505c2b3d309dcb705cf79"
     },
     {
       "mode": "exec",
       "path": "bootstrap.sh",
-      "sha256": "45331b3e826f15a474fdd48def2398dfa5816d0328063c268a5f9aabe562ed1d"
-    },
-    {
-      "mode": "file",
-      "path": "claudemaxxing-architecture.png",
-      "sha256": "d1d23bf6f4aba34742149292fedb9d23c7b58b83d76aaf229aa15593ec3daec9"
-    },
-    {
-      "mode": "file",
-      "path": "claudemaxxing-architecture.svg",
-      "sha256": "2a52d74d98dbbd5e564ff175f8e0016a66e5b4945b6807716c6b5a00306be4e4"
+      "sha256": "cefec2568f71a6a385d37ebf4435d63214f9755180b133f9ee86fe7a06307a59"
     },
     {
       "mode": "file",
       "path": "deploy/chrome-cdp.service",
-      "sha256": "1478a915ac829fda7177bcbb5912601060190ab7077de6f7823e1a7b2765e7d9"
-    },
-    {
-      "mode": "file",
-      "path": "deploy/claudemaxxing-doctrine-audit.service",
-      "sha256": "8629ebd775ef4d85e1a7798f0af3dfc05fd892da2c98c39ddf35aa69c3986d78"
-    },
-    {
-      "mode": "file",
-      "path": "deploy/claudemaxxing-doctrine-audit.sh",
-      "sha256": "c07860ab53e05640c6bb49816b5a5b13b87a5bc9e64e6a93fcbe4c1ef6d1ac28"
-    },
-    {
-      "mode": "file",
-      "path": "deploy/claudemaxxing-doctrine-audit.timer",
-      "sha256": "e7824d173ece18df5548f3ca21df3cb6f48351bb5782c3a1950f8f90efe7339e"
-    },
-    {
-      "mode": "file",
-      "path": "deploy/claudemaxxing-loop.service",
-      "sha256": "ff6c8b81b6109c19bf808f03167efd62fbeb5923139cd47ea1a61baa76f45783"
-    },
-    {
-      "mode": "file",
-      "path": "deploy/claudemaxxing-loop.timer",
-      "sha256": "c52fe718c23fb9667b2848bdc78a34b681116e4fc8c59f0d3e7fd46e21fa2915"
+      "sha256": "76e363d94a0eaefb7fec3f072c0842e59e8b2f9a1a5ae0732682df239a30fd18"
     },
     {
       "mode": "exec",
@@ -384,87 +354,112 @@
     {
       "mode": "file",
       "path": "deploy/cogload-keys.service",
-      "sha256": "54ef49f9eef7a22ce89eae2a43d39cc328ac2b6e8fe16a7941680c8c3ef2c77b"
+      "sha256": "865bb49ebb31341b266b9782b1be0a943d7ceb333ce9a56fbbe9cec0f1d06dde"
     },
     {
       "mode": "exec",
       "path": "deploy/cogload-mac-setup.sh",
-      "sha256": "87a9c197ec652fb34ff324822385786e11d86647ae72793e16202b9556543ee2"
+      "sha256": "1b328aeabb689abb7945e8c7d4f9d865fcb170cf2c229be63bafa8a8e566d81d"
     },
     {
       "mode": "file",
       "path": "deploy/cogload-nightly.service",
-      "sha256": "e2d2e862a7d7c78c1c9141c4febb60e0629f321e3a87f3aec696a4fe2b93e042"
+      "sha256": "b22007d2544270db70aeef30674d16005de0d6caf26534753d8ea1c4f68524ca"
     },
     {
       "mode": "file",
       "path": "deploy/cogload-nightly.sh",
-      "sha256": "b97a35cdca5989f7bee9e0609401fbae455fc7272f42b6b0a758bbdecebc283c"
+      "sha256": "3bdeae08f6b9cfa178a79ce89a2cd2d44e473d35037349cc822241d655521ca1"
     },
     {
       "mode": "file",
       "path": "deploy/cogload-nightly.timer",
-      "sha256": "d0a38f614d06ad8d41804dce9a83acc6c86c31263f7a06e6880023e1c63896bf"
+      "sha256": "dc81929628ce0d72d8447e435474cbe4f97cfd66c9aeaf3d32df5578f781ad17"
     },
     {
       "mode": "file",
-      "path": "deploy/com.claudemaxxing.cogload-catchup.plist",
-      "sha256": "42065c27833608f93285a86fd82369e57fbf874b793bf779e49fee874e1d59b8"
+      "path": "deploy/com.orchestratormaxxing.cogload-catchup.plist",
+      "sha256": "148a09b8d4ac11d4c3b0f530f50de98ead5e6e68647eb26cf2098b918302e609"
     },
     {
       "mode": "file",
-      "path": "deploy/com.claudemaxxing.cogload-keys.plist",
-      "sha256": "94e4befb3bc517dd93980a838f021e152b560d34b36bc25093ddd4d69b8ee21d"
+      "path": "deploy/com.orchestratormaxxing.cogload-keys.plist",
+      "sha256": "d4663158a10b4981999af301f537f5e16582d836a1437963b0b9382a96cf057b"
     },
     {
       "mode": "file",
-      "path": "deploy/com.claudemaxxing.cogload-nightly.plist",
-      "sha256": "f77181beaeca20e31f2bc7a320e26791022bf226b3e40a0e67ff14713e202e57"
+      "path": "deploy/com.orchestratormaxxing.cogload-nightly.plist",
+      "sha256": "311ae3ac2e846a8e4d6c48a268d373b3d82daadf70da83fe1bf22b13f4b1e4ce"
     },
     {
       "mode": "file",
-      "path": "deploy/com.claudemaxxing.loop.plist",
-      "sha256": "bac41d359094a179e4706a53b2c062557052363023a9f34ff9b8eff18ca95234"
+      "path": "deploy/com.orchestratormaxxing.loop.plist",
+      "sha256": "595863e3a84cd4510f73f9af9f9d2a9b9a4f2fa88a3e3de14e0359c089e43e13"
     },
     {
       "mode": "file",
       "path": "deploy/fleet.env.example",
-      "sha256": "600140e9d2402504c02904e6371e9ed372adffbf1dbbab2f8b80eebcc14afae5"
+      "sha256": "93a5cce4336e44d5ee80483d5925473b6d4142d6e94da06ff319474bd983560b"
     },
     {
       "mode": "file",
       "path": "deploy/gnome-cogload-extension/README.md",
-      "sha256": "7cddc2c109517d2adbec40f2edd6e9e18aae0e8cff54ba68dd05b837546d1017"
+      "sha256": "0286e54aaaf49f9e1151f82834ed20e4936a66585a07a5d7586fe88f86d45aeb"
     },
     {
       "mode": "file",
       "path": "deploy/gnome-cogload-extension/extension.js",
-      "sha256": "d2747eea069a23337dfdf6c07224472e6a57cc8fc3afce7201e3577044564276"
+      "sha256": "90251b72767ef865df9e6674a6bde4364b6254533732a43fb3ee994a75d82222"
     },
     {
       "mode": "file",
       "path": "deploy/gnome-cogload-extension/metadata.json",
-      "sha256": "5cd2c8378fb4dffd94852e1887a8dffd7d3956977d4f8f5719de429d9a78be42"
+      "sha256": "e2079589e7a2adf79c1200af3c22eb81afc46aa9ac6eefb0b16ccc6754cbc6e5"
     },
     {
       "mode": "file",
       "path": "deploy/loop-cron.sh",
-      "sha256": "3ba5817166adab8f04a85e3fc293c13e273cd76b820b61cf64e84a4dcc8d9fd2"
+      "sha256": "60283194d1c98c6a33c8731404d120978cb743a13b929d56e27610bf86070057"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/orchestratormaxxing-doctrine-audit.service",
+      "sha256": "ff466ab9a4dd75d825c827292c036767418ac5eb090bced533dff1fdb753685e"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/orchestratormaxxing-doctrine-audit.sh",
+      "sha256": "c44554a94d99c93e05a685378270ad3b2985400e5d1f3302cbcece937cae3716"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/orchestratormaxxing-doctrine-audit.timer",
+      "sha256": "17c9db92c696e4459ab097900f6ec3aeefe7e8b7dcf1dfed201dc937cf793756"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/orchestratormaxxing-loop.service",
+      "sha256": "8f72005357201f368b86446e4077346f7e1418e474ed4f4b07b50b4d529d40f1"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/orchestratormaxxing-loop.timer",
+      "sha256": "78d9e3eb92a61d630e5f0ba1121bdc6b05e94ca81376533566ce96892ed2a750"
     },
     {
       "mode": "file",
       "path": "docs/skill-style-guide.md",
-      "sha256": "54ff00ae9def748e4c942b155d0ad81f882b052ab0237fb9603fe38df17c87d1"
+      "sha256": "ee1493ce5f5173bafb63f18ea5f0c55ba43b65b18981862daecb73a3c5195899"
     },
     {
       "mode": "exec",
       "path": "install.sh",
-      "sha256": "4cd4c0d7a6205e5356e4513ce216421480b83e2f6464a374d76671553e64f103"
+      "sha256": "a4ce0a7c0cfaa9962c33c820786d31301f897ba006c3097216c1e1c676ee592b"
     },
     {
       "mode": "file",
       "path": "knowledge/codex-harness-design.md",
-      "sha256": "3c297ba1aa2e4febbb83c16d7753ee016132f5908af6e60b0f34dfc0ba19f31d"
+      "sha256": "fb249fbfe80c28013b709c5a0579204ad3ee9a3ff118198d2631664f5dce793b"
     },
     {
       "mode": "file",
@@ -474,7 +469,7 @@
     {
       "mode": "file",
       "path": "knowledge/delegation-playbook.md",
-      "sha256": "bf8052670714dbc6cb5bb6e23c1cc8c0d5d124b2aa786e4a924d78d636c3cd18"
+      "sha256": "3a901b5b06bde873fde4ca1e82ded877eedb6dad72335f09c1235bfd932662c6"
     },
     {
       "mode": "file",
@@ -484,7 +479,7 @@
     {
       "mode": "file",
       "path": "knowledge/doctrine-audit-2026-08-16.md",
-      "sha256": "1883dece2e59f6dfa8fd1f9c14046c17459b142b98e34fff3438b835700a537a"
+      "sha256": "6e42870deaca2d8ee009f3e9079db9d0c56b171711f476e4c59dc5d6922f8fbc"
     },
     {
       "mode": "file",
@@ -499,7 +494,7 @@
     {
       "mode": "file",
       "path": "knowledge/gauntlet-loop-design.md",
-      "sha256": "f521cdaa3b0b0ace054d3cf2e9811699287aaeaf8ea23590b6bca34867dfbfd2"
+      "sha256": "e46a7aa6281dc81c6a968ed670cf8265233c0f18de45f3c22762d6a7fe53af07"
     },
     {
       "mode": "file",
@@ -534,7 +529,7 @@
     {
       "mode": "file",
       "path": "knowledge/provider-routing.md",
-      "sha256": "1b08cb1ad5ab1f1c4bbe3bfb9b46977bd157777f000dc2cf05b74b1076056a74"
+      "sha256": "e7f8068c990a94bcce5eef25d2f7f91a39ed61bfccbf180013a4b4d14c026335"
     },
     {
       "mode": "file",
@@ -603,8 +598,8 @@
     },
     {
       "mode": "file",
-      "path": "opencode/plugins/claudemaxxing-notify.js",
-      "sha256": "bb09a29fa243a5292a8f09477ef985ea605cbd7cebaaccb31cf47c855be59c9d"
+      "path": "opencode/plugins/orchestratormaxxing-notify.js",
+      "sha256": "0363d04750489737b5adca3e66899dc681c8a6cee66873527be5ae68b582b83f"
     },
     {
       "mode": "file",
@@ -618,123 +613,128 @@
     },
     {
       "mode": "file",
-      "path": "orchestrator/tests/test_solplan_runner.py",
-      "sha256": "5e8a87b945521d014d88a39ac9530b18464ba0c7c2f73a7ec697144417af7412"
+      "path": "orchestratormaxxing-architecture.png",
+      "sha256": "d1d23bf6f4aba34742149292fedb9d23c7b58b83d76aaf229aa15593ec3daec9"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/.codex-plugin/plugin.json",
-      "sha256": "1e09efe95ef0901a81facc0c31012ef8292a334569ea90988ee60f2e7cec91cc"
+      "path": "orchestratormaxxing-architecture.svg",
+      "sha256": "618bc17a75307626c4fea7b4c0d3a4701ff1936e1268c8010b9864467d4593c6"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/hooks/hooks.json",
-      "sha256": "a47ca41352063e39d2a2bde9a513a443fa458e622c70b5a07ebaa62365972e3e"
+      "path": "plugins/orchestratormaxxing/.codex-plugin/plugin.json",
+      "sha256": "933592333f3028a30e865a9e47a4f2412ce9c85c5f5bd942f687ebb473daf80d"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/skills/cheap-delegate/SKILL.md",
-      "sha256": "4557f814aad8cc97c7e1464d0fcefd9bf927b1c87222b70975e4cf70d1bb9dcd"
+      "path": "plugins/orchestratormaxxing/hooks/hooks.json",
+      "sha256": "efb62492e214873e99e876418363c2861f89c415fa87ac838169a09db4003be1"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/skills/fanout/SKILL.md",
-      "sha256": "fce0913710d49dfc5bab9dcb0415ce6055f5a5771bb5965119974536c050fdac"
+      "path": "plugins/orchestratormaxxing/skills/cheap-delegate/SKILL.md",
+      "sha256": "b90910e6e74853db6d7af21449a910f16fbf4bec355a1d27c4c2fa18419f0b59"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/skills/fanout/agents/openai.yaml",
-      "sha256": "d2e7825b1a818c3fcd2fba551cb164bd1a52144cd23ee6d5475519067c963799"
+      "path": "plugins/orchestratormaxxing/skills/fanout/SKILL.md",
+      "sha256": "79a8408460000ad65b39f09a79720a78940638e4681af609edfb76c1210da2dc"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/skills/gauntlet/SKILL.md",
-      "sha256": "0326a9b60b9dd21da80d2e7a574a0130cfdb29c0df485d67c972eb023041bd89"
+      "path": "plugins/orchestratormaxxing/skills/fanout/agents/openai.yaml",
+      "sha256": "14ffa1b9d92ab998683cdae0d86fb313943e2a38fd7e1495f5715f2af1a793a1"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/skills/gauntlet/agents/openai.yaml",
-      "sha256": "8904b335cc6f5d8913f99ab8492eacaba6c6a39c957d8392ca2c84d5850be4a0"
+      "path": "plugins/orchestratormaxxing/skills/gauntlet/SKILL.md",
+      "sha256": "f8ad9d00964d8811f1c7b2f7485e26adb35bb562707cf38123647a01e2bdb505"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/skills/graduate/SKILL.md",
-      "sha256": "7a29312ae4aa07d96e6f39b86fb0e13d12f3239dd39f4d8ef86cdd99165cca23"
+      "path": "plugins/orchestratormaxxing/skills/gauntlet/agents/openai.yaml",
+      "sha256": "5e94312f5d23166a3584f0c4ab291658137378da770b344d2be184e965ac8a44"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/skills/graduate/agents/openai.yaml",
-      "sha256": "22920d26de8a2dee24ac5de5dc71a400144e5386b9d7a4cd2138aa0fbbc351f0"
+      "path": "plugins/orchestratormaxxing/skills/graduate/SKILL.md",
+      "sha256": "1985bd492c70bb143635a7dd17780eead36f68ded09ee6e01c68fa6e4bcb0301"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/skills/i-have-adhd/SKILL.md",
+      "path": "plugins/orchestratormaxxing/skills/graduate/agents/openai.yaml",
+      "sha256": "3193a6a1a60a00327237814693c796ab23fb1667cfdfd9c0a220ba5ae6ba39d6"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/orchestratormaxxing/skills/i-have-adhd/SKILL.md",
       "sha256": "5409c825084114ab5e9727670c233ab919d88d50f72772ae03c8dd3914bab30a"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/skills/i-have-adhd/references/examples.md",
+      "path": "plugins/orchestratormaxxing/skills/i-have-adhd/references/examples.md",
       "sha256": "3c8c8e0df764f6d4118a2bcd44791979bfbad9673c08da9ea5dd5f3b02db36ef"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/skills/i-have-adhd/references/rationale.md",
+      "path": "plugins/orchestratormaxxing/skills/i-have-adhd/references/rationale.md",
       "sha256": "7243fca979340fe054c5fbb72d679da7b88c007dea70462aa63453d93a2805d4"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/skills/ideas/SKILL.md",
+      "path": "plugins/orchestratormaxxing/skills/ideas/SKILL.md",
       "sha256": "485da9eb0b12dcda950851a49d957a486e15268e551d58b843a2331d452127a3"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/skills/ideas/agents/openai.yaml",
-      "sha256": "36905fc2e8d610eadeaf2ccd93eee224446482bc2cd20893c801dd650d157293"
+      "path": "plugins/orchestratormaxxing/skills/ideas/agents/openai.yaml",
+      "sha256": "eb2cb050aecc53ab9b1079bd4c3e7506739c8eb0e3a5b51010dff65aa25fc63f"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/skills/memory/SKILL.md",
+      "path": "plugins/orchestratormaxxing/skills/memory/SKILL.md",
       "sha256": "2c3f4a40de8b320c99657f81a27f08ed94b4a0976f6ded5ae96af158fe336a68"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/skills/memory/agents/openai.yaml",
-      "sha256": "74e7d23835a2f8273988777fde2758d64dd38b41245ea83071f3a74642f35208"
+      "path": "plugins/orchestratormaxxing/skills/memory/agents/openai.yaml",
+      "sha256": "1ff643be4bdf7e69db2c71338c02cac23323fd345dcdd10d55c0609b91c62626"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/skills/self-improve/SKILL.md",
-      "sha256": "9dba712495851083e9875c0a002b64265b3a317b987571397ad515d7ad78068f"
+      "path": "plugins/orchestratormaxxing/skills/self-improve/SKILL.md",
+      "sha256": "b56270a2d826fb9e94c81e6fdb442b076e83d1ea36c1ec61a172444a3c132726"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/skills/self-improve/agents/openai.yaml",
-      "sha256": "c954b04dcf5db66b12428dabcc96276b5aa3a0527de06f70e74530c419eff7bc"
+      "path": "plugins/orchestratormaxxing/skills/self-improve/agents/openai.yaml",
+      "sha256": "8575da9323275d2f90db51e850b8a4b46e461122a92ac15610e6e0890c6fd65d"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/skills/solplan/SKILL.md",
-      "sha256": "9f714ba2a9fa9495671e5ee9deb24940c172a3c48a603789b4ee005d501af713"
+      "path": "plugins/orchestratormaxxing/skills/solplan/SKILL.md",
+      "sha256": "ccbdb34b7ee95ef09f2e3eba0842469f29d0a86fbf035f01ffbcf8d32be14014"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/skills/solplan/agents/openai.yaml",
-      "sha256": "3ab906e2358e813bbcc84942f2dc7a25b3a7793273394052be48e7a4fafd2887"
+      "path": "plugins/orchestratormaxxing/skills/solplan/agents/openai.yaml",
+      "sha256": "23c63c8a50edc095d9824d186f679c80e3ff9638dd3eefea85732812e287d47f"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/skills/solplan/scripts/run_solplan.py",
+      "path": "plugins/orchestratormaxxing/skills/solplan/scripts/run_solplan.py",
       "sha256": "38b5f954061e94b66f01431e0ada9114a7181713a436b8a8f5ee260b86779a4a"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/skills/wrap-up/SKILL.md",
+      "path": "plugins/orchestratormaxxing/skills/wrap-up/SKILL.md",
       "sha256": "270840d582434eca58227ba3f5f036f7cd6e325d9d7c3bc5bc2339208179549d"
     },
     {
       "mode": "file",
-      "path": "plugins/claudemaxxing/skills/wrap-up/agents/openai.yaml",
-      "sha256": "b7f7495f464e8e6e622b868425e087ccb696665125d65d02144891c83e39b1d4"
+      "path": "plugins/orchestratormaxxing/skills/wrap-up/agents/openai.yaml",
+      "sha256": "2dceb3653b0697f8e693ccabbc32eb9567f307e43dcf9b6809faa96b02cb6e7a"
     },
     {
       "mode": "file",
@@ -744,27 +744,27 @@
     {
       "mode": "file",
       "path": "shell/claude-c.sh",
-      "sha256": "2dacfa6ffe5241ed91840752a822381c246079bfaaef59bf63c5257336c0badb"
+      "sha256": "4817940c67453a3ec8fd0c403aee3687bd99e134857d072a889952172289adc6"
     },
     {
       "mode": "file",
       "path": "shell/codex-g.sh",
-      "sha256": "f6f93be6d95ff972a98e742e3059a33a30c56c3618c06cbdb63ff8525cff8cdf"
+      "sha256": "353be99d8eeaffee3f93d96fe53d4919a7eba84e6cb477ef1d0c0db733e96d16"
     },
     {
       "mode": "file",
       "path": "shell/opencode-o.sh",
-      "sha256": "a82ee92c70cb09637c33f98ff1980177634747a81e0093e83d01d175eab32089"
+      "sha256": "9d87941764156bc182d89e8b19001ec2b6272a1f7114eacdb707f48b5cec992d"
     },
     {
       "mode": "file",
       "path": "shell/tmux.conf",
-      "sha256": "19b592f59cf84e3172a7af03bb7c1aa3bb1d4f949074706196b57ddd4692db91"
+      "sha256": "5a6df3b79efdf9ab897931dc0b371ea6bc8e19ebffab846579c72f0f81e26148"
     },
     {
       "mode": "file",
       "path": "shell/warp-recovery.sh",
-      "sha256": "31bc56dd45935f8ec9b894cfb2476443f678e6398f6c79dc11147ba4049c05c4"
+      "sha256": "9dc59d002d7f1a86cd2e5ba063ab10780db23bb4b073db798883a7eaa8f8f5af"
     },
     {
       "mode": "file",
@@ -774,7 +774,7 @@
     {
       "mode": "file",
       "path": "skills/external-stack.json",
-      "sha256": "c51bb710a070aeb73f36ad28e75c0dab00242fde222e73e6d19e39235d096c8d"
+      "sha256": "8e558b89fac8bfdcb04ce31281b0936b1a3a1425d90afe0c702fb38b4527a4df"
     },
     {
       "mode": "file",
@@ -789,7 +789,7 @@
     {
       "mode": "exec",
       "path": "tests/agent-done-notify/run.sh",
-      "sha256": "83c83363d1dc13c73c7e0e626ef270c2d17d8381832747c92a5db9577798c678"
+      "sha256": "f2ae91bedb7c548af1efff92400ca153462a6a7c84e97e47afc2ac2996f305c8"
     },
     {
       "mode": "exec",
@@ -799,7 +799,7 @@
     {
       "mode": "exec",
       "path": "tests/agent-tab-status/run.sh",
-      "sha256": "14ca5515195397b5e2352b98856e5b7313cc78324fa9e487825347b36f1024a8"
+      "sha256": "992f03bbe13f9588cd93a38aeab73a15df5f17c2464758c09565e00352bb9e30"
     },
     {
       "mode": "file",
@@ -824,7 +824,7 @@
     {
       "mode": "file",
       "path": "tests/cheap-delegate/fixtures/codex-no-attribution.md",
-      "sha256": "8827670149448b4c1badbfbd582d392dcda7a06f42141c30c96c397dab71c27b"
+      "sha256": "66e9587b2c3df507d1fa039a9abcd3e7e27cc536533fb0637df2228d71de26a6"
     },
     {
       "mode": "file",
@@ -834,7 +834,7 @@
     {
       "mode": "file",
       "path": "tests/cheap-delegate/fixtures/codex-no-ledger.md",
-      "sha256": "08df954d275f0c4211fdbe5f9824221685d60371eb646fa12b92b41709396c6d"
+      "sha256": "a0fb60057be75468da3166ccc3daf831fe60bc2421241bacffb202e0687b55d5"
     },
     {
       "mode": "file",
@@ -844,12 +844,12 @@
     {
       "mode": "exec",
       "path": "tests/cheap-delegate/run.sh",
-      "sha256": "60a96961cc29d6cb89a95c3f45abda10fa6ed1f8aa076f63c0624b098e1fb1e3"
+      "sha256": "8e051ee82d56f4e78a486234d9117797d378d149e71bbe8740e245669f587040"
     },
     {
       "mode": "exec",
       "path": "tests/codex-stop-hook/run.sh",
-      "sha256": "11da1df3ec94259c6c995e04700385237a5a63081517b48ff8cb014bbbdcc706"
+      "sha256": "4b26f03b817a28fcfebaa5f7e21ef208af01fdf65d0bc5cf775d4a55b8440636"
     },
     {
       "mode": "exec",
@@ -859,7 +859,7 @@
     {
       "mode": "exec",
       "path": "tests/cogload-schedule/run.sh",
-      "sha256": "d5047c00d4a0d49397b0054e6beb2314504ddd2d834c396e3ead4bd81b8b3299"
+      "sha256": "457d8fee4c6f1c92a06167094ca94f0a40cf333f98a22cd24e7f2261827d5cf9"
     },
     {
       "mode": "exec",
@@ -879,12 +879,12 @@
     {
       "mode": "exec",
       "path": "tests/core-export/run.sh",
-      "sha256": "7f042dd8bc3b5fa845e287050face25298abaec4fe4b3c9ac7d3bb04e89adeec"
+      "sha256": "64ef196fbc059b036267bfe3260fea949a47e00220ea865c4a995cbeb5fe6c20"
     },
     {
       "mode": "file",
       "path": "tests/delegate-ledger/run.py",
-      "sha256": "759f36e5f89af098e63f8814469025db23675620228f6c7ce3dbdf7997d377de"
+      "sha256": "a3ea16f1869d88b333b16f58b765c513b0b1aa177ddaca73856d2725da0e9664"
     },
     {
       "mode": "file",
@@ -894,7 +894,7 @@
     {
       "mode": "exec",
       "path": "tests/deployed-host-state/run.sh",
-      "sha256": "f1ced297f6f735ae6db07e32415d1927207edbc41f70b0e40d55e38f038e963a"
+      "sha256": "4fc1fbc990c4925190e9c309b0a93750068de21433400cab2e432bfd20ee2262"
     },
     {
       "mode": "file",
@@ -929,12 +929,12 @@
     {
       "mode": "exec",
       "path": "tests/harness-observer-diagnostics/run.sh",
-      "sha256": "6adc9485b5a2cc63b6e17e6b3912d4ca4dd11622ef8b3e436c532168ac7c7a7a"
+      "sha256": "4bf3b432dee2fab4837c9af0ddcc4f47a89f95bd185bf8e4639b036916688395"
     },
     {
       "mode": "exec",
       "path": "tests/harness-reentrancy/run.sh",
-      "sha256": "f9c37c4ba2b2470a35907778585a8a3cd5b7f7032ee6413f9608a9c06875286a"
+      "sha256": "dfc381e18922c8d75b47a8023b7c57ee86233a63808fa3aab50ca08e12024c63"
     },
     {
       "mode": "exec",
@@ -944,7 +944,7 @@
     {
       "mode": "exec",
       "path": "tests/harness-sync/run.sh",
-      "sha256": "08c3eb387a86256130dd21caaa8d8794a39fa0c59931a9a0e4591ed5f65570a9"
+      "sha256": "64b30d453164734a35b3514628f67f1bf876156d739e0d8eec7f7a286c781c62"
     },
     {
       "mode": "exec",
@@ -954,12 +954,12 @@
     {
       "mode": "exec",
       "path": "tests/harness-verify-selfconsistency/run.sh",
-      "sha256": "2f58df671f54d955f0d1d3142bca0ffe1c82ab19a2f8bda985eb0d14daba9dc9"
+      "sha256": "f6b40835fac5fe8db77e8b678a171d16cdc67dc4268a2cc46255e03e7378327b"
     },
     {
       "mode": "exec",
       "path": "tests/harness-watch-cadence/run.sh",
-      "sha256": "5c390a6e2df98a649bafc84f76374fccd6f953862f2073697e8829261b489464"
+      "sha256": "f9d63cd3b5a49bd2ebfb9293455ebde2ac6e31a7f551011ffc58c6bdf571e9cc"
     },
     {
       "mode": "exec",
@@ -969,7 +969,7 @@
     {
       "mode": "exec",
       "path": "tests/kimi-k3-routing/run.sh",
-      "sha256": "44c0b853373ef3c0ca127dcd21751725fcf76774be852ebb37d938334cc1ce81"
+      "sha256": "35764ca603f4fdbb4048853f90268db69f651070bf7cbe14c0176a27dda467a0"
     },
     {
       "mode": "file",
@@ -979,12 +979,12 @@
     {
       "mode": "exec",
       "path": "tests/loop-claim/run.sh",
-      "sha256": "445214ae8f0839a05436dbaf16ab634b4448938ac453f1d026d4c68dea57b82c"
+      "sha256": "fe48e93ef44de8ffd3e460f79dd43721dfa915222835412abb145f07c66a9fad"
     },
     {
       "mode": "exec",
       "path": "tests/loop-queue-release/run.sh",
-      "sha256": "bf51e2a72740c5822c226a3d0e968fc7d4c7cfb5b1e2a3d8b1a5db8308a74ecf"
+      "sha256": "c8f0e6cb16a2a6c627b32a9961189c542e010febc811e6faf58fe0ac28da4a57"
     },
     {
       "mode": "exec",
@@ -994,7 +994,7 @@
     {
       "mode": "exec",
       "path": "tests/memory-bridge-hermes/run.sh",
-      "sha256": "9e5a6cbf272d225b9da62043f840878a0d004c2590248df3b2b5d0ba7838e79c"
+      "sha256": "b5f083b8d5e6f5838492fadc3a73034a6a68478531f082b5c9aeb2ff61c6b17a"
     },
     {
       "mode": "exec",
@@ -1034,7 +1034,7 @@
     {
       "mode": "exec",
       "path": "tests/model-routing-consistency/run.sh",
-      "sha256": "38f6991b974b4acee6cb055f9d36042b935d21ef98fc30492791bb4cdf76319c"
+      "sha256": "0efd8e390068383939ba2b2d6d1d3eeb1b8bb08ba20a6d0b316fff1ee80cc93c"
     },
     {
       "mode": "exec",
@@ -1054,12 +1054,12 @@
     {
       "mode": "exec",
       "path": "tests/o/fake-opencode.py",
-      "sha256": "ee21fd6de686167f23b49ef8d7206d0919a2cedf7a794569556615b873973c75"
+      "sha256": "e23d2e78d01e201ebe784e686d96501a13ab81ab2fc266e1e752d061c49c306b"
     },
     {
       "mode": "exec",
       "path": "tests/o/run.sh",
-      "sha256": "93fde1f7fb8e6d404451411068067465613c6658411be5f0584c4c18dd6efa68"
+      "sha256": "d250ee9b8a58df4b436bee865c527e32216e3c3a71a51f163cac77b421e2c321"
     },
     {
       "mode": "exec",
@@ -1094,7 +1094,7 @@
     {
       "mode": "exec",
       "path": "tests/opencode-event-plugin/run.sh",
-      "sha256": "b4a51d17ea59a770c0b595f9f4695e648fae5d3235c2e8e3a3ef733b62c111f2"
+      "sha256": "cb9429ba0d0efd7a931f86fbb5146886183865bca29fc9a283e0c37584c151e5"
     },
     {
       "mode": "exec",
@@ -1144,7 +1144,12 @@
     {
       "mode": "exec",
       "path": "tests/skill-stack-install/run.sh",
-      "sha256": "23da84ac41d3e38b8494715ed4a8ff20ee4eec475d1e675fbf35cc8bb127bae6"
+      "sha256": "eaa225959cc125bdb4a32b04573ed25de70aed1f95803e5b0821a31dd1b7cd34"
+    },
+    {
+      "mode": "file",
+      "path": "tests/solplan-runner/test_solplan_runner.py",
+      "sha256": "bdc6f8b006176e5575c77a5c5c396abdcfe9e2fbf2deec9cb4baeca7798cd47c"
     },
     {
       "mode": "file",
@@ -1169,7 +1174,7 @@
     {
       "mode": "file",
       "path": "tests/token-ledger/run.py",
-      "sha256": "5f1a5e3d11800ca7894d1880cb81c689e9fc64b4536944ff6680aa08e741e330"
+      "sha256": "ded907d1f8eaeb1865abac549ff8c2770ae60dc6da759aba4a513caeb04b7e90"
     },
     {
       "mode": "exec",
@@ -1184,7 +1189,7 @@
     {
       "mode": "exec",
       "path": "tests/warp-agent-install/run.sh",
-      "sha256": "5e0e731d0180c61d480a8ec30f93a353d71561498c025a3da2c7e1afa1e65c06"
+      "sha256": "96fda829e7cbae8b2aa14f11e9a5d32a00224cb6fc38983d454876141a67942b"
     },
     {
       "mode": "exec",
@@ -1199,7 +1204,7 @@
     {
       "mode": "exec",
       "path": "tests/warp-model-pin/run.sh",
-      "sha256": "e84af6f523c09a3a776af4062260714b71976e692d453e5b58391ecd659b69e4"
+      "sha256": "3b00c88da52b16b566c6ca5b447e4fb731ae82ea25e11d1a2892a57b1ff803f4"
     },
     {
       "mode": "exec",
@@ -1209,17 +1214,12 @@
     {
       "mode": "exec",
       "path": "tests/weakest-sufficient/run.sh",
-      "sha256": "4b852e925c9795919334a793fe81441955e59620cec04966e600ffb3e5a6c19f"
+      "sha256": "38a6b15a11cf1d175e3896ed31de521c24bb38387359eda38a48188d76638661"
     },
     {
       "mode": "exec",
       "path": "tests/zed-setup/run.sh",
       "sha256": "8e9273365339c4e38bac39706b427c1a213b200ff7097d61aa46867c1b161132"
-    },
-    {
-      "mode": "exec",
-      "path": "xsearch.py",
-      "sha256": "334c9d33c785f259a1ea13064c2e76c9ea0d23a0997959bf3b264fcacc02bb55"
     }
   ],
   "gate": {
@@ -1228,12 +1228,11 @@
     "literal_hits": 0
   },
   "manifest": "deploy/graduation.manifest",
-  "manifest_sha256": "7e5df7f3666bd19d0e9660c2ce8c484dcfceb0407e382ea8f3a210088588704f",
-  "source_commit": "265c8c9085be99dead0508366c56bd7d25914b57",
+  "manifest_sha256": "88d04717a2f91b6a378299fe16bdef2587e04686e65a5d6177cbe9b5d5e79c85",
+  "source_commit": "a500a43061ab3c77f7aa6374abf7e45464cf00fd",
   "source_tree_ish": "HEAD",
   "stripped": {
     "CLAUDE.md": 4,
-    "README.md": 3,
     "knowledge/delegation-playbook.md": 7,
     "knowledge/tool-inventory.md": 1
   },

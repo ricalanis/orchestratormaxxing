@@ -3,7 +3,7 @@
 #
 # The guard exists because a third-party installer wrote a compaction override into
 # ~/.codex/config.toml, widened agents.max_depth to 2, and deleted the deployed
-# claudemaxxing doctrine block from ~/.codex/AGENTS.md on 2026-07-24 — and the gate
+# orchestratormaxxing doctrine block from ~/.codex/AGENTS.md on 2026-07-24 — and the gate
 # reported green throughout, because it only ever read the REPO copies.
 #
 # Every case below was first proven against the live machine before being frozen here;
@@ -50,7 +50,7 @@ def build(tmp, *, installed=True, codex_extra="", doctrine=True, truncate=False,
           hooks=None, known_marketplaces=None, installed_plugins=None, settings_extra=None):
     home = pathlib.Path(tmp)
     if installed:
-        (home / ".config" / "claudemaxxing").mkdir(parents=True, exist_ok=True)
+        (home / ".config" / "orchestratormaxxing").mkdir(parents=True, exist_ok=True)
     (home / ".codex").mkdir(parents=True, exist_ok=True)
     (home / ".claude").mkdir(parents=True, exist_ok=True)
     (home / ".codex" / "config.toml").write_text(
@@ -240,21 +240,21 @@ with tempfile.TemporaryDirectory() as t:
 # source under a known name" case below was proven RED against the name-only guard
 # before the fix landed.
 
-# C21 — Codex [marketplaces.personal] pointing anywhere but a claudemaxxing checkout.
+# C21 — Codex [marketplaces.personal] pointing anywhere but a orchestratormaxxing checkout.
 # This is the clobber shape: the reserved name, a foreign payload.
 with tempfile.TemporaryDirectory() as t:
     home = build(t, codex_extra='\n[marketplaces.personal]\nsource_type = "local"\nsource = "/elsewhere/payload"\n')
     expect("C21 codex personal clobbered", check(str(root), home), severity="warn",
-           needle="claudemaxxing checkout")
+           needle="orchestratormaxxing checkout")
 
 # C21b — a git-sourced 'personal' is the same clobber even if the URL looks plausible.
 with tempfile.TemporaryDirectory() as t:
-    home = build(t, codex_extra='\n[marketplaces.personal]\nsource_type = "git"\nsource = "https://x.example/claudemaxxing.git"\n')
+    home = build(t, codex_extra='\n[marketplaces.personal]\nsource_type = "git"\nsource = "https://x.example/orchestratormaxxing.git"\n')
     expect("C21b codex personal git-sourced", check(str(root), home), severity="warn",
-           needle="claudemaxxing checkout")
+           needle="orchestratormaxxing checkout")
 
 # C22 — a genuine local 'personal' registration stays quiet. The fixture points at THIS
-# repo, whose .agents/plugins/marketplace.json declares the claudemaxxing plugin — the
+# repo, whose .agents/plugins/marketplace.json declares the orchestratormaxxing plugin — the
 # identity is content, not a literal path, so the check holds on any machine (~/dev vs
 # ~/Dev) and inside loop worktrees.
 with tempfile.TemporaryDirectory() as t:
@@ -333,14 +333,14 @@ with tempfile.TemporaryDirectory() as t:
     except Exception as ex:
         failures.append(f"C21c non-table personal: guard RAISED {type(ex).__name__}: {ex}")
     else:
-        expect("C21c non-table personal", issues, severity="warn", needle="claudemaxxing checkout")
+        expect("C21c non-table personal", issues, severity="warn", needle="orchestratormaxxing checkout")
 
 # C21d — a non-string local source (TOML allows it) must warn: the checkout check must
 # fail closed on junk, not accept what it cannot read.
 with tempfile.TemporaryDirectory() as t:
     home = build(t, codex_extra='\n[marketplaces.personal]\nsource_type = "local"\nsource = 3\n')
     expect("C21d non-string personal source", check(str(root), home), severity="warn",
-           needle="claudemaxxing checkout")
+           needle="orchestratormaxxing checkout")
 
 # C21e — a decoy checkout: the source dir HAS a marketplace.json but it declares a
 # different plugin. Content identity means the plugin name decides, not file presence.
@@ -349,11 +349,11 @@ with tempfile.TemporaryDirectory() as t:
     decoy = pathlib.Path(t, "decoy", ".agents", "plugins")
     decoy.mkdir(parents=True)
     (decoy / "marketplace.json").write_text(json.dumps(
-        {"name": "personal", "plugins": [{"name": "not-claudemaxxing"}]}))
+        {"name": "personal", "plugins": [{"name": "not-orchestratormaxxing"}]}))
     p = pathlib.Path(home, ".codex", "config.toml")
     p.write_text(p.read_text() + f'\n[marketplaces.personal]\nsource_type = "local"\nsource = "{pathlib.Path(t, "decoy")}"\n')
     expect("C21e decoy checkout", check(str(root), home), severity="warn",
-           needle="claudemaxxing checkout")
+           needle="orchestratormaxxing checkout")
 
 # C27 — Codex i-have-adhd with a foreign git URL under the known name.
 with tempfile.TemporaryDirectory() as t:

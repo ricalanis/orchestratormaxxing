@@ -38,13 +38,13 @@ def payload_for(line: str, turn: int) -> dict[str, str]:
 
 
 def main() -> int:
-    if os.environ.get("CLAUDEMAXXING_HARNESS_CHILD") != "1":
+    if os.environ.get("ORCHESTRATORMAXXING_HARNESS_CHILD") != "1":
         print("UNMARKED_WORKER", file=sys.stderr)
         return 91
     if args_log := os.environ.get("OPENCODE_ARGS_LOG"):
         with open(args_log, "a", encoding="utf-8") as stream:
             stream.write(" ".join(sys.argv[1:]) + "\n")
-    delegated = os.environ.get("CLAUDEMAXXING_O_DELEGATED") == "1"
+    delegated = os.environ.get("ORCHESTRATORMAXXING_O_DELEGATED") == "1"
     if "--auto" in sys.argv[1:] and not delegated:
         print("UNMARKED_DELEGATED_WORKER", file=sys.stderr)
         return 93

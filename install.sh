@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# claudemaxxing install — deploy the orchestrator harness GLOBALLY (standalone).
+# orchestratormaxxing install — deploy the orchestrator harness GLOBALLY (standalone).
 #
 # Makes the agentic layer available in EVERY Claude Code and Codex session, with no
 # references back to this repo's path:
@@ -8,9 +8,9 @@
 #   • agents   → ~/.claude/agents/{ollama-worker,product-manager,fable-planner}.md
 #   • commands → ~/.claude/commands/{fanout,ideas,self-improve,wrap-up,fableplan,plan-to-repo,gauntlet}.md (bare `oll`/`session-log`)
 #   • codex    → repo marketplace plugin + ~/.codex/agents/*.toml
-#   • shell    → ~/.config/claudemaxxing/{claude-c,codex-g}.sh + tmux.conf
+#   • shell    → ~/.config/orchestratormaxxing/{claude-c,codex-g}.sh + tmux.conf
 #   • doctrine → ~/.claude/CLAUDE.md + ~/.codex/AGENTS.md (compact marked block)
-#   • xAI key  → ~/.config/claudemaxxing/.env   (standalone key source for xsearch)
+#   • xAI key  → ~/.config/orchestratormaxxing/.env   (standalone key source for xsearch)
 #
 # Keys (ollama key lives in OpenCode's auth store, already global):
 #   export XAI_API_KEY=...   # optional; falls back to repo .env if present
@@ -31,8 +31,8 @@ _launchd_owned_here(){
 BIN_DST="$HOME/.local/bin"
 CLAUDE_DIR="$HOME/.claude"
 CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
-CFG_DIR="$HOME/.config/claudemaxxing"
-SHARE_DIR="$HOME/.local/share/claudemaxxing"
+CFG_DIR="$HOME/.config/orchestratormaxxing"
+SHARE_DIR="$HOME/.local/share/orchestratormaxxing"
 
 say "Retired Claude → Codex control plane cleanup"
 # These exact artifacts belonged to the retired custom orch-* layer. Pruning is
@@ -40,7 +40,7 @@ say "Retired Claude → Codex control plane cleanup"
 rm -f -- "$BIN_DST/orch-ledger" "$BIN_DST/orch-dispatch" \
   "$BIN_DST/orch-monitor" "$BIN_DST/orch-escalate" \
   "$CLAUDE_DIR/commands/orchestrate.md"
-python3 - "$CODEX_DIR/plugins/cache/personal/claudemaxxing" <<'PY'
+python3 - "$CODEX_DIR/plugins/cache/personal/orchestratormaxxing" <<'PY'
 import os, shutil, sys
 
 root = os.path.realpath(sys.argv[1])
@@ -104,7 +104,7 @@ cp "$REPO_DIR/bin/opencode-browser-mcp" "$BIN_DST/opencode-browser-mcp"
 cp "$REPO_DIR/bin/browser-mcp-contract" "$BIN_DST/browser-mcp-contract"
 cp "$REPO_DIR/bin/gauntlet-judge" "$BIN_DST/gauntlet-judge"
 
-cp "$REPO_DIR/xsearch.py"      "$BIN_DST/xsearch"
+cp "$REPO_DIR/bin/xsearch"     "$BIN_DST/xsearch"
 mkdir -p "$SHARE_DIR"
 chmod +x "$BIN_DST/o"
 rm -rf -- "$SHARE_DIR/orchestration_practices"
@@ -149,16 +149,16 @@ say "Governed skill stack → Claude, Codex, OpenCode, and production Hermes"
 # ADOPT + EXTEND: upstream payloads stay pinned in skills/external-stack.json;
 # this repo supplies the four-host lifecycle and the automatic anti-slop router.
 # The explicit skip is for offline installer contracts/recovery, not normal setup.
-if [ "${CLAUDEMAXXING_SKIP_EXTERNAL_SKILLS:-0}" = "1" ]; then
-  echo "  skipped pinned skill stack (CLAUDEMAXXING_SKIP_EXTERNAL_SKILLS=1)"
+if [ "${ORCHESTRATORMAXXING_SKIP_EXTERNAL_SKILLS:-0}" = "1" ]; then
+  echo "  skipped pinned skill stack (ORCHESTRATORMAXXING_SKIP_EXTERNAL_SKILLS=1)"
 else
   # Internal skills (skills/anti-slop-design, skills/orchestration-practices) and the
-  # core claudemaxxing workflow skills are entries in the same governed manifest;
+  # core orchestratormaxxing workflow skills are entries in the same governed manifest;
   # one sync installs them on all four hosts. The explicit source keeps global
   # installs bound to this checkout instead of ~/.local/bin.
   "$BIN_DST/sync-agent-skills" \
     --manifest "$REPO_DIR/skills/external-stack.json" \
-    --source "local://claudemaxxing=$REPO_DIR" || {
+    --source "local://orchestratormaxxing=$REPO_DIR" || {
     echo "  ERROR: pinned skill stack installation failed" >&2
     exit 1
   }
@@ -167,7 +167,7 @@ else
   fi
 fi
 
-say "Codex agent roles + claudemaxxing plugin"
+say "Codex agent roles + orchestratormaxxing plugin"
 mkdir -p "$CODEX_DIR/agents"
 # Remove the superseded Codex-only planner copy. Claude's fable-planner remains
 # installed separately under ~/.claude/agents.
@@ -188,19 +188,19 @@ if command -v codex >/dev/null 2>&1; then
       exit 1
     }
   fi
-  codex plugin add claudemaxxing@personal --json >/dev/null 2>&1 || {
-    echo "  ERROR: could not install claudemaxxing@personal" >&2
+  codex plugin add orchestratormaxxing@personal --json >/dev/null 2>&1 || {
+    echo "  ERROR: could not install orchestratormaxxing@personal" >&2
     exit 1
   }
   EXPECTED_PLUGIN_VERSION=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["version"])' \
-    "$REPO_DIR/plugins/claudemaxxing/.codex-plugin/plugin.json")
+    "$REPO_DIR/plugins/orchestratormaxxing/.codex-plugin/plugin.json")
   codex plugin list --json 2>/dev/null | python3 -c \
-    'import json, sys; expected=sys.argv[1]; data=json.load(sys.stdin); raise SystemExit(0 if any(p.get("pluginId") == "claudemaxxing@personal" and p.get("installed") is True and p.get("enabled") is True and p.get("version") == expected for p in data.get("installed", [])) else 1)' \
+    'import json, sys; expected=sys.argv[1]; data=json.load(sys.stdin); raise SystemExit(0 if any(p.get("pluginId") == "orchestratormaxxing@personal" and p.get("installed") is True and p.get("enabled") is True and p.get("version") == expected for p in data.get("installed", [])) else 1)' \
     "$EXPECTED_PLUGIN_VERSION" || {
-      echo "  ERROR: claudemaxxing@personal is not installed+enabled at $EXPECTED_PLUGIN_VERSION after setup" >&2
+      echo "  ERROR: orchestratormaxxing@personal is not installed+enabled at $EXPECTED_PLUGIN_VERSION after setup" >&2
       exit 1
     }
-  echo "  installed and verified claudemaxxing Codex plugin"
+  echo "  installed and verified orchestratormaxxing Codex plugin"
 else
   echo "  (Codex not installed — plugin registration skipped; bootstrap.sh can install it)"
 fi
@@ -314,8 +314,8 @@ echo "  wrote $CODEX_SHELL_SNIPPET"
 OPENCODE_SHELL_SNIPPET="$CFG_DIR/opencode-o.sh"
 cp "$REPO_DIR/shell/opencode-o.sh" "$OPENCODE_SHELL_SNIPPET"
 echo "  wrote $OPENCODE_SHELL_SNIPPET"
-C_BEGIN="# >>> claudemaxxing:c-command >>>"
-C_END="# <<< claudemaxxing:c-command <<<"
+C_BEGIN="# >>> orchestratormaxxing:c-command >>>"
+C_END="# <<< orchestratormaxxing:c-command <<<"
 for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
   [ -e "$rc" ] || continue
   if grep -qF "$C_BEGIN" "$rc"; then          # idempotent: drop any prior marked block first
@@ -349,8 +349,8 @@ done
 TMUX_SNIPPET="$CFG_DIR/tmux.conf"
 cp "$REPO_DIR/shell/tmux.conf" "$TMUX_SNIPPET"
 TMUX_USER_CONF="$HOME/.tmux.conf"
-TMUX_BEGIN="# >>> claudemaxxing:tmux >>>"
-TMUX_END="# <<< claudemaxxing:tmux <<<"
+TMUX_BEGIN="# >>> orchestratormaxxing:tmux >>>"
+TMUX_END="# <<< orchestratormaxxing:tmux <<<"
 touch "$TMUX_USER_CONF"
 if grep -qF "$TMUX_BEGIN" "$TMUX_USER_CONF"; then
   python3 - "$TMUX_USER_CONF" "$TMUX_BEGIN" "$TMUX_END" <<'PY'
@@ -440,7 +440,7 @@ LEGACY_PLAN_TO_REPO = (
     "resolve slugs) and POST {\"node_kind\":\"project\",\"node_id\":\"<proj_id>\","
     "\"kind\":\"plan\",\"title\":\"<title>\",\"path\":\"<slug>/<file>.md\","
     "\"source_agent\":\"opencode\"} to http://127.0.0.1:3000/api/attachments with header "
-    "'Authorization: Bearer $(cat ~/.config/claudemaxxing/dashboard-token)'. Re-posting the "
+    "'Authorization: Bearer $(cat ~/.config/orchestratormaxxing/dashboard-token)'. Re-posting the "
     "same path upserts, so re-running is safe. If registration fails, KEEP the file and the "
     "commit and report the exact POST for a human to run — never skip writing the plan "
     "because the POST failed. Full convention: ~/dev/planning/README.md."
@@ -576,8 +576,8 @@ else
 fi
 
 say "Orchestrator pointer → Claude, Codex, OpenCode, and Zed global instructions"
-BEGIN="<!-- claudemaxxing:orchestrator:begin -->"
-END="<!-- claudemaxxing:orchestrator:end -->"
+BEGIN="<!-- orchestratormaxxing:orchestrator:begin -->"
+END="<!-- orchestratormaxxing:orchestrator:end -->"
 # Same marked doctrine block into every harness-aware agent's global context file:
 # Claude Code reads ~/.claude/CLAUDE.md; Codex reads ~/.codex/AGENTS.md;
 # OpenCode reads ~/.config/opencode/AGENTS.md; Zed's agent reads the always-on
@@ -603,7 +603,7 @@ if [ ! -f "$WARP_RULES_MD" ] || ! grep -qF "$BEGIN" "$WARP_RULES_MD"; then
   cat > "$WARP_RULES_MD" <<'MD'
 # Warp Drive Global Rules — paste source (generated by install.sh; do not hand-edit)
 
-Open Warp → Warp Drive → Rules → add (or replace) the claudemaxxing global rule
+Open Warp → Warp Drive → Rules → add (or replace) the orchestratormaxxing global rule
 with everything BETWEEN the markers below. Re-paste after doctrine changes —
 install.sh refreshes this file on every run.
 MD
@@ -625,11 +625,11 @@ PY
 fi
 HOST_ROUTING=""
 if [ "$GLOBAL_MD" = "$CODEX_DIR/AGENTS.md" ]; then
-  HOST_ROUTING='- **Codex plan-first routing:** use the namespaced `$claudemaxxing:*` skills; nontrivial unplanned work → `$claudemaxxing:solplan` → root review → `$claudemaxxing:fanout` only for independent chunks.'
+  HOST_ROUTING='- **Codex plan-first routing:** use the namespaced `$orchestratormaxxing:*` skills; nontrivial unplanned work → `$orchestratormaxxing:solplan` → root review → `$orchestratormaxxing:fanout` only for independent chunks.'
 elif [ "$GLOBAL_MD" = "$OPENCODE_CFG_DIR/AGENTS.md" ]; then
-  HOST_ROUTING='- **OpenCode routing:** the claudemaxxing workflow skills are installed natively. Use `/kimiplan` for read-only planning, then `fanout` only for independent chunks; `o delegate/send/handoff/close` remains the stateful worker lifecycle.'
+  HOST_ROUTING='- **OpenCode routing:** the orchestratormaxxing workflow skills are installed natively. Use `/kimiplan` for read-only planning, then `fanout` only for independent chunks; `o delegate/send/handoff/close` remains the stateful worker lifecycle.'
 elif [ "$GLOBAL_MD" = "$HOME/.hermes/AGENTS.md" ]; then
-  HOST_ROUTING='- **Hermes routing:** the claudemaxxing workflow skills are installed natively; Hermes keeps its richer native `plan-to-repo`. Use `solplan` for read-only planning and the same `oll`/`o` deterministic worker lifecycle.'
+  HOST_ROUTING='- **Hermes routing:** the orchestratormaxxing workflow skills are installed natively; Hermes keeps its richer native `plan-to-repo`. Use `solplan` for read-only planning and the same `oll`/`o` deterministic worker lifecycle.'
 fi
 cat >> "$GLOBAL_MD" <<MD
 
@@ -640,7 +640,7 @@ The primary host (Claude, Codex, OpenCode, or Hermes) orchestrates + verifies; h
 - **Delegate** bulk/parallel/low-stakes work (summarize, classify, draft, first-pass code/tests/review). **Keep in the primary frontier thread:** cross-file architecture, risky edits, final sign-off/merge.
 - **Iron rule of verification:** verification cost scales with the *spec*, not the *solution* — never re-do a worker's work to check it. Author the contract (tests/checklist) first; read only pass/fail. If you can't cheaply specify "correct," keep it in the frontier thread.
 - **Physical delegation gate:** Root persists read-only \`.results/delegation/<run-id>/contract.md\` + \`brief.md\` before dispatch; workers never author/certify their gate. New OpenCode briefs mark exactly one complete bounded turn-1 assignment with \`<!-- o-delegate-turn-1:begin -->\` / \`<!-- o-delegate-turn-1:end -->\`: \`o delegate\` executes it immediately, while \`o send\` is repair-only and never the initial task (unmarked legacy bounded briefs execute as a whole). Direct \`oll\` is response-only (no files/shell/tests); workspace reads/edits, commands/tests, persistent artifacts, and repairs route through the public \`o\` worker runtime (\`o delegate/send/handoff\`; \`o output\` is pane diagnostics; then \`o close\` — an unclosed worker leaks a process tree); \`occ\` is internal one-shot transport.
-- Tools (on PATH): \`oll "<task>" --model <m>\` · \`oll-council "<q>"\` · \`memoryctl\` · \`mem-audit\`. Workflows: Claude \`/gauntlet\` (divide a broad request into gated increments, one step before planning; promotes, never accepts) + \`/fanout\` + \`/ideas\`; Codex \`\$claudemaxxing:gauntlet\` + \`\$claudemaxxing:fanout\` + \`\$claudemaxxing:ideas\` + \`\$claudemaxxing:memory\`. Optional agent: \`ollama-worker\`.
+- Tools (on PATH): \`oll "<task>" --model <m>\` · \`oll-council "<q>"\` · \`memoryctl\` · \`mem-audit\`. Workflows: Claude \`/gauntlet\` (divide a broad request into gated increments, one step before planning; promotes, never accepts) + \`/fanout\` + \`/ideas\`; Codex \`\$orchestratormaxxing:gauntlet\` + \`\$orchestratormaxxing:fanout\` + \`\$orchestratormaxxing:ideas\` + \`\$orchestratormaxxing:memory\`. Optional agent: \`ollama-worker\`.
 $HOST_ROUTING
 - **Shared-skill vocabulary:** inside an OpenCode or Hermes session, "root Codex" in a shared workflow means the current primary host. Keep the invariant and use the host routing above; do not launch Codex merely to rename the orchestrator.
 - **Memory governance:** Claude and Codex share the file-backed \`<git-root>/.agents/memory/\` store. Use \`memoryctl show/add/supersede/consolidate\`; never scrape Codex SQLite. Supersede (don't append) on conflict; stamp \`created\`/\`last_verified\` + decay (reference 30d / project 14d → re-verify when stale); gate only belief-changing writes with a different-family critic; keep \`MEMORY.md\` one line per active fact. Above 25 facts, merge safe groups with atomic \`memoryctl consolidate\` or bind a no-safe-merge review to the exact semantic set with \`memoryctl review-consolidation --decision no-safe-merge\`; any meaning or membership change reopens it. Run \`mem-audit\` and act on its flags — never re-read the vault to re-derive staleness.
@@ -739,7 +739,7 @@ ss.append({"hooks": [{"type": "command", "command": cmd,
                       "timeout": 15, "statusMessage": "Auditing project memory…"}]})
 
 # --- continuous watcher (loop engineering): capture harness flaws into the forward queue ---
-# loop-tick self-scopes to the claudemaxxing harness (silent IDLE elsewhere), so this is safe
+# loop-tick self-scopes to the orchestratormaxxing harness (silent IDLE elsewhere), so this is safe
 # as a GLOBAL SessionStart hook. It enqueues harness-verify reds / mem-audit drift the moment
 # they appear — the "continuous watching" half; rounds are still fired event-driven off the
 # queue, never on a clock. Idempotent (loop-queue dedupes), silent unless it captures something.
@@ -861,7 +861,7 @@ with open(path, "w") as f:
 print("  merged SessionStart (shared memory, loop-tick, session-log) + Stop audit/log hooks into", path)
 PY
 
-# Codex now owns these lifecycle hooks through the installed claudemaxxing
+# Codex now owns these lifecycle hooks through the installed orchestratormaxxing
 # plugin. Older Mac installs copied Claude's hook set into ~/.codex/hooks.json;
 # Codex loads BOTH sources, so every lifecycle action ran twice and the copied
 # Warp hook even identified Codex as Claude. Remove only our owned commands,
@@ -918,7 +918,7 @@ for event, groups in list(hooks.items()):
         hooks.pop(event, None)
 
 if removed:
-    backup = path + ".pre-claudemaxxing-plugin"
+    backup = path + ".pre-orchestratormaxxing-plugin"
     if not os.path.exists(backup):
         shutil.copy2(path, backup)
     directory = os.path.dirname(path) or "."
@@ -934,14 +934,14 @@ if removed:
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
-    print(f"  removed {removed} duplicated claudemaxxing hook(s) from {path}; backup: {backup}")
+    print(f"  removed {removed} duplicated orchestratormaxxing hook(s) from {path}; backup: {backup}")
 PY
 
 say "Autonomous loop glue → live locations (copy, not symlink; __REPO__/__HOME__ substituted)"
 # The forward-queue WATCH half ships via the SessionStart hook above (read-only, always on).
 # This deploys the daily ACT half: the shared wrapper + the per-OS scheduler unit (launchd on
-# macOS via com.claudemaxxing.loop.plist; systemd --user on Linux via claudemaxxing-loop.service
-# + claudemaxxing-loop.timer). Deploying the FILES is always safe (version-controlled copies);
+# macOS via com.orchestratormaxxing.loop.plist; systemd --user on Linux via orchestratormaxxing-loop.service
+# + orchestratormaxxing-loop.timer). Deploying the FILES is always safe (version-controlled copies);
 # ARMING the autonomous loop stays OPT-IN (we only re-sync a scheduler that's ALREADY armed —
 # otherwise we just print how to enable it).
 WRAP_DST="$CFG_DIR/loop-cron.sh"
@@ -955,10 +955,10 @@ case "$(uname -s)" in
 Darwin)
   # macOS → launchd user agent.
   LAUNCH_DST="$HOME/Library/LaunchAgents"
-  PLIST_DST="$LAUNCH_DST/com.claudemaxxing.loop.plist"
-  if [ -f "$REPO_DIR/deploy/com.claudemaxxing.loop.plist" ]; then
+  PLIST_DST="$LAUNCH_DST/com.orchestratormaxxing.loop.plist"
+  if [ -f "$REPO_DIR/deploy/com.orchestratormaxxing.loop.plist" ]; then
     mkdir -p "$LAUNCH_DST"
-    sed "s#__HOME__#$HOME#g" "$REPO_DIR/deploy/com.claudemaxxing.loop.plist" > "$PLIST_DST"
+    sed "s#__HOME__#$HOME#g" "$REPO_DIR/deploy/com.orchestratormaxxing.loop.plist" > "$PLIST_DST"
     echo "  wrote $PLIST_DST"
     if command -v launchctl >/dev/null 2>&1; then
       # Capture first, then grep: under `set -o pipefail`, `launchctl list | grep -q` reports
@@ -968,13 +968,13 @@ Darwin)
       # we just wrote. `launchctl list` can omit a loaded-but-idle agent, and an install run
       # under another HOME (a fixture, a proof, a second account) must never bootout the real
       # agent and bootstrap its own plist in its place.
-      if _launchd_owned_here "com.claudemaxxing.loop" "$PLIST_DST"; then
-        launchctl bootout "gui/$(id -u)/com.claudemaxxing.loop" 2>/dev/null
+      if _launchd_owned_here "com.orchestratormaxxing.loop" "$PLIST_DST"; then
+        launchctl bootout "gui/$(id -u)/com.orchestratormaxxing.loop" 2>/dev/null
         launchctl bootstrap "gui/$(id -u)" "$PLIST_DST" 2>/dev/null \
           && echo "  reloaded launchd agent (was already armed → kept in sync)" \
           || echo "  NOTE: could not reload launchd agent (load it manually, see below)"
-      elif launchctl print "gui/$(id -u)/com.claudemaxxing.loop" >/dev/null 2>&1; then
-        echo "  NOTE: com.claudemaxxing.loop is loaded from another home — left untouched"
+      elif launchctl print "gui/$(id -u)/com.orchestratormaxxing.loop" >/dev/null 2>&1; then
+        echo "  NOTE: com.orchestratormaxxing.loop is loaded from another home — left untouched"
       else
         printf '  \033[1;33mautonomous loop NOT armed\033[0m — to enable the daily 07:00 self-improve round:\n'
         printf '    launchctl bootstrap gui/$(id -u) %s\n' "$PLIST_DST"
@@ -983,22 +983,22 @@ Darwin)
   fi
   ;;
 Linux)
-  # Linux → systemd --user timer (claudemaxxing-loop.service + claudemaxxing-loop.timer).
+  # Linux → systemd --user timer (orchestratormaxxing-loop.service + orchestratormaxxing-loop.timer).
   SD_DST="$HOME/.config/systemd/user"
-  if [ -f "$REPO_DIR/deploy/claudemaxxing-loop.service" ] && command -v systemctl >/dev/null 2>&1; then
+  if [ -f "$REPO_DIR/deploy/orchestratormaxxing-loop.service" ] && command -v systemctl >/dev/null 2>&1; then
     mkdir -p "$SD_DST"
-    sed "s#__HOME__#$HOME#g" "$REPO_DIR/deploy/claudemaxxing-loop.service" > "$SD_DST/claudemaxxing-loop.service"
-    cp "$REPO_DIR/deploy/claudemaxxing-loop.timer" "$SD_DST/claudemaxxing-loop.timer"
-    echo "  wrote $SD_DST/claudemaxxing-loop.{service,timer}"
+    sed "s#__HOME__#$HOME#g" "$REPO_DIR/deploy/orchestratormaxxing-loop.service" > "$SD_DST/orchestratormaxxing-loop.service"
+    cp "$REPO_DIR/deploy/orchestratormaxxing-loop.timer" "$SD_DST/orchestratormaxxing-loop.timer"
+    echo "  wrote $SD_DST/orchestratormaxxing-loop.{service,timer}"
     systemctl --user daemon-reload 2>/dev/null || true
-    if systemctl --user is-enabled --quiet claudemaxxing-loop.timer 2>/dev/null; then
+    if systemctl --user is-enabled --quiet orchestratormaxxing-loop.timer 2>/dev/null; then
       # already armed → restart so the live timer matches the repo (re-sync next-elapse)
-      systemctl --user restart claudemaxxing-loop.timer 2>/dev/null \
+      systemctl --user restart orchestratormaxxing-loop.timer 2>/dev/null \
         && echo "  reloaded systemd timer (was already armed → kept in sync)" \
         || echo "  NOTE: could not reload systemd timer (enable manually, see below)"
     else
       printf '  \033[1;33mautonomous loop NOT armed\033[0m — to enable the daily 07:00 self-improve round:\n'
-      printf '    systemctl --user enable --now claudemaxxing-loop.timer\n'
+      printf '    systemctl --user enable --now orchestratormaxxing-loop.timer\n'
       printf '    sudo loginctl enable-linger %s   # once: so it fires without an active login\n' "$USER"
     fi
   fi
@@ -1041,11 +1041,11 @@ if [ "$(uname -s)" = "Linux" ] && command -v systemctl >/dev/null 2>&1 \
   # Wayland. Copied, never auto-enabled — enabling needs a shell restart, and
   # arming anything that observes you stays the user's call.
   COGLOAD_EXT_SRC="$REPO_DIR/deploy/gnome-cogload-extension"
-  COGLOAD_EXT_DST="$HOME/.local/share/gnome-shell/extensions/cogload@claudemaxxing.local"
+  COGLOAD_EXT_DST="$HOME/.local/share/gnome-shell/extensions/cogload@orchestratormaxxing.local"
   if [ -d "$COGLOAD_EXT_SRC" ] && [ "$(uname -s)" = "Linux" ]; then
     mkdir -p "$COGLOAD_EXT_DST"
     cp "$COGLOAD_EXT_SRC/metadata.json" "$COGLOAD_EXT_SRC/extension.js" "$COGLOAD_EXT_DST/" 2>/dev/null || true
-    echo "  wrote $COGLOAD_EXT_DST (enable with: gnome-extensions enable cogload@claudemaxxing.local)"
+    echo "  wrote $COGLOAD_EXT_DST (enable with: gnome-extensions enable cogload@orchestratormaxxing.local)"
   fi
 
   COGLOAD_VENV="$HOME/.local/share/cogload/venv"
@@ -1083,7 +1083,7 @@ fi
 if [ "$(uname -s)" = "Linux" ] && command -v systemctl >/dev/null 2>&1 \
    && [ -f "$REPO_DIR/deploy/cogload-nightly.service" ]; then
   SD_DST="$HOME/.config/systemd/user"
-  CFG_DIR="${CFG_DIR:-$HOME/.config/claudemaxxing}"
+  CFG_DIR="${CFG_DIR:-$HOME/.config/orchestratormaxxing}"
   mkdir -p "$SD_DST" "$CFG_DIR"
   cp "$REPO_DIR/deploy/cogload-nightly.sh" "$CFG_DIR/cogload-nightly.sh"
   chmod +x "$CFG_DIR/cogload-nightly.sh"
@@ -1107,32 +1107,32 @@ fi
 # Ricardo grants Input Monitoring + Accessibility in the GUI, and TCC cannot be
 # prompted over SSH. Auto-arming here would produce a launch agent that runs and
 # silently captures nothing — a collector writing zeros reads as a calm day.
-if [ "$(uname -s)" = "Darwin" ] && [ -f "$REPO_DIR/deploy/com.claudemaxxing.cogload-keys.plist" ]; then
+if [ "$(uname -s)" = "Darwin" ] && [ -f "$REPO_DIR/deploy/com.orchestratormaxxing.cogload-keys.plist" ]; then
   mkdir -p "$HOME/Library/LaunchAgents"
-  sed "s|__HOME__|$HOME|g" "$REPO_DIR/deploy/com.claudemaxxing.cogload-keys.plist" \
-    > "$HOME/Library/LaunchAgents/com.claudemaxxing.cogload-keys.plist"
+  sed "s|__HOME__|$HOME|g" "$REPO_DIR/deploy/com.orchestratormaxxing.cogload-keys.plist" \
+    > "$HOME/Library/LaunchAgents/com.orchestratormaxxing.cogload-keys.plist"
   # Close-of-day maintenance + lightweight login catch-up. Both are deployed
   # always and armed only by the setup script. If already armed, reload them so
   # a schedule fix reaches the live LaunchAgents without turning collection on
   # for a new install.
-  if [ -f "$REPO_DIR/deploy/com.claudemaxxing.cogload-nightly.plist" ]; then
-    mkdir -p "$HOME/.config/claudemaxxing"
+  if [ -f "$REPO_DIR/deploy/com.orchestratormaxxing.cogload-nightly.plist" ]; then
+    mkdir -p "$HOME/.config/orchestratormaxxing"
     install -m 0755 "$REPO_DIR/deploy/cogload-nightly.sh" \
-      "$HOME/.config/claudemaxxing/cogload-nightly.sh"
-    sed "s|__HOME__|$HOME|g" "$REPO_DIR/deploy/com.claudemaxxing.cogload-nightly.plist" \
-      > "$HOME/Library/LaunchAgents/com.claudemaxxing.cogload-nightly.plist"
-    echo "  wrote ~/Library/LaunchAgents/com.claudemaxxing.cogload-nightly.plist"
+      "$HOME/.config/orchestratormaxxing/cogload-nightly.sh"
+    sed "s|__HOME__|$HOME|g" "$REPO_DIR/deploy/com.orchestratormaxxing.cogload-nightly.plist" \
+      > "$HOME/Library/LaunchAgents/com.orchestratormaxxing.cogload-nightly.plist"
+    echo "  wrote ~/Library/LaunchAgents/com.orchestratormaxxing.cogload-nightly.plist"
   fi
-  if [ -f "$REPO_DIR/deploy/com.claudemaxxing.cogload-catchup.plist" ]; then
-    mkdir -p "$HOME/.config/claudemaxxing"
+  if [ -f "$REPO_DIR/deploy/com.orchestratormaxxing.cogload-catchup.plist" ]; then
+    mkdir -p "$HOME/.config/orchestratormaxxing"
     install -m 0755 "$REPO_DIR/deploy/cogload-catchup.sh" \
-      "$HOME/.config/claudemaxxing/cogload-catchup.sh"
-    sed "s|__HOME__|$HOME|g" "$REPO_DIR/deploy/com.claudemaxxing.cogload-catchup.plist" \
-      > "$HOME/Library/LaunchAgents/com.claudemaxxing.cogload-catchup.plist"
-    echo "  wrote ~/Library/LaunchAgents/com.claudemaxxing.cogload-catchup.plist"
+      "$HOME/.config/orchestratormaxxing/cogload-catchup.sh"
+    sed "s|__HOME__|$HOME|g" "$REPO_DIR/deploy/com.orchestratormaxxing.cogload-catchup.plist" \
+      > "$HOME/Library/LaunchAgents/com.orchestratormaxxing.cogload-catchup.plist"
+    echo "  wrote ~/Library/LaunchAgents/com.orchestratormaxxing.cogload-catchup.plist"
   fi
   for _cogload_job in nightly catchup; do
-    _cogload_label="com.claudemaxxing.cogload-${_cogload_job}"
+    _cogload_label="com.orchestratormaxxing.cogload-${_cogload_job}"
     _cogload_plist="$HOME/Library/LaunchAgents/${_cogload_label}.plist"
     if [ -f "$_cogload_plist" ] \
        && _launchd_owned_here "$_cogload_label" "$_cogload_plist"; then
@@ -1142,7 +1142,7 @@ if [ "$(uname -s)" = "Darwin" ] && [ -f "$REPO_DIR/deploy/com.claudemaxxing.cogl
         || echo "  NOTE: could not reload $_cogload_label"
     fi
   done
-  echo "  wrote ~/Library/LaunchAgents/com.claudemaxxing.cogload-keys.plist"
+  echo "  wrote ~/Library/LaunchAgents/com.orchestratormaxxing.cogload-keys.plist"
   printf '  \033[1;33mcogload NOT armed on this Mac\033[0m — run in Terminal (not SSH):\n'
   printf '    bash %s/deploy/cogload-mac-setup.sh\n' "$REPO_DIR"
 fi
@@ -1175,27 +1175,27 @@ say "Doctrine audit glue → live locations (monthly loop-queue seeder; opt-in a
 # Monthly SEEDER only — it enqueues one loop-queue item and exits; it never invokes an agent.
 # Caps (firing, queue, runtime, findings) live in the wrapper and units, not in prose:
 # knowledge/doctrine-audit-2026-08-16.md. Deploying is safe; ARMING is SELECT.
-DA_WRAP_DST="$CFG_DIR/claudemaxxing-doctrine-audit.sh"
-if [ -f "$REPO_DIR/deploy/claudemaxxing-doctrine-audit.sh" ]; then
-  sed "s#__REPO__#$REPO_DIR#g" "$REPO_DIR/deploy/claudemaxxing-doctrine-audit.sh" > "$DA_WRAP_DST"
+DA_WRAP_DST="$CFG_DIR/orchestratormaxxing-doctrine-audit.sh"
+if [ -f "$REPO_DIR/deploy/orchestratormaxxing-doctrine-audit.sh" ]; then
+  sed "s#__REPO__#$REPO_DIR#g" "$REPO_DIR/deploy/orchestratormaxxing-doctrine-audit.sh" > "$DA_WRAP_DST"
   chmod +x "$DA_WRAP_DST"
   echo "  wrote $DA_WRAP_DST"
 fi
 if [ "$(uname -s)" = "Linux" ] && command -v systemctl >/dev/null 2>&1 \
-   && [ -f "$REPO_DIR/deploy/claudemaxxing-doctrine-audit.service" ]; then
+   && [ -f "$REPO_DIR/deploy/orchestratormaxxing-doctrine-audit.service" ]; then
   SD_DST="$HOME/.config/systemd/user"
   mkdir -p "$SD_DST"
-  sed -e "s#__HOME__#$HOME#g" -e "s#__REPO__#$REPO_DIR#g" "$REPO_DIR/deploy/claudemaxxing-doctrine-audit.service" > "$SD_DST/claudemaxxing-doctrine-audit.service"
-  cp "$REPO_DIR/deploy/claudemaxxing-doctrine-audit.timer" "$SD_DST/claudemaxxing-doctrine-audit.timer"
-  echo "  wrote $SD_DST/claudemaxxing-doctrine-audit.{service,timer}"
+  sed -e "s#__HOME__#$HOME#g" -e "s#__REPO__#$REPO_DIR#g" "$REPO_DIR/deploy/orchestratormaxxing-doctrine-audit.service" > "$SD_DST/orchestratormaxxing-doctrine-audit.service"
+  cp "$REPO_DIR/deploy/orchestratormaxxing-doctrine-audit.timer" "$SD_DST/orchestratormaxxing-doctrine-audit.timer"
+  echo "  wrote $SD_DST/orchestratormaxxing-doctrine-audit.{service,timer}"
   systemctl --user daemon-reload 2>/dev/null || true
-  if systemctl --user is-enabled --quiet claudemaxxing-doctrine-audit.timer 2>/dev/null; then
-    systemctl --user restart claudemaxxing-doctrine-audit.timer 2>/dev/null \
+  if systemctl --user is-enabled --quiet orchestratormaxxing-doctrine-audit.timer 2>/dev/null; then
+    systemctl --user restart orchestratormaxxing-doctrine-audit.timer 2>/dev/null \
       && echo "  reloaded doctrine-audit timer (was already armed → kept in sync)" \
       || echo "  NOTE: could not reload doctrine-audit timer"
   else
     printf '  \033[1;33mdoctrine audit NOT armed\033[0m — to enable the monthly 1st-of-month 09:00 audit:\n'
-    printf '    systemctl --user enable --now claudemaxxing-doctrine-audit.timer\n'
+    printf '    systemctl --user enable --now orchestratormaxxing-doctrine-audit.timer\n'
   fi
 fi
 
@@ -1213,5 +1213,5 @@ echo "  command -v oll oll-council oll-sync mem-audit xsearch"
 echo "  (cd /tmp && oll 'say hi' --model glm-5.3)"
 echo "  (cd /tmp && xsearch 'test query' --days 1)"
 echo "  Claude: new session → /gauntlet (divide broad requests into increments) · /fanout · /ideas"
-echo '  Codex:  new thread  → $claudemaxxing:gauntlet to divide broad requests · $claudemaxxing:solplan first for nontrivial work · $claudemaxxing:fanout after planning · $claudemaxxing:memory; shell: g / g ls'
+echo '  Codex:  new thread  → $orchestratormaxxing:gauntlet to divide broad requests · $orchestratormaxxing:solplan first for nontrivial work · $orchestratormaxxing:fanout after planning · $orchestratormaxxing:memory; shell: g / g ls'
 echo '  Fleet:  c-ubuntu · g-ubuntu · o-ubuntu · harness-sync status · gpu-agent c|g|o|ls|send'

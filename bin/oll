@@ -507,7 +507,7 @@ def _log_usage(model, usage):
     so the Usage tab shows real Ollama Cloud consumption (best-effort)."""
     try:
         import time
-        d = os.path.expanduser("~/.local/share/claudemaxxing")
+        d = os.path.expanduser("~/.local/share/orchestratormaxxing")
         os.makedirs(d, exist_ok=True)
         rec = {
             "ts": int(time.time()),

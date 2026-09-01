@@ -1,0 +1,4 @@
+interface:
+  display_name: "Wrap up"
+  short_description: "Help with Wrap up tasks and workflows"
+  default_prompt: "Use $orchestratormaxxing:wrap-up to persist the current session and handoff state."

@@ -18,7 +18,7 @@
  *   BROWSER_MCP_SHOT_DIR  Where screenshots are saved. Default ~/.cache/opencode-browser-mcp
  *
  * Chrome must run with:  google-chrome --remote-debugging-port=18800
- * Docs: knowledge/opencode-browser-connector.md (in the claudemaxxing repo)
+ * Docs: knowledge/opencode-browser-connector.md (in the orchestratormaxxing repo)
  */
 'use strict';
 

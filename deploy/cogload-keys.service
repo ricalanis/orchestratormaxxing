@@ -1,6 +1,6 @@
 [Unit]
 Description=cogload — silent cognitive-load collector (key CLASSES only, never identity)
-Documentation=file://__HOME__/dev/claudemaxxing/knowledge/cognitive-load-harness-2026-08-11.md
+Documentation=file://__HOME__/dev/orchestratormaxxing/knowledge/cognitive-load-harness-2026-08-11.md
 # Bind to the graphical session: capture is meaningless without a display, and
 # PartOf ensures the collector dies with the session instead of surviving as a
 # blind process writing degraded rows forever.

@@ -40,7 +40,7 @@ harness_need_bounded_run
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-MARKER="CLAUDEMAXXING_HARNESS_CHILD"
+MARKER="ORCHESTRATORMAXXING_HARNESS_CHILD"
 
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  ok  %s  %s\n' "$1" "$2"; }
@@ -363,7 +363,7 @@ fi
 # phantom flaw on any machine without a registered Claude watcher. The split:
 #   - ~/.claude/settings.json is MACHINE state. Absent / unparseable /
 #     no-watcher-registered → named per-check SKIP (cannot measure ≠ failed).
-#   - plugins/claudemaxxing/hooks/hooks.json is REPO state, version-controlled
+#   - plugins/orchestratormaxxing/hooks/hooks.json is REPO state, version-controlled
 #     here, and must carry the loop-tick watcher. No codex row extracted → real
 #     red. This doubles as the extractor's canary: a broken extraction finds no
 #     codex row either, so "extract nothing" can never read as all-skips-green.
@@ -391,7 +391,7 @@ def walk(node):
         for v in node: walk(v)
 sources = [
     ("claude", os.path.expanduser("~/.claude/settings.json")),
-    ("codex",  os.path.join(root, "plugins/claudemaxxing/hooks/hooks.json")),
+    ("codex",  os.path.join(root, "plugins/orchestratormaxxing/hooks/hooks.json")),
     ("opencode", os.path.expanduser("~/.config/opencode/opencode.json")),
 ]
 labelled = []

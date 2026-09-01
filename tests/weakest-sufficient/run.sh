@@ -6,7 +6,7 @@ GUARD='VALIDITY-FIRST / WEAKEST-SUFFICIENT'
 
 for rel in \
   .claude/commands/self-improve.md \
-  plugins/claudemaxxing/skills/self-improve/SKILL.md \
+  plugins/orchestratormaxxing/skills/self-improve/SKILL.md \
   bin/win-log \
   knowledge/hermes-strategic-evolution-plan.md
 do

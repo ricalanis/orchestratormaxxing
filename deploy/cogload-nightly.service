@@ -11,11 +11,11 @@
 #
 # Nice=10 + IOSchedulingClass=idle: maintenance must never compete with real work.
 [Unit]
-Description=claudemaxxing nightly cogload maintenance (digest + mirror + rotate)
+Description=orchestratormaxxing nightly cogload maintenance (digest + mirror + rotate)
 
 [Service]
 Type=oneshot
 TimeoutStartSec=600
-ExecStart=/bin/bash __HOME__/.config/claudemaxxing/cogload-nightly.sh
+ExecStart=/bin/bash __HOME__/.config/orchestratormaxxing/cogload-nightly.sh
 Nice=10
 IOSchedulingClass=idle

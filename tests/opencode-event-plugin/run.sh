@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-PLUGIN="${PLUGIN_UNDER_TEST:-$ROOT/opencode/plugins/claudemaxxing-notify.js}"
+PLUGIN="${PLUGIN_UNDER_TEST:-$ROOT/opencode/plugins/orchestratormaxxing-notify.js}"
 JSRUN="$(command -v node 2>/dev/null || command -v bun 2>/dev/null || true)"
 for candidate in /opt/homebrew/bin/node /usr/local/bin/node "$HOME/.local/bin/node" \
                  /opt/homebrew/bin/bun /usr/local/bin/bun "$HOME/.local/bin/bun"; do
@@ -14,17 +14,17 @@ done
 
 "$JSRUN" - "$PLUGIN" <<'JS'
 const pluginPath = process.argv[2]
-const { ClaudemaxxingNotify } = await import(pluginPath)
+const { OrchestratormaxxingNotify } = await import(pluginPath)
 
 async function exercise(delegated) {
-  if (delegated) process.env.CLAUDEMAXXING_O_DELEGATED = "1"
-  else delete process.env.CLAUDEMAXXING_O_DELEGATED
+  if (delegated) process.env.ORCHESTRATORMAXXING_O_DELEGATED = "1"
+  else delete process.env.ORCHESTRATORMAXXING_O_DELEGATED
   const calls = []
   const shell = (strings, ...values) => {
     calls.push(strings.reduce((out, part, i) => out + part + (i < values.length ? String(values[i]) : ""), ""))
     return Promise.resolve({ exitCode: 0 })
   }
-  const plugin = await ClaudemaxxingNotify({
+  const plugin = await OrchestratormaxxingNotify({
     directory: "/tmp/project",
     $: shell,
     client: { session: { messages: async () => ({ data: [{

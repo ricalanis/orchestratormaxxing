@@ -74,7 +74,7 @@ fi
 python3 - "$ROOT" <<'PY'
 import json, pathlib, sys
 root = pathlib.Path(sys.argv[1])
-hooks = json.loads((root / "plugins/claudemaxxing/hooks/hooks.json").read_text())["hooks"]
+hooks = json.loads((root / "plugins/orchestratormaxxing/hooks/hooks.json").read_text())["hooks"]
 for event in ("SessionStart", "UserPromptSubmit", "PermissionRequest", "PreToolUse", "PostToolUse", "Stop"):
     assert hooks.get(event), f"Codex hook event missing: {event}"
 commands = [h.get("command", "") for groups in hooks.values() for group in groups for h in group.get("hooks", [])]

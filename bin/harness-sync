@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safe cross-machine pull/setup for the claudemaxxing harness.
+"""Safe cross-machine pull/setup for the orchestratormaxxing harness.
 
 GitHub is the transport for versioned code + shared memory. Tailscale is only a
 secure reachability path for interactive remote commands; this tool opens no
@@ -21,14 +21,14 @@ from pathlib import Path
 def fleet_env():
     """Parse fleet.env once per process; anything unreadable == not configured.
 
-    Path: $CLAUDEMAXXING_FLEET_ENV, else ~/.config/claudemaxxing/fleet.env.
+    Path: $ORCHESTRATORMAXXING_FLEET_ENV, else ~/.config/orchestratormaxxing/fleet.env.
     KEY=VALUE per line, blank lines and `#` comments, optional `export ` prefix,
     optional double quotes around VALUE, no shell expansion, unknown keys ignored.
     """
     values = {}
     try:
-        raw = os.environ.get("CLAUDEMAXXING_FLEET_ENV", "").strip()
-        path = Path(raw).expanduser() if raw else Path.home() / ".config" / "claudemaxxing" / "fleet.env"
+        raw = os.environ.get("ORCHESTRATORMAXXING_FLEET_ENV", "").strip()
+        path = Path(raw).expanduser() if raw else Path.home() / ".config" / "orchestratormaxxing" / "fleet.env"
         text = path.read_text(encoding="utf-8")
     except (OSError, ValueError, RuntimeError):
         return values
@@ -58,13 +58,13 @@ def fleet_value(key, *legacy):
 
 FLEET = fleet_env()
 # '' == not configured. There is no built-in tenant peer to fall back to.
-DEFAULT_PEER = fleet_value("CLAUDEMAXXING_LAN_PEER", "HARNESS_LAN_PEER")
+DEFAULT_PEER = fleet_value("ORCHESTRATORMAXXING_LAN_PEER", "HARNESS_LAN_PEER")
 # SSH user on the peer: explicit HARNESS_LAN_USER, else the user half of the
 # fleet server's `user@host`, else '' (ssh then applies its own default/config).
-_SERVER_SSH = fleet_value("CLAUDEMAXXING_SERVER_SSH")
+_SERVER_SSH = fleet_value("ORCHESTRATORMAXXING_SERVER_SSH")
 DEFAULT_SSH_USER = os.environ.get("HARNESS_LAN_USER", "").strip() or (
     _SERVER_SSH.rpartition("@")[0] if "@" in _SERVER_SSH else "")
-NOT_CONFIGURED = "no LAN peer configured: set CLAUDEMAXXING_LAN_PEER in fleet.env (or pass --peer)"
+NOT_CONFIGURED = "no LAN peer configured: set ORCHESTRATORMAXXING_LAN_PEER in fleet.env (or pass --peer)"
 
 # Machine-written queue state. Watchers append to these on their own schedule, so
 # the tree is dirty from files no human touched — and the dirty guard, which
@@ -147,7 +147,7 @@ def cmd_status(args):
     print(f"repo: {state['repo']} ({state['branch']} -> {state['upstream']})")
     print(f"git: ahead={state['ahead']} behind={state['behind']} dirty={len(state['dirty'])}")
     if state["lan"] is None:
-        print("lan: not configured (set CLAUDEMAXXING_LAN_PEER in fleet.env)")
+        print("lan: not configured (set ORCHESTRATORMAXXING_LAN_PEER in fleet.env)")
         return
     print(f"tailscale: {'ok' if state['lan']['tailscale_ok'] else 'down'} — {state['lan']['tailscale']}")
     print(f"ssh: {'ok' if state['lan']['ssh_ok'] else 'down'} — {state['lan']['ssh']}")
@@ -243,7 +243,7 @@ def cmd_setup(args):
     run([str(memoryctl), "bridge-claude", "--apply"], cwd=repo, timeout=60, check=True)
     print("installed Claude/Codex harness and connected shared memory")
     if not args.peer:
-        print("LAN peer: not configured (CLAUDEMAXXING_LAN_PEER unset; remote checks skipped)")
+        print("LAN peer: not configured (ORCHESTRATORMAXXING_LAN_PEER unset; remote checks skipped)")
         return
     state = lan_state(args.peer)
     print(f"LAN peer {args.peer}: tailscale={'ok' if state['tailscale_ok'] else 'down'}, ssh={'ok' if state['ssh_ok'] else 'down'}")

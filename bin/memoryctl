@@ -116,7 +116,7 @@ def shared_memory_dir(cwd=None):
     if root:
         return root / ".agents" / "memory"
     data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
-    return data / "claudemaxxing" / "memory" / project_key(cwd)
+    return data / "orchestratormaxxing" / "memory" / project_key(cwd)
 
 
 def resolved_memory_dir(cwd=None):
@@ -413,7 +413,7 @@ def rebuild_index(mem_dir):
 
 def ensure_store(mem_dir):
     mem_dir.mkdir(parents=True, exist_ok=True)
-    marker = mem_dir / ".managed-by-claudemaxxing"
+    marker = mem_dir / ".managed-by-orchestratormaxxing"
     if not marker.exists():
         atomic_write(marker, "shared-memory-v1\n")
     if not (mem_dir / "MEMORY.md").exists():

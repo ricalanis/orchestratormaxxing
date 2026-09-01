@@ -1,4 +1,0 @@
-interface:
-  display_name: "Fanout"
-  short_description: "Fan out planned independent chunks"
-  default_prompt: "Use $claudemaxxing:fanout only after required planning to execute independent acceptance-gated chunks."

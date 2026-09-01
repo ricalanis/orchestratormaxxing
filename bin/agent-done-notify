@@ -18,12 +18,12 @@ from urllib.parse import quote
 
 
 # Fleet identity (notify target, relay, dashboard base, server hostname) lives
-# in ONE user-owned file — $CLAUDEMAXXING_FLEET_ENV, else
-# ~/.config/claudemaxxing/fleet.env — read once per process; an explicit process
+# in ONE user-owned file — $ORCHESTRATORMAXXING_FLEET_ENV, else
+# ~/.config/orchestratormaxxing/fleet.env — read once per process; an explicit process
 # env var of the same name ranks above it. There is no built-in tenant default:
 # an unconfigured machine notifies nobody and spawns no transport.
 _FLEET_CACHE: dict[str, str] | None = None
-STATE_DIR = Path.home() / ".config" / "claudemaxxing" / "agent-notify-state"
+STATE_DIR = Path.home() / ".config" / "orchestratormaxxing" / "agent-notify-state"
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 CONTROL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
 BLANK_LINES_RE = re.compile(r"\n[ \t]*\n(?:[ \t]*\n)+")
@@ -73,8 +73,8 @@ def _fleet_env() -> dict[str, str]:
         return _FLEET_CACHE
     values: dict[str, str] = {}
     try:
-        override = os.environ.get("CLAUDEMAXXING_FLEET_ENV", "").strip()
-        path = Path(override) if override else Path.home() / ".config" / "claudemaxxing" / "fleet.env"
+        override = os.environ.get("ORCHESTRATORMAXXING_FLEET_ENV", "").strip()
+        path = Path(override) if override else Path.home() / ".config" / "orchestratormaxxing" / "fleet.env"
         for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -102,18 +102,18 @@ def _fleet(key: str) -> str:
 def _dashboard_base() -> str:
     value = os.environ.get("DASHBOARD_URL", "").strip()
     if not value:
-        path = Path.home() / ".config" / "claudemaxxing" / "dashboard-url"
+        path = Path.home() / ".config" / "orchestratormaxxing" / "dashboard-url"
         try:
             value = path.read_text(encoding="utf-8").splitlines()[0].strip()
         except (OSError, IndexError, UnicodeError):
             value = ""
-    value = (value or _fleet("CLAUDEMAXXING_DASHBOARD_URL")).rstrip("/")
+    value = (value or _fleet("ORCHESTRATORMAXXING_DASHBOARD_URL")).rstrip("/")
     return "" if value.lower() == "off" else value
 
 
 def _host_key() -> str:
     try:
-        path = Path.home() / ".config" / "claudemaxxing" / "notify-host-key"
+        path = Path.home() / ".config" / "orchestratormaxxing" / "notify-host-key"
         try:
             value = path.read_text(encoding="utf-8").splitlines()[0].strip()
         except (FileNotFoundError, IndexError):
@@ -121,7 +121,7 @@ def _host_key() -> str:
         if value:
             return value
         hostname = socket.gethostname().lower().split(".", 1)[0]
-        server = _fleet("CLAUDEMAXXING_SERVER_HOSTNAME").lower().split(".", 1)[0]
+        server = _fleet("ORCHESTRATORMAXXING_SERVER_HOSTNAME").lower().split(".", 1)[0]
         return "local" if server and hostname == server else hostname
     except (OSError, UnicodeError, ValueError):
         return ""
@@ -196,12 +196,12 @@ def _session_name() -> str:
 
 
 def _target() -> str:
-    path = Path.home() / ".config" / "claudemaxxing" / "notify-target"
+    path = Path.home() / ".config" / "orchestratormaxxing" / "notify-target"
     try:
         first_line = path.read_text(encoding="utf-8").splitlines()[0].strip()
     except (OSError, IndexError, UnicodeError):
         first_line = ""
-    return first_line or _fleet("CLAUDEMAXXING_NOTIFY_TARGET")
+    return first_line or _fleet("ORCHESTRATORMAXXING_NOTIFY_TARGET")
 
 
 def _in_cooldown(session_id: object) -> bool:
@@ -230,7 +230,7 @@ def _transport() -> tuple[list[str], str] | None:
     hermes = shutil.which("hermes")
     if hermes:
         return [hermes, "send", "--to", target, "-q"], target
-    relay = _fleet("CLAUDEMAXXING_NOTIFY_RELAY")
+    relay = _fleet("ORCHESTRATORMAXXING_NOTIFY_RELAY")
     if not relay:
         return None
     tailscale = shutil.which("tailscale")
@@ -282,7 +282,7 @@ def main(argv: list[str]) -> int:
     if event == "Stop":
         if agent in {"codex", "opencode"}:
             # Both hosts hand the final text directly: Codex via its notify
-            # hook, OpenCode via the claudemaxxing-notify plugin (session.idle).
+            # hook, OpenCode via the orchestratormaxxing-notify plugin (session.idle).
             value = payload.get("last_assistant_message")
             summary = value if isinstance(value, str) else ""
         else:

@@ -11,7 +11,7 @@ Mode: **$ARGUMENTS** (default: `check` then `pr`).
 
 1. **Gate** — `core-export --check --worktree --json`. Read only the `BLOCK file:line: /pattern/` lines.
    Exit 3 → a tenant literal or secret would ship: fix the *source* (wrap prose in
-   `<!-- tenant:begin -->…<!-- tenant:end -->`, route code through `~/.config/claudemaxxing/fleet.env`,
+   `<!-- tenant:begin -->…<!-- tenant:end -->`, route code through `~/.config/orchestratormaxxing/fleet.env`,
    or `exclude` a fleet-only path). Never weaken a `block` line. Exit 2 → manifest/marker error.
 2. **Commit privately** first (contracts green; `harness-verify` if a `bin/` tool changed) — publication
    reads committed objects only, `--worktree` is check-only.

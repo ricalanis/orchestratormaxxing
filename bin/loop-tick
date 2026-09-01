@@ -323,7 +323,7 @@ def cmd_reconcile(confirm_id):
     a foreign red than for our own (a green run HERE is not evidence about THERE),
     which is exactly why this path requires an explicit operator confirmation
     instead of widening the automatic releaser. Structural gate: main() refuses
-    --reconcile under CLAUDEMAXXING_HARNESS_CHILD, so a harness-spawned agent
+    --reconcile under ORCHESTRATORMAXXING_HARNESS_CHILD, so a harness-spawned agent
     (including an unattended /self-improve round) cannot confirm on a human's
     behalf. Exit: 0 ok · 2 refused/unmeasurable.
     """
@@ -763,7 +763,7 @@ def queue_status():
 def kick_watch(quiet):
     """Detach the normal gate path; return before its inherited hook can wait."""
     env = os.environ.copy()
-    env.pop("CLAUDEMAXXING_HARNESS_CHILD", None)
+    env.pop("ORCHESTRATORMAXXING_HARNESS_CHILD", None)
     try:
         subprocess.Popen(
             [sys.executable, os.path.abspath(__file__), "--gate", "--quiet"],
@@ -784,12 +784,12 @@ def kick_watch(quiet):
 
 
 def main():
-    if os.environ.get("CLAUDEMAXXING_HARNESS_CHILD") == "1":
+    if os.environ.get("ORCHESTRATORMAXXING_HARNESS_CHILD") == "1":
         # reconcile is human-gated by CONSTRUCTION: any agent spawned by the
         # harness carries this marker, so the refusal is mechanism, not policy —
         # an unattended round cannot confirm a reconcile on a human's behalf.
         if "--reconcile" in sys.argv[1:]:
-            print("reconcile: refused under CLAUDEMAXXING_HARNESS_CHILD — this verb is "
+            print("reconcile: refused under ORCHESTRATORMAXXING_HARNESS_CHILD — this verb is "
                   "human-gated; a harness-spawned agent cannot confirm it", file=sys.stderr)
             sys.exit(2)
         sys.exit(1 if "--gate" in sys.argv[1:] else 0)
@@ -818,11 +818,11 @@ def main():
 
     # Scope guard: harness-verify is specific to THIS harness. As a global SessionStart hook
     # loop-tick fires in every repo — so do nothing unless we're actually inside the
-    # claudemaxxing harness (its bin/harness-verify is present at the repo root). Silent IDLE
+    # orchestratormaxxing harness (its bin/harness-verify is present at the repo root). Silent IDLE
     # everywhere else; no spurious reds against unrelated codebases.
     if not os.path.isfile(os.path.join(ROOT, "bin", "harness-verify")):
         if not args.quiet and args.gate:
-            print(f"{now_iso()} | IDLE | not in claudemaxxing harness (no bin/harness-verify) — skip")
+            print(f"{now_iso()} | IDLE | not in orchestratormaxxing harness (no bin/harness-verify) — skip")
         sys.exit(1 if args.gate else 0)
 
     if args.kick:
@@ -832,7 +832,7 @@ def main():
         # and timeout accounting. The child marks every process it then spawns.
         sys.exit(kick_watch(args.quiet))
 
-    os.environ["CLAUDEMAXXING_HARNESS_CHILD"] = "1"
+    os.environ["ORCHESTRATORMAXXING_HARNESS_CHILD"] = "1"
 
     if args.reconcile:
         sys.exit(cmd_reconcile(args.confirm))

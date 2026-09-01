@@ -60,8 +60,8 @@ assert {
     if name in expected_routes
 } == expected_routes
 
-cheap = read("knowledge/delegation-playbook.md") + read(".claude/commands/cheap-delegate.md") + read("plugins/claudemaxxing/skills/cheap-delegate/SKILL.md")
-fanout = read(".claude/commands/fanout.md") + read("plugins/claudemaxxing/skills/fanout/SKILL.md")
+cheap = read("knowledge/delegation-playbook.md") + read(".claude/commands/cheap-delegate.md") + read("plugins/orchestratormaxxing/skills/cheap-delegate/SKILL.md")
+fanout = read(".claude/commands/fanout.md") + read("plugins/orchestratormaxxing/skills/fanout/SKILL.md")
 assert cheap.lower().count("one bounded execution task") >= 3
 assert cheap.lower().count("http 500") >= 3
 assert cheap.lower().count("infra") >= 3
@@ -75,10 +75,10 @@ stateful_surfaces = [
     ".claude/commands/fanout.md",
     ".claude/commands/gauntlet.md",
     ".claude/commands/self-improve.md",
-    "plugins/claudemaxxing/skills/cheap-delegate/SKILL.md",
-    "plugins/claudemaxxing/skills/fanout/SKILL.md",
-    "plugins/claudemaxxing/skills/gauntlet/SKILL.md",
-    "plugins/claudemaxxing/skills/self-improve/SKILL.md",
+    "plugins/orchestratormaxxing/skills/cheap-delegate/SKILL.md",
+    "plugins/orchestratormaxxing/skills/fanout/SKILL.md",
+    "plugins/orchestratormaxxing/skills/gauntlet/SKILL.md",
+    "plugins/orchestratormaxxing/skills/self-improve/SKILL.md",
 ]
 for rel in stateful_surfaces:
     body = read(rel)

@@ -64,7 +64,7 @@ def check(name, ok, detail=""):
 
 def run(verb, home, repo, *args, expect_rc=0):
     env = dict(os.environ, TOKEN_LEDGER_HOME=home, TOKEN_LEDGER_REPO=repo,
-               TOKEN_LEDGER_NOW=NOW, CLAUDEMAXXING_HARNESS_CHILD="1")
+               TOKEN_LEDGER_NOW=NOW, ORCHESTRATORMAXXING_HARNESS_CHILD="1")
     r = subprocess.run([sys.executable, TOOL, verb, *args], capture_output=True,
                        text=True, env=env, timeout=60)
     return r
@@ -332,7 +332,7 @@ def loops_home(tmp, *, all_capped=False):
     wants = os.path.join(units, "timers.target.wants")
     os.makedirs(wants, exist_ok=True)
 
-    wrapper = write(os.path.join(home, ".config", "claudemaxxing", "loop-cron.sh"),
+    wrapper = write(os.path.join(home, ".config", "orchestratormaxxing", "loop-cron.sh"),
                     "#!/usr/bin/env bash\nMAX_TURNS=60\nharness-agent-run self-improve\n")
     os.chmod(wrapper, os.stat(wrapper).st_mode | stat.S_IEXEC)
 
@@ -343,7 +343,7 @@ def loops_home(tmp, *, all_capped=False):
     os.symlink(os.path.join(units, "armed-agent.timer"),
                os.path.join(wants, "armed-agent.timer"))
 
-    plain = write(os.path.join(home, ".config", "claudemaxxing", "plain.sh"),
+    plain = write(os.path.join(home, ".config", "orchestratormaxxing", "plain.sh"),
                   "#!/usr/bin/env bash\necho deterministic\n")
     os.chmod(plain, os.stat(plain).st_mode | stat.S_IEXEC)
     write(os.path.join(units, "armed-plain.service"), f"[Service]\nExecStart={plain}\n")
@@ -367,16 +367,16 @@ def loops_home(tmp, *, all_capped=False):
                os.path.join(wants, "armed-wrapped.timer"))
 
     # A deterministic script that merely CONTAINS the harness's name. `claude` is
-    # a substring of `claudemaxxing`, so a naive marker scan calls every one of
+    # a substring of `orchestratormaxxing`, so a naive marker scan calls every one of
     # this host's hermes-* and cogload-* timers an agent loop and inflates both
     # the token estimate and the uncapped list.
     # It also READS ~/.claude/projects — a path component, not an invocation. On
     # the real host this was the last phantom: cogload-nightly digests
     # transcripts, spends zero model tokens, and was the only row left in the
     # uncapped list because of it.
-    namesake = write(os.path.join(home, ".config", "claudemaxxing", "namesake.sh"),
+    namesake = write(os.path.join(home, ".config", "orchestratormaxxing", "namesake.sh"),
                      "#!/usr/bin/env bash\n"
-                     "# claudemaxxing backup: rsync the claudemaxxing state dir\n"
+                     "# orchestratormaxxing backup: rsync the orchestratormaxxing state dir\n"
                      'PROJECTS_DIR="$HOME/.claude/projects"\n'
                      'rsync -a "$PROJECTS_DIR" /backup/ && cat ~/.claude/settings.json\n')
     os.chmod(namesake, os.stat(namesake).st_mode | stat.S_IEXEC)
@@ -388,7 +388,7 @@ def loops_home(tmp, *, all_capped=False):
 
     if not all_capped:
         # an agent-invoking unit whose wrapper declares no turn/timeout cap
-        nocap = write(os.path.join(home, ".config", "claudemaxxing", "nocap.sh"),
+        nocap = write(os.path.join(home, ".config", "orchestratormaxxing", "nocap.sh"),
                       "#!/usr/bin/env bash\nharness-agent-run self-improve\n")
         os.chmod(nocap, os.stat(nocap).st_mode | stat.S_IEXEC)
         write(os.path.join(units, "armed-nocap.service"), f"[Service]\nExecStart={nocap}\n")
@@ -445,7 +445,7 @@ def l1_l3_rows():
           (wrapped.get("cap") or {}).get("max_turns") == 60
           and wrapped.get("agent_invoking") is True,
           f"wrapped={wrapped}")
-    check("L2 a script that only CONTAINS 'claudemaxxing' is not an agent loop",
+    check("L2 a script that only CONTAINS 'orchestratormaxxing' is not an agent loop",
           rows.get("armed-namesake.timer", {}).get("agent_invoking") is False,
           f"namesake={rows.get('armed-namesake.timer')}")
     check("L3 a non-agent unit is never listed as uncapped",
@@ -466,7 +466,7 @@ def l6_binary_execstart():
     tmp = tempfile.mkdtemp(prefix="tl-l6-")
     home = loops_home(tmp)
     units = os.path.join(home, ".config", "systemd", "user")
-    blob = os.path.join(home, ".config", "claudemaxxing", "binary-exec")
+    blob = os.path.join(home, ".config", "orchestratormaxxing", "binary-exec")
     with open(blob, "wb") as fh:
         fh.write(b"\x7fELF\x02\x01\x01\x00" + bytes(range(200, 256)) * 4)
     os.chmod(blob, 0o755)

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# claudemaxxing bootstrap — port the orchestrator harness to a new machine.
+# orchestratormaxxing bootstrap — port the orchestrator harness to a new machine.
 #
 # Installs/configures: bun · Codex · OpenCode · gstack (Claude + Codex + OpenCode)
 # · Ollama Cloud provider (key + live model sync) · xAI key (optional) · this repo's bin/ tools.
@@ -9,7 +9,7 @@
 # Prereqs: macOS with Homebrew, git, python3. Provide your keys via env:
 #   export OLLAMA_API_KEY=...   # from https://ollama.com  (Settings → Keys)
 #   export XAI_API_KEY=...      # optional, from https://console.x.ai (enables xsearch)
-# Optional: CLAUDEMAXXING_SKIP_GSTACK=1 skips the gstack clone/setup (default installs it).
+# Optional: ORCHESTRATORMAXXING_SKIP_GSTACK=1 skips the gstack clone/setup (default installs it).
 #
 # Run from inside the repo:  ./bootstrap.sh
 # ─────────────────────────────────────────────────────────────────────────────
@@ -42,8 +42,8 @@ say "OpenAI Codex (preserve existing auth/config)"
 need codex || npm install -g @openai/codex
 codex --version
 
-if [ "${CLAUDEMAXXING_SKIP_GSTACK:-0}" = "1" ]; then
-say "gstack — skipped (CLAUDEMAXXING_SKIP_GSTACK=1)"
+if [ "${ORCHESTRATORMAXXING_SKIP_GSTACK:-0}" = "1" ]; then
+say "gstack — skipped (ORCHESTRATORMAXXING_SKIP_GSTACK=1)"
 else
 say "gstack (Claude + Codex + OpenCode hosts)"
 rm -rf "$HOME/.claude/skills/gstack"
@@ -89,7 +89,7 @@ print("opencode auth + provider 'ollama-cloud' ensured (agents via install.sh)")
 PY
 
 say "Repo tools + .env + live model sync"
-chmod +x "$REPO_DIR"/bin/* "$REPO_DIR"/xsearch.py 2>/dev/null || true
+chmod +x "$REPO_DIR"/bin/* 2>/dev/null || true
 if [ -n "$XAI_API_KEY" ]; then
 printf 'XAI_API_KEY=%s\n' "$XAI_API_KEY" > "$REPO_DIR/.env"
 else
@@ -107,5 +107,5 @@ echo "  opencode run -m ollama-cloud/glm-5.3 'say hi'"
 echo "  (cd /tmp && oll-council 'pick a sort algorithm')   # bare name, on PATH, any dir"
 if [ -n "$XAI_API_KEY" ]; then echo "  (cd /tmp && xsearch 'test query' --days 3)"; fi
 echo "  (new Claude Code session) /browse · /fanout · /ideas"
-echo '  (new Codex thread) $claudemaxxing:fanout · $claudemaxxing:ideas · $claudemaxxing:memory; shell: g / g ls'
+echo '  (new Codex thread) $orchestratormaxxing:fanout · $orchestratormaxxing:ideas · $orchestratormaxxing:memory; shell: g / g ls'
 echo '  fleet machines: see install-fleet.sh (private)'
