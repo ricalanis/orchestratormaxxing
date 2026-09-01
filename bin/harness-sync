@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""Safe cross-machine pull/setup for the claudemaxxing harness.
+
+GitHub is the transport for versioned code + shared memory. Tailscale is only a
+secure reachability path for interactive remote commands; this tool opens no
+listener and never force-pulls, stashes, resets, or overwrites dirty work.
+
+Fleet identity (the LAN peer) is not built in: it comes from the user-owned
+fleet.env, and a machine without one is a standalone client — no peer, no
+remote checks, nothing spawned.
+"""
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+def fleet_env():
+    """Parse fleet.env once per process; anything unreadable == not configured.
+
+    Path: $CLAUDEMAXXING_FLEET_ENV, else ~/.config/claudemaxxing/fleet.env.
+    KEY=VALUE per line, blank lines and `#` comments, optional `export ` prefix,
+    optional double quotes around VALUE, no shell expansion, unknown keys ignored.
+    """
+    values = {}
+    try:
+        raw = os.environ.get("CLAUDEMAXXING_FLEET_ENV", "").strip()
+        path = Path(raw).expanduser() if raw else Path.home() / ".config" / "claudemaxxing" / "fleet.env"
+        text = path.read_text(encoding="utf-8")
+    except (OSError, ValueError, RuntimeError):
+        return values
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] == '"':
+            value = value[1:-1]
+        if key:
+            values[key] = value
+    return values
+
+
+def fleet_value(key, *legacy):
+    """Per-key precedence: legacy explicit env > process env `key` > fleet.env > ''."""
+    for name in (*legacy, key):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return FLEET.get(key, "").strip()
+
+
+FLEET = fleet_env()
+# '' == not configured. There is no built-in tenant peer to fall back to.
+DEFAULT_PEER = fleet_value("CLAUDEMAXXING_LAN_PEER", "HARNESS_LAN_PEER")
+# SSH user on the peer: explicit HARNESS_LAN_USER, else the user half of the
+# fleet server's `user@host`, else '' (ssh then applies its own default/config).
+_SERVER_SSH = fleet_value("CLAUDEMAXXING_SERVER_SSH")
+DEFAULT_SSH_USER = os.environ.get("HARNESS_LAN_USER", "").strip() or (
+    _SERVER_SSH.rpartition("@")[0] if "@" in _SERVER_SSH else "")
+NOT_CONFIGURED = "no LAN peer configured: set CLAUDEMAXXING_LAN_PEER in fleet.env (or pass --peer)"
+
+# Machine-written queue state. Watchers append to these on their own schedule, so
+# the tree is dirty from files no human touched — and the dirty guard, which
+# exists to protect *hand* edits, kept refusing the pull over them. These paths
+# are the only ones this tool may commit or publish on its own; everything else
+# still refuses, which is the whole point of the allowlist.
+STATE_PATHS = ("knowledge/intent-queue.jsonl", "knowledge/loop-queue.jsonl")
+AUTOCOMMIT_MSG = "chore(state): autocommit machine-written queue state"
+
+
+class SyncError(RuntimeError):
+    pass
+
+
+class NotConfigured(SyncError):
+    """Standalone client (no LAN peer): exit 2, distinct from a failed check (1)."""
+
+
+def run(cmd, cwd=None, timeout=30, check=False):
+    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    if check and r.returncode:
+        raise SyncError((r.stderr or r.stdout or "command failed").strip())
+    return r
+
+
+def root():
+    r = run(["git", "rev-parse", "--show-toplevel"], check=True)
+    return Path(r.stdout.strip()).resolve()
+
+
+def git_state(repo, fetch=False):
+    if fetch:
+        run(["git", "fetch", "--prune", "origin"], cwd=repo, timeout=60, check=True)
+    dirty = run(["git", "status", "--porcelain"], cwd=repo, check=True).stdout.splitlines()
+    branch = run(["git", "branch", "--show-current"], cwd=repo, check=True).stdout.strip()
+    if not branch:
+        raise SyncError("detached HEAD: check out the intended branch before syncing")
+    upstream = f"origin/{branch}"
+    verify = run(["git", "rev-parse", "--verify", upstream], cwd=repo)
+    if verify.returncode:
+        raise SyncError(f"missing upstream {upstream}")
+    counts = run(["git", "rev-list", "--left-right", "--count", f"HEAD...{upstream}"], cwd=repo, check=True)
+    ahead, behind = (int(x) for x in counts.stdout.split())
+    return {"repo": str(repo), "branch": branch, "upstream": upstream,
+            "ahead": ahead, "behind": behind, "dirty": dirty}
+
+
+def lan_state(peer):
+    tailscale = shutil.which("tailscale")
+    ts_ok, ts_detail = False, "tailscale CLI unavailable"
+    if tailscale:
+        r = run([tailscale, "ping", "-c", "1", peer], timeout=12)
+        ts_ok = r.returncode == 0
+        ts_detail = (r.stdout or r.stderr).strip().splitlines()[-1] if (r.stdout or r.stderr).strip() else "no response"
+    ssh_ok, ssh_detail = False, "ssh CLI unavailable"
+    ssh = shutil.which("ssh")
+    if ssh:
+        cmd = [ssh, "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+               "-o", "StrictHostKeyChecking=accept-new"]
+        identity = os.environ.get("HARNESS_LAN_IDENTITY", "").strip()
+        if not identity:
+            candidate = Path.home() / ".ssh" / "id_ed25519"
+            identity = str(candidate) if candidate.is_file() else ""
+        if identity:
+            cmd.extend(["-i", str(Path(identity).expanduser())])
+        cmd.extend([f"{DEFAULT_SSH_USER}@{peer}" if DEFAULT_SSH_USER else peer, "true"])
+        r = run(cmd, timeout=12)
+        ssh_ok = r.returncode == 0
+        ssh_detail = "authenticated SSH ok" if ssh_ok else (r.stderr or r.stdout or "SSH authentication failed").strip().splitlines()[-1]
+    return {"peer": peer, "tailscale_ok": ts_ok, "tailscale": ts_detail,
+            "ssh_ok": ssh_ok, "ssh": ssh_detail}
+
+
+def cmd_status(args):
+    state = git_state(root(), fetch=args.fetch)
+    state["lan"] = lan_state(args.peer) if args.peer else None
+    if args.json:
+        print(json.dumps(state, indent=2))
+        return
+    print(f"repo: {state['repo']} ({state['branch']} -> {state['upstream']})")
+    print(f"git: ahead={state['ahead']} behind={state['behind']} dirty={len(state['dirty'])}")
+    if state["lan"] is None:
+        print("lan: not configured (set CLAUDEMAXXING_LAN_PEER in fleet.env)")
+        return
+    print(f"tailscale: {'ok' if state['lan']['tailscale_ok'] else 'down'} — {state['lan']['tailscale']}")
+    print(f"ssh: {'ok' if state['lan']['ssh_ok'] else 'down'} — {state['lan']['ssh']}")
+
+
+def state_dirty(repo):
+    """Allowlisted paths whose worktree content differs from HEAD."""
+    r = run(["git", "diff", "--name-only", "HEAD", "--", *STATE_PATHS], cwd=repo, check=True)
+    return [p for p in r.stdout.split("\n") if p.strip() in STATE_PATHS]
+
+
+def autocommit_state(repo):
+    if os.environ.get("HARNESS_SYNC_AUTOCOMMIT", "1") == "0":
+        return []
+    changed = state_dirty(repo)
+    if not changed:
+        return []
+    # Pathspec-limited commit: it takes the worktree copy of these paths only and
+    # leaves anything a parallel session has staged exactly where it was.
+    run(["git", "commit", "-q", "-m", AUTOCOMMIT_MSG, "--", *changed],
+        cwd=repo, timeout=30, check=True)
+    return changed
+
+
+def ahead_is_state_only(repo, upstream):
+    """True when every un-pushed commit touches nothing but STATE_PATHS.
+
+    Per-commit file lists, not the net diff: a pair of commits that add and then
+    revert a source file has an empty net diff, and publishing those unattended
+    is exactly what this tool must never do.
+    """
+    r = run(["git", "log", "--format=", "--name-only", f"{upstream}..HEAD"],
+            cwd=repo, check=True)
+    names = {n.strip() for n in r.stdout.split("\n") if n.strip()}
+    return bool(names) and names <= set(STATE_PATHS)
+
+
+def safe_pull(repo):
+    committed = autocommit_state(repo)
+    if committed:
+        print("autocommitted machine state: " + ", ".join(committed))
+    before = git_state(repo, fetch=True)
+    if before["dirty"]:
+        sample = "\n  ".join(before["dirty"][:8])
+        raise SyncError(f"refusing pull: working tree is dirty\n  {sample}")
+    if before["ahead"] and ahead_is_state_only(repo, before["upstream"]):
+        # Queue state nobody hand-wrote: publish it instead of making the
+        # operator reconcile it. Source commits still fall through to a refusal.
+        if before["behind"]:
+            rebase = run(["git", "rebase", before["upstream"]], cwd=repo, timeout=120)
+            if rebase.returncode:
+                run(["git", "rebase", "--abort"], cwd=repo)
+                raise SyncError("refusing pull: local queue state conflicts with "
+                                f"{before['upstream']}; reconcile the queue files by hand")
+        run(["git", "push", "origin", f"HEAD:{before['branch']}"],
+            cwd=repo, timeout=60, check=True)
+        before = git_state(repo, fetch=True)
+    if before["ahead"] and before["behind"]:
+        raise SyncError(f"refusing pull: branch diverged (ahead {before['ahead']}, behind {before['behind']})")
+    if before["ahead"]:
+        raise SyncError(f"refusing pull: {before['ahead']} local commit(s) are not on {before['upstream']}; push or reconcile first")
+    if before["behind"]:
+        run(["git", "merge", "--ff-only", before["upstream"]], cwd=repo, timeout=60, check=True)
+    after = git_state(repo)
+    print(f"synced {after['branch']} with {after['upstream']} (ahead=0 behind=0)")
+
+
+def cmd_autocommit(args):
+    repo = root()
+    committed = autocommit_state(repo)
+    if args.json:
+        print(json.dumps({"committed": committed, "message": AUTOCOMMIT_MSG}))
+    elif committed:
+        print("autocommitted machine state: " + ", ".join(committed))
+    else:
+        print("no machine-written queue state to commit")
+
+
+def cmd_pull(_args):
+    safe_pull(root())
+
+
+def cmd_setup(args):
+    repo = root()
+    if not args.no_pull:
+        safe_pull(repo)
+    install = repo / "install.sh"
+    run([str(install)], cwd=repo, timeout=300, check=True)
+    memoryctl = repo / "bin" / "memoryctl"
+    run([str(memoryctl), "init"], cwd=repo, check=True)
+    # Fresh machines may have no legacy memory; bridge-claude handles that by
+    # creating the compatibility symlink. Existing stores are copied + backed up.
+    run([str(memoryctl), "bridge-claude", "--apply"], cwd=repo, timeout=60, check=True)
+    print("installed Claude/Codex harness and connected shared memory")
+    if not args.peer:
+        print("LAN peer: not configured (CLAUDEMAXXING_LAN_PEER unset; remote checks skipped)")
+        return
+    state = lan_state(args.peer)
+    print(f"LAN peer {args.peer}: tailscale={'ok' if state['tailscale_ok'] else 'down'}, ssh={'ok' if state['ssh_ok'] else 'down'}")
+    if not state["ssh_ok"]:
+        print("remote c/g will remain unavailable until SSH is enabled on the peer", file=sys.stderr)
+
+
+def cmd_lan(args):
+    if not args.peer:
+        raise NotConfigured(NOT_CONFIGURED)
+    state = lan_state(args.peer)
+    print(json.dumps(state, indent=2) if args.json else
+          f"{args.peer}: tailscale={'ok' if state['tailscale_ok'] else 'down'}; ssh={'ok' if state['ssh_ok'] else 'down'}\n{state['tailscale']}\n{state['ssh']}")
+    if not state["ssh_ok"]:
+        raise SyncError("authenticated SSH path is unavailable")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="safe Git/Tailscale setup across harness machines")
+    sub = ap.add_subparsers(dest="command", required=True)
+    p = sub.add_parser("status"); p.add_argument("--fetch", action="store_true"); p.add_argument("--json", action="store_true"); p.add_argument("--peer", default=DEFAULT_PEER); p.set_defaults(func=cmd_status)
+    p = sub.add_parser("pull"); p.set_defaults(func=cmd_pull)
+    p = sub.add_parser("autocommit"); p.add_argument("--json", action="store_true"); p.set_defaults(func=cmd_autocommit)
+    p = sub.add_parser("setup"); p.add_argument("--no-pull", action="store_true"); p.add_argument("--peer", default=DEFAULT_PEER); p.set_defaults(func=cmd_setup)
+    p = sub.add_parser("lan-check"); p.add_argument("--peer", default=DEFAULT_PEER); p.add_argument("--json", action="store_true"); p.set_defaults(func=cmd_lan)
+    args = ap.parse_args()
+    try:
+        args.func(args)
+    except NotConfigured as ex:
+        print(f"harness-sync: {ex}", file=sys.stderr)
+        return 2
+    except (SyncError, OSError, ValueError, subprocess.SubprocessError) as ex:
+        print(f"harness-sync: {ex}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

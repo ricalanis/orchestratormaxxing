@@ -1,0 +1,835 @@
+#!/usr/bin/env python3
+"""memoryctl — governed file-backed memory shared by Claude Code and Codex.
+
+The canonical store for an adopted git project is ``<repo>/.agents/memory``.
+Claude reaches it through its legacy auto-memory path (a reversible symlink),
+while both hosts receive the same bounded index through SessionStart hooks.
+Codex's private SQLite memory is deliberately neither read nor modified.
+
+All mutations are local-lock protected and atomic. Cross-machine transport is
+ordinary authenticated Git; this tool never opens a network listener.
+"""
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import date, datetime, timezone
+from pathlib import Path
+from urllib.parse import urlparse
+
+
+SECRET_RE = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|\b(?:sk|rk)-[A-Za-z0-9]{16,}"
+    r"|\bghp_[A-Za-z0-9]{20,}"
+    r"|\bxox[baprs]-[A-Za-z0-9-]{10,}"
+    r"|\bAKIA[0-9A-Z]{16}\b"
+    r"|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
+    r"|(?:password|api[_-]?key|secret|access[_-]?token)\s*[:=]\s*\S{6,}",
+    re.IGNORECASE,
+)
+PII_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
+TYPES = ("user", "feedback", "project", "reference")
+SENSITIVITIES = ("normal", "sensitive")
+RESOLUTION_RULES = ("last-writer-wins", "evidence-merge", "await-confirm", "per-rule")
+CONSOLIDATION_REVIEW_FILE = ".consolidation-review.json"
+CONSOLIDATION_REVIEW_SCHEMA = 1
+CONSOLIDATION_DECISIONS = ("no-safe-merge",)
+SEMANTIC_FIELDS = (
+    "name", "description", "type", "source", "sensitivity",
+    "valid_from", "valid_to", "supersedes",
+)
+
+
+class MemoryError(RuntimeError):
+    pass
+
+
+def run_git(args, cwd=None):
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=15)
+
+
+def repo_root(cwd=None):
+    r = run_git(["rev-parse", "--show-toplevel"], cwd or os.getcwd())
+    return Path(r.stdout.strip()).resolve() if r.returncode == 0 and r.stdout.strip() else None
+
+
+def normalize_remote(raw):
+    """Remove credentials/protocol noise while preserving host + repo identity."""
+    raw = raw.strip()
+    if not raw:
+        return ""
+    if re.match(r"^[^/@:]+@[^/:]+:.+", raw):
+        user_host, path = raw.split(":", 1)
+        host = user_host.rsplit("@", 1)[-1].lower()
+    elif "://" in raw:
+        parsed = urlparse(raw)
+        host = (parsed.hostname or "").lower()
+        path = parsed.path
+    else:
+        path_obj = Path(raw).expanduser()
+        return "file/" + str(path_obj.resolve())
+    path = path.strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    return f"{host}/{path}".rstrip("/")
+
+
+def project_key(cwd=None):
+    explicit = os.environ.get("HARNESS_MEMORY_KEY", "").strip()
+    if explicit:
+        if not re.match(r"^[A-Za-z0-9._-]{1,120}$", explicit):
+            raise MemoryError("HARNESS_MEMORY_KEY must use only letters, digits, dot, underscore, or dash")
+        return explicit.lower()
+    root = repo_root(cwd)
+    if root:
+        r = run_git(["config", "--get", "remote.origin.url"], root)
+        identity = normalize_remote(r.stdout) if r.returncode == 0 else ""
+        if identity:
+            stem = re.sub(r"[^a-z0-9]+", "-", identity.lower()).strip("-")[-72:]
+            digest = hashlib.sha256(identity.encode()).hexdigest()[:10]
+            return f"{stem}-{digest}"
+    absolute = str(Path(cwd or os.getcwd()).resolve())
+    digest = hashlib.sha256(absolute.encode()).hexdigest()[:16]
+    return f"local-{Path(absolute).name.lower()}-{digest}"
+
+
+def legacy_memory_dir(cwd=None):
+    absolute = str(Path(cwd or os.getcwd()).resolve())
+    slug = absolute.replace("/", "-")
+    return Path.home() / ".claude" / "projects" / slug / "memory"
+
+
+def shared_memory_dir(cwd=None):
+    override = os.environ.get("HARNESS_MEMORY_DIR", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    root = repo_root(cwd)
+    if root:
+        return root / ".agents" / "memory"
+    data = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    return data / "claudemaxxing" / "memory" / project_key(cwd)
+
+
+def resolved_memory_dir(cwd=None):
+    """Prefer adopted shared memory, otherwise preserve legacy compatibility."""
+    shared = shared_memory_dir(cwd)
+    if shared.is_dir():
+        return shared.resolve()
+    legacy = legacy_memory_dir(cwd)
+    if legacy.is_dir():
+        return legacy.resolve()
+    return shared
+
+
+def split_frontmatter(text):
+    if not text.startswith("---"):
+        return [], text
+    lines = text.splitlines()
+    try:
+        end = lines.index("---", 1)
+    except ValueError:
+        return [], text
+    return lines[1:end], "\n".join(lines[end + 1:]).lstrip("\n")
+
+
+def parse_frontmatter(text):
+    lines, body = split_frontmatter(text)
+    fields = {}
+    for line in lines:
+        m = re.match(r"^\s*([A-Za-z_][\w_-]*):\s*(.*)$", line)
+        if m:
+            raw = m.group(2).strip()
+            if ((raw.startswith('"') and raw.endswith('"'))
+                    or (raw.startswith("[") and raw.endswith("]"))):
+                try:
+                    raw = json.loads(raw)
+                except ValueError:
+                    raw = raw.strip('"')
+            else:
+                raw = raw.strip("'")
+            fields[m.group(1)] = raw
+    return fields, body
+
+
+def frontmatter_key_count(text, key):
+    lines, _ = split_frontmatter(text)
+    pattern = re.compile(rf"^\s*{re.escape(key)}:\s*.*$")
+    return sum(1 for line in lines if pattern.fullmatch(line))
+
+
+def update_frontmatter(text, updates):
+    lines, body = split_frontmatter(text)
+    if not lines:
+        raise MemoryError("memory file has no valid YAML frontmatter")
+    remaining = dict(updates)
+    for i, line in enumerate(lines):
+        m = re.match(r"^(\s*)([A-Za-z_][\w_-]*):\s*(.*)$", line)
+        if m and m.group(2) in remaining:
+            lines[i] = f"{m.group(1)}{m.group(2)}: {remaining.pop(m.group(2))}"
+    for key, value in remaining.items():
+        lines.append(f"  {key}: {value}")
+    return "---\n" + "\n".join(lines) + "\n---\n" + body.rstrip() + "\n"
+
+
+def replace_frontmatter_value(text, key, value, *, allow_missing=False):
+    """Replace one frontmatter field, optionally backfilling legacy metadata.
+
+    Reverification must preserve every byte except the evidence date. Bridged
+    Claude memories can predate ``last_verified`` entirely, so the governed
+    repair path may insert that one missing field under ``metadata``. Duplicate
+    fields remain an error rather than being normalized ambiguously.
+    """
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].rstrip("\r\n") != "---":
+        raise MemoryError("memory file has no valid YAML frontmatter")
+    try:
+        end = next(i for i, line in enumerate(lines[1:], 1)
+                   if line.rstrip("\r\n") == "---")
+    except StopIteration:
+        raise MemoryError("memory file has no valid YAML frontmatter")
+
+    matches = []
+    pattern = re.compile(rf"^([ \t]*{re.escape(key)}:[ \t]*).*$")
+    for i in range(1, end):
+        content = lines[i].rstrip("\r\n")
+        match = pattern.fullmatch(content)
+        if match:
+            matches.append((i, match.group(1)))
+    if len(matches) == 0 and allow_missing:
+        metadata = [i for i in range(1, end)
+                    if re.fullmatch(r"[ \t]*metadata:[ \t]*",
+                                    lines[i].rstrip("\r\n"))]
+        if len(metadata) != 1:
+            raise MemoryError("memory frontmatter must contain exactly one metadata field")
+        insert_at = end
+        for i in range(metadata[0] + 1, end):
+            content = lines[i].rstrip("\r\n")
+            if content and not content.startswith((" ", "\t")):
+                insert_at = i
+                break
+        newline = "\r\n" if lines[0].endswith("\r\n") else "\n"
+        lines.insert(insert_at, f"  {key}: {value}{newline}")
+        return "".join(lines)
+    if len(matches) != 1:
+        raise MemoryError(f"memory frontmatter must contain exactly one {key} field")
+
+    i, prefix = matches[0]
+    newline = "\r\n" if lines[i].endswith("\r\n") else "\n" if lines[i].endswith("\n") else ""
+    lines[i] = f"{prefix}{value}{newline}"
+    return "".join(lines)
+
+
+def encode_supersedes(value):
+    if not value:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(sorted(value), ensure_ascii=False, separators=(",", ":"))
+
+
+def fact_text(name, description, mtype, source, sensitivity, body, supersedes=""):
+    today = datetime.now(timezone.utc).date().isoformat()
+    encoded_supersedes = encode_supersedes(supersedes)
+    supersedes_line = f"  supersedes: {encoded_supersedes}\n" if encoded_supersedes else ""
+    return (
+        "---\n"
+        f"name: {name}\n"
+        f"description: {json.dumps(description, ensure_ascii=False)}\n"
+        "metadata:\n"
+        "  node_type: memory\n"
+        f"  type: {mtype}\n"
+        "  origin: shared-memory\n"
+        f"  created: {today}\n"
+        f"  last_verified: {today}\n"
+        f"  valid_from: {today}\n"
+        "  valid_to:\n"
+        "  status: active\n"
+        "  superseded_by:\n"
+        "  resolution_rule:\n"
+        f"  sensitivity: {sensitivity}\n"
+        f"  source: {json.dumps(source, ensure_ascii=False)}\n"
+        f"{supersedes_line}"
+        "---\n"
+        f"{body.rstrip()}\n"
+    )
+
+
+def validate_name(name):
+    if not NAME_RE.fullmatch(name):
+        raise MemoryError("name must be a 1-80 character lowercase kebab slug")
+
+
+def validate_content(description, body, sensitivity):
+    material = description + "\n" + body
+    if SECRET_RE.search(material):
+        raise MemoryError("refusing to store credential-like content; remove the secret")
+    if sensitivity != "sensitive" and PII_RE.search(material):
+        raise MemoryError("PII-looking content requires --sensitivity sensitive or removal")
+
+
+def validate_metadata(description, source):
+    for label, value in (("description", description), ("source", source)):
+        if any(ch in value for ch in ("\n", "\r", "\x00")):
+            raise MemoryError(f"{label} must be a single line without NUL bytes")
+
+
+def atomic_write_bytes(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def atomic_write(path, text):
+    atomic_write_bytes(path, text.encode())
+
+
+def fsync_dir(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def atomic_batch_write(updates):
+    """Replace a bounded file set and restore every original on failure."""
+    originals = {
+        path: path.read_bytes() if path.exists() else None
+        for path in updates
+    }
+    replaced = []
+    raw_fail = os.environ.get("MEMORYCTL_FAIL_AFTER_REPLACE", "").strip()
+    try:
+        fail_after = int(raw_fail) if raw_fail else 0
+    except ValueError:
+        raise MemoryError("MEMORYCTL_FAIL_AFTER_REPLACE must be an integer")
+    try:
+        for path, text in updates.items():
+            atomic_write(path, text)
+            replaced.append(path)
+            if fail_after and len(replaced) == fail_after:
+                raise OSError(f"injected failure after replace {fail_after}")
+        if updates:
+            fsync_dir(next(iter(updates)).parent)
+    except BaseException:
+        for path in reversed(replaced):
+            original = originals[path]
+            if original is None:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+            else:
+                atomic_write_bytes(path, original)
+        if updates:
+            fsync_dir(next(iter(updates)).parent)
+        raise
+
+
+@contextlib.contextmanager
+def memory_lock(mem_dir):
+    mem_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = mem_dir / ".memory.lock"
+    with open(lock_path, "a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        yield
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def facts(mem_dir):
+    rows = []
+    if not mem_dir.is_dir():
+        return rows
+    for path in sorted(mem_dir.glob("*.md")):
+        if path.name == "MEMORY.md":
+            continue
+        text = path.read_text(errors="replace")
+        fm, body = parse_frontmatter(text)
+        rows.append({"path": path, "file": path.name, "fields": fm, "body": body})
+    return rows
+
+
+def active_semantic_snapshot(mem_dir):
+    """Return a privacy-preserving digest of every active fact's meaning.
+
+    Transaction-time fields and MEMORY.md ordering are deliberately excluded:
+    reverification and index repair do not change what the fact claims. The
+    filename, claim-bearing metadata, and body are included so membership or
+    meaning changes invalidate a prior consolidation review.
+    """
+    records = []
+    for row in facts(mem_dir):
+        fields = row["fields"]
+        if (fields.get("status") or "active").lower() != "active":
+            continue
+        record = {"file": row["file"]}
+        for field in SEMANTIC_FIELDS:
+            record[field] = fields.get(field) or ""
+        record["body"] = row["body"].strip("\n")
+        records.append(record)
+    payload = json.dumps(records, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"))
+    return len(records), hashlib.sha256(payload.encode()).hexdigest()
+
+
+def render_index(rows):
+    active = []
+    for row in rows:
+        fm = row["fields"]
+        if (fm.get("status") or "active").lower() != "active":
+            continue
+        name = fm.get("name") or row["path"].stem
+        sensitivity = (fm.get("sensitivity") or "normal").lower()
+        description = fm.get("description") or name
+        if sensitivity == "sensitive":
+            description = "sensitive memory; load only when the task requires it"
+        active.append((name, description, row["file"]))
+    lines = ["# Shared project memory", "", "One line per active fact. Read the linked file only when relevant.", ""]
+    for name, description, filename in sorted(active):
+        lines.append(f"- [{name}]({filename}) — {description}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def rebuild_index(mem_dir):
+    atomic_write(mem_dir / "MEMORY.md", render_index(facts(mem_dir)))
+
+
+def ensure_store(mem_dir):
+    mem_dir.mkdir(parents=True, exist_ok=True)
+    marker = mem_dir / ".managed-by-claudemaxxing"
+    if not marker.exists():
+        atomic_write(marker, "shared-memory-v1\n")
+    if not (mem_dir / "MEMORY.md").exists():
+        rebuild_index(mem_dir)
+
+
+def cmd_init(_args):
+    mem_dir = shared_memory_dir()
+    with memory_lock(mem_dir):
+        ensure_store(mem_dir)
+    print(mem_dir)
+
+
+def cmd_path(_args):
+    print(resolved_memory_dir())
+
+
+def cmd_key(_args):
+    print(project_key())
+
+
+def cmd_list(args):
+    mem_dir = resolved_memory_dir()
+    rows = []
+    for row in facts(mem_dir):
+        fm = row["fields"]
+        rows.append({
+            "name": fm.get("name") or row["path"].stem,
+            "description": fm.get("description") or "",
+            "type": fm.get("type") or "",
+            "status": fm.get("status") or "active",
+            "sensitivity": fm.get("sensitivity") or "normal",
+            "file": row["file"],
+        })
+    if args.json:
+        print(json.dumps({"dir": str(mem_dir), "memories": rows}, indent=2))
+    else:
+        for row in rows:
+            detail = "[sensitive]" if row["sensitivity"] == "sensitive" else row["description"]
+            print(f"{row['name']}\t{row['status']}\t{detail}")
+
+
+def cmd_show(args):
+    validate_name(args.name)
+    path = resolved_memory_dir() / f"{args.name}.md"
+    if not path.is_file():
+        raise MemoryError(f"unknown memory: {args.name}")
+    sys.stdout.write(path.read_text())
+
+
+def read_body(args):
+    if args.body is not None:
+        return args.body
+    if sys.stdin.isatty():
+        raise MemoryError("provide --body or pipe the memory body on stdin")
+    return sys.stdin.read()
+
+
+def cmd_add(args):
+    validate_name(args.name)
+    body = read_body(args)
+    validate_metadata(args.description, args.source)
+    validate_content(args.description, body, args.sensitivity)
+    mem_dir = shared_memory_dir()
+    with memory_lock(mem_dir):
+        ensure_store(mem_dir)
+        path = mem_dir / f"{args.name}.md"
+        if path.exists():
+            raise MemoryError(f"memory already exists: {args.name}; use supersede")
+        atomic_write(path, fact_text(args.name, args.description, args.type,
+                                     args.source, args.sensitivity, body))
+        rebuild_index(mem_dir)
+    print(f"added {args.name} -> {path}")
+
+
+def cmd_supersede(args):
+    validate_name(args.old_name)
+    validate_name(args.new_name)
+    if args.old_name == args.new_name:
+        raise MemoryError("new memory must have a different name")
+    body = read_body(args)
+    validate_metadata(args.description, args.source)
+    validate_content(args.description, body, args.sensitivity)
+    mem_dir = resolved_memory_dir()
+    if mem_dir.resolve() != shared_memory_dir().resolve():
+        raise MemoryError("initialize/import shared memory before superseding legacy memory")
+    with memory_lock(mem_dir):
+        old_path = mem_dir / f"{args.old_name}.md"
+        new_path = mem_dir / f"{args.new_name}.md"
+        if not old_path.is_file():
+            raise MemoryError(f"unknown memory: {args.old_name}")
+        if new_path.exists():
+            raise MemoryError(f"memory already exists: {args.new_name}")
+        old_text = old_path.read_text()
+        old_fm, _ = parse_frontmatter(old_text)
+        if (old_fm.get("status") or "active") != "active":
+            raise MemoryError(f"memory is not active: {args.old_name}")
+        new_text = fact_text(args.new_name, args.description, args.type, args.source,
+                             args.sensitivity, body, supersedes=args.old_name)
+        old_text = update_frontmatter(old_text, {
+            "status": "superseded",
+            "superseded_by": args.new_name,
+            "resolution_rule": args.resolution_rule,
+        })
+        atomic_write(new_path, new_text)
+        atomic_write(old_path, old_text)
+        rebuild_index(mem_dir)
+    print(f"superseded {args.old_name} -> {args.new_name}")
+
+
+def cmd_consolidate(args):
+    sources = sorted(args.old_names)
+    for name in [*sources, args.into]:
+        validate_name(name)
+    if len(sources) < 2:
+        raise MemoryError("consolidate requires at least two source memories")
+    if len(set(sources)) != len(sources):
+        raise MemoryError("consolidate source memories must be unique")
+    if args.into in sources:
+        raise MemoryError("consolidation target cannot also be a source")
+    body = read_body(args)
+    validate_metadata(args.description, args.source)
+    validate_content(args.description, body, args.sensitivity)
+    mem_dir = resolved_memory_dir()
+    if mem_dir.resolve() != shared_memory_dir().resolve():
+        raise MemoryError("initialize/import shared memory before consolidating legacy memory")
+
+    with memory_lock(mem_dir):
+        ensure_store(mem_dir)
+        rows = facts(mem_dir)
+        by_name = {}
+        for row in rows:
+            name = row["fields"].get("name") or row["path"].stem
+            if name in by_name:
+                raise MemoryError(f"duplicate memory name in vault: {name}")
+            by_name[name] = row
+        if args.into in by_name or (mem_dir / f"{args.into}.md").exists():
+            raise MemoryError(f"memory already exists: {args.into}")
+
+        source_rows = []
+        for name in sources:
+            row = by_name.get(name)
+            if row is None:
+                raise MemoryError(f"unknown memory: {name}")
+            fields = row["fields"]
+            if (fields.get("status") or "active").lower() != "active":
+                raise MemoryError(f"memory is not active: {name}")
+            source_text = row["path"].read_text()
+            for key in ("name", "status", "superseded_by", "resolution_rule", "sensitivity"):
+                if frontmatter_key_count(source_text, key) > 1:
+                    raise MemoryError(f"duplicate {key} field in memory: {name}")
+            sensitivity = (fields.get("sensitivity") or "normal").lower()
+            if sensitivity != args.sensitivity:
+                raise MemoryError(
+                    f"sensitivity mismatch for {name}: {sensitivity} != {args.sensitivity}"
+                )
+            source_rows.append(row)
+
+        replacements = {}
+        for row in source_rows:
+            text = update_frontmatter(row["path"].read_text(), {
+                "status": "superseded",
+                "superseded_by": args.into,
+                "resolution_rule": args.resolution_rule,
+            })
+            replacements[row["file"]] = text
+
+        target_file = f"{args.into}.md"
+        replacements[target_file] = fact_text(
+            args.into, args.description, args.type, args.source,
+            args.sensitivity, body, supersedes=sources,
+        )
+
+        projected = []
+        for row in rows:
+            text = replacements.get(row["file"])
+            if text is None:
+                projected.append(row)
+            else:
+                fields, projected_body = parse_frontmatter(text)
+                projected.append({"path": row["path"], "file": row["file"],
+                                  "fields": fields, "body": projected_body})
+        target_fields, target_body = parse_frontmatter(replacements[target_file])
+        projected.append({"path": mem_dir / target_file, "file": target_file,
+                          "fields": target_fields, "body": target_body})
+        replacements["MEMORY.md"] = render_index(projected)
+
+        updates = {
+            mem_dir / filename: replacements[filename]
+            for filename in [*(f"{name}.md" for name in sources), target_file, "MEMORY.md"]
+        }
+        atomic_batch_write(updates)
+
+    hashes = {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in updates
+    }
+    receipt = {
+        "schema": 1,
+        "target": args.into,
+        "sources": sources,
+        "changed": [path.name for path in updates],
+        "hashes": hashes,
+    }
+    if args.json:
+        print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
+    else:
+        print(f"consolidated {len(sources)} memories -> {args.into}")
+
+
+def cmd_reverify(args):
+    """Refresh only the evidence date of one active shared-memory fact."""
+    validate_name(args.name)
+    mem_dir = resolved_memory_dir()
+    if mem_dir.resolve() != shared_memory_dir().resolve():
+        raise MemoryError("initialize/import shared memory before reverifying legacy memory")
+    with memory_lock(mem_dir):
+        path = mem_dir / f"{args.name}.md"
+        if not path.is_file():
+            raise MemoryError(f"unknown memory: {args.name}")
+        old_text = path.read_text()
+        fields, _ = parse_frontmatter(old_text)
+        if (fields.get("status") or "active").lower() != "active":
+            raise MemoryError(f"memory is not active: {args.name}")
+        today = datetime.now(timezone.utc).date().isoformat()
+        atomic_write(path, replace_frontmatter_value(
+            old_text, "last_verified", today, allow_missing=True))
+    print(f"reverified {args.name} -> {path}")
+
+
+def cmd_review_consolidation(args):
+    """Record that the current active semantic set has no safe merge candidates."""
+    mem_dir = resolved_memory_dir()
+    if mem_dir.resolve() != shared_memory_dir().resolve():
+        raise MemoryError("initialize/import shared memory before reviewing consolidation")
+    with memory_lock(mem_dir):
+        ensure_store(mem_dir)
+        active_count, active_set_sha256 = active_semantic_snapshot(mem_dir)
+        if active_count <= 25:
+            raise MemoryError("consolidation review is only needed above 25 active memories")
+        receipt = {
+            "schema": CONSOLIDATION_REVIEW_SCHEMA,
+            "decision": args.decision,
+            "active_count": active_count,
+            "active_set_sha256": active_set_sha256,
+            "reviewed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        }
+        atomic_write(mem_dir / CONSOLIDATION_REVIEW_FILE,
+                     json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    print(f"reviewed {active_count} active memories -> {mem_dir / CONSOLIDATION_REVIEW_FILE}")
+
+
+def normalize_import_text(text):
+    """Canonicalize harmless legacy frontmatter without changing Markdown bodies."""
+    return re.sub(r"(?m)^metadata:[ \t]+$", "metadata:", text)
+
+
+def import_plan(source, dest):
+    if not source.is_dir():
+        raise MemoryError(f"legacy memory directory not found: {source}")
+    planned, same, conflicts = [], [], []
+    for src in sorted(source.glob("*.md")):
+        if src.name == "MEMORY.md":
+            continue
+        dst = dest / src.name
+        if not dst.exists():
+            planned.append((src, dst))
+        elif normalize_import_text(src.read_text()) == normalize_import_text(dst.read_text()):
+            same.append(src.name)
+        else:
+            conflicts.append(src.name)
+    return planned, same, conflicts
+
+
+def cmd_import(args):
+    source = Path(args.from_dir).expanduser().resolve() if args.from_dir else legacy_memory_dir().resolve()
+    dest = shared_memory_dir()
+    planned, same, conflicts = import_plan(source, dest)
+    report = {"source": str(source), "destination": str(dest), "add": [s.name for s, _ in planned],
+              "unchanged": same, "conflicts": conflicts, "applied": False}
+    if conflicts:
+        print(json.dumps(report, indent=2))
+        raise MemoryError("import conflicts exist; reconcile them explicitly")
+    if args.apply:
+        with memory_lock(dest):
+            ensure_store(dest)
+            for src, dst in planned:
+                atomic_write(dst, normalize_import_text(src.read_text()))
+            rebuild_index(dest)
+        report["applied"] = True
+    print(json.dumps(report, indent=2))
+
+
+def cmd_bridge(args):
+    source = legacy_memory_dir()
+    dest = shared_memory_dir()
+    if source.is_symlink():
+        if source.resolve() == dest.resolve():
+            print(f"already bridged: {source} -> {dest}")
+            return
+        raise MemoryError(f"legacy path is a symlink to a different target: {source}")
+    if not source.exists():
+        action = {"legacy": str(source), "shared": str(dest), "would_create_symlink": True,
+                  "conflicts": [], "apply": bool(args.apply)}
+        if not args.apply:
+            print(json.dumps(action, indent=2))
+            return
+        with memory_lock(dest):
+            ensure_store(dest)
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.symlink_to(dest, target_is_directory=True)
+        print(f"bridged {source} -> {dest}")
+        return
+    planned, _same, conflicts = import_plan(source, dest)
+    action = {"legacy": str(source), "shared": str(dest), "would_import": [s.name for s, _ in planned],
+              "conflicts": conflicts, "apply": bool(args.apply)}
+    if not args.apply:
+        print(json.dumps(action, indent=2))
+        return
+    if conflicts:
+        raise MemoryError("bridge blocked by conflicting same-name memories")
+    # Hold both source and destination locks across the final import, identity
+    # verification, rename, and symlink so no legacy writer can race the bridge.
+    with memory_lock(source), memory_lock(dest):
+        planned, _same, conflicts = import_plan(source, dest)
+        if conflicts:
+            raise MemoryError("bridge blocked by a conflict discovered under lock")
+        ensure_store(dest)
+        for src, dst in planned:
+            atomic_write(dst, normalize_import_text(src.read_text()))
+        rebuild_index(dest)
+        remaining, _same, conflicts = import_plan(source, dest)
+        if remaining or conflicts:
+            raise MemoryError("bridge verification failed after import; originals left untouched")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup = source.with_name(f"memory.pre-shared.{stamp}")
+        source.rename(backup)
+        try:
+            source.symlink_to(dest, target_is_directory=True)
+        except Exception:
+            backup.rename(source)
+            raise
+    print(f"bridged {source} -> {dest}\nbackup: {backup}")
+
+
+def cmd_brief(args):
+    mem_dir = resolved_memory_dir()
+    if not mem_dir.is_dir():
+        return
+    lines = [f"Shared governed project memory: {mem_dir}",
+             "Use memoryctl show <name> only when the fact is relevant; sensitive bodies stay undisclosed by default."]
+    for row in facts(mem_dir):
+        fm = row["fields"]
+        if (fm.get("status") or "active") != "active":
+            continue
+        name = fm.get("name") or row["path"].stem
+        if (fm.get("sensitivity") or "normal") == "sensitive":
+            desc = "[sensitive; load only if the task requires it]"
+        else:
+            desc = fm.get("description") or name
+        lines.append(f"- {name}: {desc}")
+    text = "\n".join(lines) + "\n"
+    encoded = text.encode()
+    if len(encoded) > args.max_bytes:
+        encoded = encoded[:max(0, args.max_bytes - 28)] + b"\n[brief truncated; use list]\n"
+        encoded = encoded[:args.max_bytes]
+        text = encoded.decode(errors="ignore")
+    sys.stdout.write(text)
+
+
+def add_fact_args(parser):
+    parser.add_argument("--description", required=True)
+    parser.add_argument("--type", choices=TYPES, default="project")
+    parser.add_argument("--source", required=True)
+    parser.add_argument("--sensitivity", choices=SENSITIVITIES, default="normal")
+    parser.add_argument("--body", help="body text; default reads stdin")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="governed shared memory for Claude Code and Codex")
+    sub = ap.add_subparsers(dest="command", required=True)
+    p = sub.add_parser("init"); p.set_defaults(func=cmd_init)
+    p = sub.add_parser("path"); p.set_defaults(func=cmd_path)
+    p = sub.add_parser("key"); p.set_defaults(func=cmd_key)
+    p = sub.add_parser("list"); p.add_argument("--json", action="store_true"); p.set_defaults(func=cmd_list)
+    p = sub.add_parser("show"); p.add_argument("name"); p.set_defaults(func=cmd_show)
+    p = sub.add_parser("add"); p.add_argument("name"); add_fact_args(p); p.set_defaults(func=cmd_add)
+    p = sub.add_parser("reverify"); p.add_argument("name"); p.set_defaults(func=cmd_reverify)
+    p = sub.add_parser("review-consolidation")
+    p.add_argument("--decision", choices=CONSOLIDATION_DECISIONS, required=True)
+    p.set_defaults(func=cmd_review_consolidation)
+    p = sub.add_parser("supersede"); p.add_argument("old_name"); p.add_argument("new_name")
+    p.add_argument("--resolution-rule", choices=RESOLUTION_RULES, required=True)
+    add_fact_args(p); p.set_defaults(func=cmd_supersede)
+    p = sub.add_parser("consolidate")
+    p.add_argument("old_names", nargs="+")
+    p.add_argument("--into", required=True)
+    p.add_argument("--resolution-rule", choices=RESOLUTION_RULES, required=True)
+    p.add_argument("--description", required=True)
+    p.add_argument("--type", choices=TYPES, required=True)
+    p.add_argument("--source", required=True)
+    p.add_argument("--sensitivity", choices=SENSITIVITIES, required=True)
+    p.add_argument("--body", help="body text; default reads stdin")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_consolidate)
+    p = sub.add_parser("import-claude"); p.add_argument("--from-dir"); p.add_argument("--apply", action="store_true"); p.set_defaults(func=cmd_import)
+    p = sub.add_parser("bridge-claude"); p.add_argument("--apply", action="store_true"); p.set_defaults(func=cmd_bridge)
+    p = sub.add_parser("brief"); p.add_argument("--max-bytes", type=int, default=12000); p.set_defaults(func=cmd_brief)
+    args = ap.parse_args()
+    try:
+        args.func(args)
+    except (MemoryError, OSError, subprocess.SubprocessError) as ex:
+        print(f"memoryctl: {ex}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

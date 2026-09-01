@@ -1,0 +1,750 @@
+#!/usr/bin/env python3
+"""
+mut — Tier-1b mutation check for the orchestrator's verification policy.
+
+Mechanically mutates a source file, runs Opus's contract (a test command) against
+each mutant, and reports the SURVIVORS — mutations the contract failed to catch.
+A survivor = a behavior the spec does not pin down = a hole in the contract (or an
+equivalent mutant for Opus to judge). This is the "who tests the tests?" check.
+
+It is a PHYSICAL CONSTRAINT: the mutation operators are deterministic AST rewrites,
+not LLM judgment, so a worker cannot game them. Opus reads ONLY the survivor list +
+score; the kill/survive decision is made by the deterministic test runner.
+See CLAUDE.md -> "Verifying worker output" (Tier-1b).
+
+Usage:
+    bin/mut --src parse_range.py --test "pytest -q test_contract.py"
+    bin/mut --src foo.py --test "python -m pytest -q" --scope changed   # only git-changed lines
+    bin/mut --src foo.py --test "..." --lines 40-58,70 --threshold 0.85
+    bin/mut --src foo.py --test "..." --json
+
+Semantics (per mutant): test exits 0 -> tests PASSED -> mutant SURVIVED (bad).
+                         test exits != 0 -> tests FAILED -> mutant KILLED (good).
+                         test times out -> KILLED (the hang was "caught").
+Exit code: 0 if score >= threshold, 1 if below (Bash-readable gate), 2 if mut
+REFUSES to measure at all (e.g. --scope changed on a file git does not track).
+"It failed" must stay distinguishable from "I could not measure it".
+Survivors are always listed for Opus to judge real-hole vs equivalent-mutant.
+
+Debris guard: a mutant is a deliberately broken program, so a tool that resolves a
+write path from env/config can have that resolution mutated and write OUTSIDE its
+test sandbox into the real repo (lq-46634844). mut snapshots the git worktree and
+reports, per mutant, any path that changed during the run — it never deletes them
+(the tree is shared), and it degrades to "guard unavailable/off" rather than
+silently claiming clean.
+
+Python backend only (AST operators); other languages: future backends.
+"""
+import argparse
+import ast
+import copy
+import os
+import signal
+import subprocess
+import sys
+import time
+
+if sys.version_info < (3, 9):
+    sys.exit("ERROR: mut needs Python >= 3.9 (uses ast.unparse)")
+
+# ── deterministic AST mutation operators ─────────────────────────────────────
+COMPARE_SWAP = {
+    ast.Gt: ast.GtE, ast.GtE: ast.Gt, ast.Lt: ast.LtE, ast.LtE: ast.Lt,
+    ast.Eq: ast.NotEq, ast.NotEq: ast.Eq, ast.Is: ast.IsNot, ast.IsNot: ast.Is,
+    ast.In: ast.NotIn, ast.NotIn: ast.In,
+}
+BINOP_SWAP = {
+    ast.Add: ast.Sub, ast.Sub: ast.Add, ast.Mult: ast.Div, ast.Div: ast.Mult,
+    ast.FloorDiv: ast.Div, ast.Mod: ast.Mult, ast.Pow: ast.Mult,
+}
+BOOLOP_SWAP = {ast.And: ast.Or, ast.Or: ast.And}
+DELETABLE = (ast.Return, ast.Assign, ast.AugAssign)  # + Expr(Call), handled below
+
+
+class Site:
+    """One first-order mutation: replace `target` with `new` in the parsed tree."""
+    __slots__ = ("lineno", "kind", "target", "new")
+
+    def __init__(self, lineno, kind, target, new):
+        self.lineno, self.kind, self.target, self.new = lineno, kind, target, new
+
+
+def _swapped(node, new_op_cls):
+    m = copy.deepcopy(node)
+    m.op = new_op_cls()
+    return m
+
+
+def _swapped_compare(node, i, new_op_cls):
+    m = copy.deepcopy(node)
+    m.ops[i] = new_op_cls()
+    return m
+
+
+def iter_sites(tree):
+    """Yield Sites in a deterministic order (must match between collect & apply)."""
+    for node in ast.walk(tree):
+        ln = getattr(node, "lineno", 0)
+        if isinstance(node, ast.Compare):
+            for i, op in enumerate(node.ops):
+                cls = type(op)
+                if cls in COMPARE_SWAP:
+                    yield Site(ln, "relational", node, _swapped_compare(node, i, COMPARE_SWAP[cls]))
+        elif isinstance(node, ast.BinOp) and type(node.op) in BINOP_SWAP:
+            yield Site(ln, "arithmetic", node, _swapped(node, BINOP_SWAP[type(node.op)]))
+        elif isinstance(node, ast.BoolOp) and type(node.op) in BOOLOP_SWAP:
+            yield Site(ln, "boolean", node, _swapped(node, BOOLOP_SWAP[type(node.op)]))
+        elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            yield Site(ln, "negation", node, copy.deepcopy(node.operand))
+        elif isinstance(node, ast.Constant):
+            v = node.value
+            if isinstance(v, bool):
+                yield Site(ln, "boolean-const", node, ast.Constant(value=(not v)))
+            elif isinstance(v, (int, float)):
+                yield Site(ln, "numeric", node, ast.Constant(value=v + 1))
+        elif isinstance(node, DELETABLE) or (
+            isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+        ):
+            yield Site(ln, "deletion", node, ast.Pass())
+
+
+def build_parents(tree):
+    parents = {}
+    for parent in ast.walk(tree):
+        for field, value in ast.iter_fields(parent):
+            if isinstance(value, list):
+                for i, item in enumerate(value):
+                    if isinstance(item, ast.AST):
+                        parents[id(item)] = (parent, field, i)
+            elif isinstance(value, ast.AST):
+                parents[id(value)] = (parent, field, None)
+    return parents
+
+
+def safe_unparse(node, limit=60):
+    try:
+        s = ast.unparse(node)
+    except Exception:
+        return "<unparseable>"
+    s = " ".join(s.split())
+    return s if len(s) <= limit else s[: limit - 1] + "…"
+
+
+def collect(source, line_filter):
+    """Parse and return [(idx, lineno, kind, before, after)] for sites in scope."""
+    tree = ast.parse(source)
+    out = []
+    for idx, site in enumerate(iter_sites(tree)):
+        if line_filter is not None and site.lineno not in line_filter:
+            continue
+        out.append((idx, site.lineno, site.kind, safe_unparse(site.target), safe_unparse(site.new)))
+    return out
+
+
+def apply_mutant(source, target_idx):
+    """Re-parse and produce the source with ONLY the target-th site mutated."""
+    tree = ast.parse(source)
+    parents = build_parents(tree)
+    for idx, site in enumerate(iter_sites(tree)):
+        if idx != target_idx:
+            continue
+        ref = parents.get(id(site.target))
+        if ref is None:
+            return None  # cannot place (shouldn't happen for in-tree nodes)
+        parent, field, i = ref
+        if i is None:
+            setattr(parent, field, site.new)
+        else:
+            getattr(parent, field)[i] = site.new
+        ast.fix_missing_locations(tree)
+        try:
+            return ast.unparse(tree)
+        except Exception:
+            return None
+    return None
+
+
+def parse_lines(spec):
+    out = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            out.update(range(int(a), int(b) + 1))
+        else:
+            out.add(int(part))
+    return out
+
+
+REFUSED = 2  # "I could not measure this" — never 0 (pass) and never 1 (score failed)
+
+# Every contract gets its own POSIX session/process group. Keeping the registry
+# outside main() lets the per-contract finally, the signal path, and atexit all
+# converge on the same idempotent cleanup. A pid-tree walk is deliberately not
+# used: the exact incident descendants were already reparented to user systemd.
+_ACTIVE_CONTRACTS = {}
+_HANDLED_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+
+
+class ContractCleanupError(RuntimeError):
+    """The runner could not prove that a contract process group is gone."""
+
+
+def _group_alive(pgid):
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # We created this group, so loss of permission is unreadable state, not
+        # evidence that it vanished. Fail in the safe direction.
+        return True
+
+
+def _wait_group_gone(pgid, seconds):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not _group_alive(pgid):
+            return True
+        time.sleep(0.02)
+    return not _group_alive(pgid)
+
+
+def _terminate_contract(proc):
+    """Bounded TERM->KILL for one contract and every process in its group.
+
+    This runs after *every* verdict, including a successful shell leader. A
+    leader may exit 0 after backgrounding a child that closed inherited stdio;
+    treating that as clean is the normal-exit version of the timeout leak.
+    """
+    pgid = proc.pid  # start_new_session=True makes leader pid == session pgid
+    if _group_alive(pgid):
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            if proc.poll() is None:
+                proc.terminate()
+        # Reap the leader before probing the group. A dead-but-unreaped leader
+        # is still visible to killpg(0), which would turn clean termination into
+        # a false cleanup failure and force every timeout to exit 2.
+        try:
+            proc.wait(timeout=0.1)
+        except subprocess.TimeoutExpired:
+            pass
+        if not _wait_group_gone(pgid, 0.5):
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                if proc.poll() is None:
+                    proc.kill()
+            try:
+                proc.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                pass
+            if not _wait_group_gone(pgid, 1.5):
+                return False
+    try:
+        proc.wait(timeout=0.2)
+    except subprocess.TimeoutExpired:
+        return False
+    _ACTIVE_CONTRACTS.pop(pgid, None)
+    return True
+
+
+def _terminate_active_contracts():
+    failed = []
+    for pgid, proc in list(_ACTIVE_CONTRACTS.items()):
+        if not _terminate_contract(proc):
+            failed.append(pgid)
+    return failed
+
+
+def _spawn_contract(cmd, env):
+    """Spawn and register atomically with respect to handled termination signals."""
+    old_mask = None
+    if hasattr(signal, "pthread_sigmask"):
+        old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, _HANDLED_SIGNALS)
+    try:
+        proc = subprocess.Popen(
+            cmd, shell=True, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env, start_new_session=True,
+        )
+        _ACTIVE_CONTRACTS[proc.pid] = proc
+        return proc
+    finally:
+        if old_mask is not None:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+
+
+def refuse(message):
+    """Exit with the UNMEASURABLE code. Kept distinct from the score verdict so a
+    Bash caller can tell a real result from an absent one."""
+    sys.stderr.write(f"ERROR: {message}\n")
+    sys.exit(REFUSED)
+
+
+def tracked_by_git(path):
+    """True iff git tracks `path` (index lookup, NOT a HEAD lookup — a staged
+    file in a repo with no commits is tracked but has no HEAD to diff against).
+
+    `git diff HEAD -- <untracked>` is empty, which read as a clean scope and
+    returned the PASS exit code having mutated nothing — the anti-gaming gate
+    silently green on every brand-new tool (lq-166f10d2).
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", path],
+            capture_output=True, text=True,
+        )
+    except Exception as e:
+        refuse(f"--scope changed needs git; {e}")
+    return proc.returncode == 0
+
+
+def changed_lines(path):
+    """Added/changed line numbers of `path` in the working tree vs HEAD (git)."""
+    try:
+        diff = subprocess.run(
+            ["git", "diff", "-U0", "HEAD", "--", path],
+            capture_output=True, text=True, check=True,
+        ).stdout
+    except Exception as e:
+        # No HEAD (a repo with no commits), not a git worktree, or git missing:
+        # all UNMEASURABLE. Exiting 1 here would read as "score below threshold".
+        refuse(f"--scope changed cannot measure {path}: {e}")
+    lines = set()
+    for ln in diff.splitlines():
+        if ln.startswith("@@"):
+            # @@ -a,b +c,d @@   -> c .. c+d-1
+            try:
+                plus = ln.split("+", 1)[1].split(" ", 1)[0]
+                start, _, cnt = plus.partition(",")
+                start = int(start)
+                cnt = int(cnt) if cnt else 1
+                lines.update(range(start, start + max(cnt, 1)))
+            except Exception:
+                continue
+    return lines
+
+
+def _clear_pycache(src_dir, package_dirs=()):
+    """Remove all __pycache__ dirs under src_dir (and optional extra package dirs).
+
+    Prevents false survivors: Python's .pyc invalidation is mtime-granularity, so a
+    mutant written within the same second as the cached .pyc can execute STALE
+    bytecode — the test passes against the ORIGINAL, not the mutant (false survivor).
+    """
+    import shutil
+    for root, dirs, _files in os.walk(src_dir):
+        for d in list(dirs):
+            if d == "__pycache__":
+                shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+                dirs.remove(d)
+    for pkg in package_dirs:
+        for root, dirs, _files in os.walk(pkg):
+            for d in list(dirs):
+                if d == "__pycache__":
+                    shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+                    dirs.remove(d)
+
+
+def _git_root(path):
+    """Top-level of the git worktree containing `path`, or None if there is none."""
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    try:
+        r = subprocess.run(["git", "-C", d, "rev-parse", "--show-toplevel"],
+                           capture_output=True, text=True, timeout=10)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    root = r.stdout.strip()
+    return root or None
+
+
+def _stamp(path):
+    try:
+        st = os.stat(path)
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return (None, None)
+
+
+def worktree_state(root, ignore):
+    """Set of (path, mtime_ns, size) for everything git reports as changed.
+
+    The stamp — not just the path — is what makes the guard see a mutant that
+    OVERWRITES a file the tree was already dirty on. A path-only snapshot only
+    catches *new* paths, and this tree is routinely dirty from concurrent sessions,
+    so path-only would have a hole exactly where the repo spends most of its time.
+
+    `ignore` holds mut's own artifacts (the source under mutation and its sidecars),
+    which are *expected* to churn. Returns None if git can't answer — an unreadable
+    observer must degrade to "unknown", never to "clean" (signal-vs-artifact).
+
+    Cost: `git status` is ~6ms here plus a stat per dirty path, against a per-mutant
+    contract run measured in seconds — under 0.1% of the loop.
+    """
+    try:
+        r = subprocess.run(["git", "-C", root, "status", "--porcelain", "-uall", "-z"],
+                           capture_output=True, text=True, timeout=30)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    out, toks = set(), r.stdout.split("\0")
+    i = 0
+    while i < len(toks):
+        entry = toks[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        status, path = entry[:2], entry[3:]
+        if status[0] in ("R", "C"):
+            i += 1  # rename/copy source follows as its own NUL-separated token
+        if path in ignore or "/__pycache__/" in path or path.endswith(".pyc"):
+            continue
+        out.add((path,) + _stamp(os.path.join(root, path)))
+    return out
+
+
+def debris_ignore_set(root, src_abs):
+    """Repo-relative paths mut itself is expected to touch during a run.
+
+    Both sides are realpath'd first because git reports paths relative to the
+    RESOLVED worktree root. On macOS `mktemp -d` hands back /var/folders/... while
+    `git rev-parse --show-toplevel` answers /private/var/folders/..., so a raw
+    relpath yields `../../../var/...`, matches nothing git ever prints, and mut
+    reports its OWN source-under-mutation as debris (green on Linux, which has no
+    /var symlink — the platform where the guard was written).
+    """
+    root = os.path.realpath(root)
+    src_abs = os.path.realpath(src_abs)
+    names = {src_abs, src_abs + ".mut-orig", src_abs + ".mut-lock", src_abs + ".mut-orig.tmp"}
+    ig = set()
+    for n in names:
+        try:
+            ig.add(os.path.relpath(n, root))
+        except ValueError:
+            pass
+    return ig
+
+
+def run_test(cmd, timeout, src=None):
+    """Return 'survived' | 'killed' | 'timeout'.
+
+    Clears __pycache__ and disables bytecode writing so the mutant's source is
+    actually executed, not a stale .pyc from a prior run.
+    """
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    if src:
+        src_dir = os.path.dirname(os.path.abspath(src)) or "."
+        _clear_pycache(src_dir)
+    proc = None
+    verdict = None
+    cleanup_failed = []
+    try:
+        proc = _spawn_contract(cmd, env)
+        try:
+            proc.communicate(timeout=timeout)
+            verdict = "survived" if proc.returncode == 0 else "killed"
+        except subprocess.TimeoutExpired:
+            verdict = "timeout"
+    finally:
+        # A signal can become pending between Popen and _spawn_contract's return.
+        # In that narrow case `proc` is still None here, but the registry already
+        # owns the child, so clean the registry rather than losing the group.
+        if proc is None:
+            cleanup_failed = _terminate_active_contracts()
+        elif not _terminate_contract(proc):
+            cleanup_failed = [proc.pid]
+        if proc is not None and not cleanup_failed:
+            # After the group is gone every inherited pipe must reach EOF. This
+            # also reaps the direct shell after a timeout/interrupt.
+            try:
+                proc.communicate(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                cleanup_failed = [proc.pid]
+    if cleanup_failed:
+        groups = ", ".join(str(pgid) for pgid in cleanup_failed)
+        raise ContractCleanupError(
+            f"contract process group cleanup could not be proven for pgid(s) {groups}"
+        )
+    return verdict
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, ValueError):
+        return False
+    except PermissionError:
+        return True
+
+
+def acquire_src_lock(src_abs):
+    """Serialize mutation of a source file and recover from an interrupted run.
+
+    While a run is active, `<src>.mut-lock` holds our pid (so concurrent readers —
+    harness-verify, another mut — can tell the on-disk file is a mutant) and
+    `<src>.mut-orig` holds the pristine source. If a prior run died without
+    restoring (SIGKILL, power loss), the backup left behind IS the original:
+    restore it before doing anything else, so an interrupted run can never leave
+    a mutated source that survives into later sessions.
+    """
+    lock_path = src_abs + ".mut-lock"
+    backup_path = src_abs + ".mut-orig"
+    if os.path.exists(lock_path):
+        try:
+            pid = int(open(lock_path).read().strip() or "0")
+        except (OSError, ValueError):
+            pid = 0
+        if pid and _pid_alive(pid):
+            sys.exit(f"ERROR: another mut run (pid {pid}) is mutating {src_abs}; retry when it finishes")
+        os.remove(lock_path)  # stale lock from a dead run
+    if os.path.exists(backup_path):
+        os.replace(backup_path, src_abs)
+        sys.stderr.write(f"[mut: recovered {src_abs} from interrupted run backup]\n")
+    fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    os.write(fd, str(os.getpid()).encode())
+    os.close(fd)
+    return lock_path, backup_path
+
+
+def main():
+    p = argparse.ArgumentParser(description="Tier-1b mutation check (Python backend)")
+    p.add_argument("--src", required=True, help="source file to mutate (single .py)")
+    p.add_argument("--test", required=True, help="command that runs Opus's contract")
+    p.add_argument("--scope", choices=["all", "changed"], default="all")
+    p.add_argument("--lines", help="explicit line ranges, e.g. 40-58,70 (overrides --scope)")
+    p.add_argument("--threshold", type=float, default=0.85)
+    p.add_argument("--max-mutants", type=int, default=0, help="cap mutants (0 = all); samples evenly + logs")
+    p.add_argument("--max-survivors", type=int, default=20, help="survivors to print (true count always reported)")
+    p.add_argument("--timeout", type=float, default=30.0, help="per-mutant test timeout (s); timeout = killed")
+    p.add_argument("--json", action="store_true")
+    args = p.parse_args()
+
+    src_abs = os.path.abspath(args.src)
+    lock_path, backup_path = acquire_src_lock(src_abs)
+
+    import atexit
+
+    def _cleanup():
+        # Contract groups go first: no mutant-controlled process may keep
+        # running while the pristine source is restored underneath it.
+        failed_groups = _terminate_active_contracts()
+        try:
+            # The backup is the pristine source: restoring from it is always
+            # safe whether the loop finished, errored, or was interrupted.
+            if os.path.exists(backup_path):
+                os.replace(backup_path, src_abs)
+        finally:
+            if os.path.exists(lock_path):
+                os.remove(lock_path)
+        if failed_groups:
+            sys.stderr.write(
+                "[mut: ERROR — contract process groups still alive at exit: "
+                + ", ".join(str(pgid) for pgid in failed_groups) + "]\n"
+            )
+
+    atexit.register(_cleanup)
+
+    def _bail(signum, frame):
+        raise KeyboardInterrupt
+
+    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(s, _bail)
+
+    try:
+        original = open(args.src, encoding="utf-8").read()
+    except Exception as e:
+        sys.exit(f"ERROR reading {args.src}: {e}")
+    try:
+        ast.parse(original)
+    except SyntaxError as e:
+        sys.exit(f"ERROR: {args.src} does not parse: {e}")
+    # Atomic backup: a kill mid-write must never leave a truncated .mut-orig that
+    # a later recovery would "restore" over the real source.
+    tmp_backup = backup_path + ".tmp"
+    with open(tmp_backup, "w", encoding="utf-8") as fh:
+        fh.write(original)
+        fh.flush()
+        os.fsync(fh.fileno())
+    # The backup must carry the source's MODE, not open()'s default 0o644: every
+    # restore path is an os.replace of this inode over the source, so a bare backup
+    # silently strips the execute bit from bin/ tools (lq-8070472f — harness-verify
+    # went permission-denied right after a mut run).
+    os.chmod(tmp_backup, os.stat(src_abs).st_mode)
+    os.replace(tmp_backup, backup_path)
+
+    if args.lines:
+        line_filter = parse_lines(args.lines)
+        scope_label = f"lines {args.lines}"
+    elif args.scope == "changed":
+        if not tracked_by_git(args.src):
+            refuse(
+                f"--scope changed cannot measure {args.src}: git does not track "
+                "it, so the empty diff means UNMEASURABLE, not unchanged. Run "
+                f"`git add {args.src}` (or use --scope all) and retry."
+            )
+        line_filter = changed_lines(args.src)
+        scope_label = "changed"
+        if not line_filter:
+            print(f"# mut  src={args.src}  scope=changed\n# no changed lines vs HEAD — nothing to mutate")
+            return 0
+    else:
+        line_filter = None
+        scope_label = "all"
+
+    sites = collect(original, line_filter)
+    if not sites:
+        print(f"# mut  src={args.src}  scope={scope_label}\n# no mutable sites in scope — nothing to check")
+        return 0
+
+    # Every mutant written to disk DECLARES ITSELF (lq-bc7ccd55): the evidence
+    # stream a concurrent session actually reads is the file/diff itself — the
+    # lock/backup sidecars are gitignored and invisible there — and on 2026-08-19
+    # a successor read a live mutant's diff as debris and `git checkout`ed it
+    # mid-run, contaminating that mutant's verdict. ast.unparse also strips the
+    # shebang, which is what made the mutant look like stripped/corrupted source;
+    # keep it, so the mutant stays executable and the diff head stays honest.
+    # Comments are inert to the contract, and survivor line numbers come from the
+    # ORIGINAL's AST, so the banner cannot shift a reported line.
+    shebang = original.splitlines(keepends=True)[0] if original.startswith("#!") else ""
+    banner = (
+        f"# !! UNDER MUTATION by bin/mut (pid {os.getpid()}) — this on-disk file is a\n"
+        f"# !! TEMPORARY MUTANT. The pristine original is preserved beside it as\n"
+        f"# !! {os.path.basename(backup_path)} and is auto-restored when the run exits.\n"
+        f"# !! Do NOT edit, `git checkout`, restore, or commit this file while that\n"
+        f"# !! pid is alive — restoring mid-run falsifies the live mutant's verdict.\n"
+    )
+
+    total = len(sites)
+    sampled_note = ""
+    if args.max_mutants and total > args.max_mutants:
+        step = total / args.max_mutants
+        keep = sorted({int(i * step) for i in range(args.max_mutants)})
+        sites = [sites[i] for i in keep]
+        sampled_note = f" · sampled {len(sites)}/{total}"
+        sys.stderr.write(f"[mut: sampling {len(sites)} of {total} mutants in scope]\n")
+
+    sys.stderr.write(f"[mut: running {len(sites)} mutants × `{args.test}` (serial)]\n")
+
+    # ── debris guard ─────────────────────────────────────────────────────────
+    # A mutant is a DELIBERATELY BROKEN program run against a real contract, so a
+    # tool that resolves a write path from env/config can have that resolution
+    # mutated and fall back to the real repo — writing outside its test sandbox
+    # into tracked directories (lq-46634844: a mutated bin/token-ledger dropped 3
+    # snapshots into knowledge/). mut can't stop that (it doesn't know the tool's
+    # write paths) but it CAN see it: snapshot the worktree, re-check after every
+    # mutant, and attribute what appeared to the mutant that was live.
+    # Report only — never delete. This tree is shared by concurrent sessions, so a
+    # new path may be someone else's legitimate write; an unwarranted `rm` costs
+    # far more than a false line of output.
+    git_root = _git_root(args.src)
+    debris_ignore = debris_ignore_set(git_root, src_abs) if git_root else set()
+    seen_state = worktree_state(git_root, debris_ignore) if git_root else None
+    debris, debris_seen = [], set()
+    debris_guard = "on" if seen_state is not None else ("unavailable" if git_root else "off (not a git worktree)")
+    if seen_state is None and git_root:
+        sys.stderr.write("[mut: debris guard unavailable — git status unreadable]\n")
+
+    killed = invalid = 0
+    survivors = []
+    try:
+        for n, (idx, lineno, kind, before, after) in enumerate(sites, 1):
+            mutant = apply_mutant(original, idx)
+            if mutant is None:
+                invalid += 1
+                continue
+            try:
+                ast.parse(mutant)  # skip mutants that don't even parse
+            except SyntaxError:
+                invalid += 1
+                continue
+            open(args.src, "w", encoding="utf-8").write(shebang + banner + mutant)
+            try:
+                verdict = run_test(args.test, args.timeout, src=args.src)
+            except ContractCleanupError as exc:
+                refuse(str(exc))
+            if verdict in ("killed", "timeout"):
+                killed += 1
+            else:
+                survivors.append({"file": args.src, "line": lineno, "kind": kind,
+                                  "before": before, "after": after})
+            if seen_state is not None:
+                now_state = worktree_state(git_root, debris_ignore)
+                if now_state is not None:
+                    for entry in sorted(now_state - seen_state):
+                        path = entry[0]
+                        if path in debris_seen:
+                            continue  # one line per path, not one per re-write
+                        debris_seen.add(path)
+                        debris.append({"path": path, "line": lineno, "kind": kind,
+                                       "mutant": f"{before} → {after}"})
+                    seen_state = now_state
+            sys.stderr.write(f"\r[mut: {n}/{len(sites)} · {killed} killed · {len(survivors)} survived]")
+        sys.stderr.write("\n")
+    finally:
+        open(args.src, "w", encoding="utf-8").write(original)  # always restore
+        # Clear any __pycache__ that was generated during mutation runs so the
+        # restored original doesn't leave stale bytecode behind.
+        src_dir = os.path.dirname(os.path.abspath(args.src)) or "."
+        _clear_pycache(src_dir)
+
+    valid = killed + len(survivors)
+    score = (killed / valid) if valid else 1.0
+    passed = score >= args.threshold
+
+    if args.json:
+        import json
+        print(json.dumps({
+            "src": args.src, "test": args.test, "scope": scope_label,
+            "total_in_scope": total, "valid": valid, "killed": killed,
+            "survived": len(survivors), "invalid": invalid, "score": round(score, 3),
+            "threshold": args.threshold, "passed": passed, "survivors": survivors,
+            "debris_guard": debris_guard, "debris": debris,
+        }, indent=2))
+        return 0 if passed else 1
+
+    verdict = "PASS" if passed else "FAIL"
+    review = f", {len(survivors)} to review" if survivors else ""
+    inv = f" · {invalid} invalid" if invalid else ""
+    print(f'# mut  src={args.src}  test="{args.test}"  scope={scope_label}')
+    print(f"# {valid} mutants · {killed} killed · {len(survivors)} survived{inv}{sampled_note} "
+          f"· score {score:.2f} (thr {args.threshold:.2f}) → {verdict}{review}")
+    print("SURVIVORS")
+    if not survivors:
+        print("(none — contract killed every mutant)")
+    else:
+        for i, s in enumerate(survivors[: args.max_survivors], 1):
+            print(f"{i}. {s['file']}:{s['line']}  {s['kind']}  {s['before']} → {s['after']}   [no test failed]")
+        extra = len(survivors) - args.max_survivors
+        if extra > 0:
+            print(f"(— +{extra} more survivors not shown; raise --max-survivors —)")
+    if debris:
+        print(f"DEBRIS ({len(debris)} path(s) changed in the worktree during mutation)")
+        for d in debris:
+            print(f"- {d['path']}   [while mutating {args.src}:{d['line']} {d['kind']}  {d['mutant']}]")
+        print("(the mutant is the co-occurring suspect, not a proven cause — a concurrent "
+              "writer in a shared tree produces the same reading. mut reports and never "
+              "deletes; review and clean deliberately.)")
+        sys.stderr.write(f"[mut: WARNING — {len(debris)} worktree path(s) changed during "
+                         f"mutation; see DEBRIS above]\n")
+    elif debris_guard != "on":
+        print(f"DEBRIS (guard {debris_guard} — worktree writes NOT checked this run)")
+    return 0 if passed else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

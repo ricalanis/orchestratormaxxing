@@ -1,0 +1,3376 @@
+#!/usr/bin/env python3
+"""cogload — silent, privacy-safe cognitive-load / stress / performance collector.
+
+Measures the operator's interaction load across the OS and their agent-orchestration
+patterns, toward the constructs a psychologist asked for on
+2026-08-11: interaction counts, a daily diary, inbound load, and the
+*marginal-load curve* ("one more project and performance drops 5%, another and
+it drops 10%").
+
+WHAT IT RECORDS  (see `cogload show` for the live, self-describing version)
+  keys    per-CLASS counters only: backspace / delete / enter / nav / mod / other
+  timing  inter-keystroke interval mean/p50/p95 + pause counts, computed in
+          memory over a 60s window and discarded
+  mouse   click + scroll counts
+  screen  active APPLICATION CLASS (WM_CLASS), app-switch count, focus-fragment
+          duration, open-window count  <- the content-free stand-in for the
+          screenshot idea; see PRIVACY below
+  agents  concurrent tmux agent sessions (orchestration WIP)
+
+WHAT IT NEVER RECORDS — enforced structurally, not by policy
+  * Key identity. classify() maps a key to a class and returns the CLASS; the
+    key object is never buffered, never written, never reachable downstream.
+    No per-event row exists anywhere in the store, so reconstructing typed text
+    is impossible by construction.
+  * Window TITLES. Only WM_CLASS (the application, e.g. "dev.warp.Warp").
+    Titles carry client names, message text and URLs; the app class does not.
+  * Screen pixels. Rejected for v1: it is the only signal that captures third
+    parties' content verbatim, and no metric here consumes it. The structural
+    alternative above measures the same construct (attentional/environmental
+    load) and has a validated physiological correlate that screenshots do not:
+    Mark et al. found faster window-switching correlates with stress measured
+    by heart-rate variability.
+
+ANTI-SILENT-ZERO
+  A record is written EVERY window, including idle ones. `status:"ok", total:0`
+  means genuine calm. If capture breaks, records keep coming with
+  `status:"degraded:<reason>"`. "It was quiet" and "I could not measure" are
+  different rows, forever. A tracker that fails to zero would read as calm and
+  is the worst failure mode this design can have.
+
+Store lives OUTSIDE the repo (~/.local/share/cogload, mode 700) on purpose:
+knowledge/ is committed and auto-pushed by the loop cron, and behavioral data
+must never ride that sync. Only aggregates ever leave the machine.
+"""
+
+from __future__ import annotations
+
+import argparse
+import gc
+import json
+import math
+import os
+import signal
+import statistics
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+SCHEMA_VERSION = 4
+WINDOW_SECONDS = 60
+SAMPLE_SECONDS = 2.0
+LIGHT_EVERY_SECONDS = 10.0    # ~6 luminance samples/window
+# 6 rows, not 18. Cost is dominated by X round-trips (one get_image per row),
+# NOT by pixels: measured 18x32 = 115 ms vs 6x32 = 19 ms, a 6x saving for the
+# same 7.5 KB peak transient. 192 samples is ample for a mean and a stdev, and
+# fewer samples is strictly MORE private, not less — so this is cheaper and
+# safer at once. Do NOT "optimize" this into a single full-screen get_image:
+# that is 3x faster still (82 ms) but allocates a 7.9 MB full-resolution frame,
+# which is exactly the thing this design refuses to ever construct.
+LIGHT_GRID_X, LIGHT_GRID_Y = 32, 6
+STALE_SECONDS = 200
+# A sampler subsystem is "down" only after this many CONSECUTIVE failures —
+# one transient X error (BadWindow race on _NET_ACTIVE_WINDOW) must not kill
+# capture forever. Per-subsystem so the 2s screen path cannot perpetually
+# reset a permanently-dead 10s light path (and vice versa).
+FAIL_STREAK_DOWN = 5
+# When a subsystem is down, attempt a Display re-init at most this often.
+_REINIT_INTERVAL_S = 60.0
+DEFAULT_KEEP_DAYS = 400
+ACTIVE_MIN_KEYS = 5          # a minute counts as "active typing" at >= this many keys
+PAUSE_LO_MS, PAUSE_HI_MS = 2000, 10000
+
+STORE = Path(os.environ.get("COGLOAD_DIR", Path.home() / ".local/share/cogload"))
+KEYS_DIR = STORE / "keys"
+AGENT_DIR = STORE / "agent"
+LABELS = STORE / "labels.jsonl"
+DISABLED = STORE / "DISABLED"
+PIDFILE = STORE / "daemon.pid"
+MIRROR = STORE / "transcripts-mirror"
+CLAUDE_PROJECTS = Path.home() / ".claude/projects"
+
+# Whitelist. The writer refuses any record carrying a field outside this set,
+# so a future edit cannot quietly widen what gets persisted.
+RECORD_FIELDS = {
+    "ts", "v", "win_s", "backend", "session_type", "status",
+    "keys", "mouse", "iki", "screen", "light", "agents", "total", "host",
+}
+KEY_CLASSES = ("backspace", "delete", "enter", "nav", "mod", "other")
+
+# Key -> class. Identity is dropped HERE, at the boundary, before any buffer.
+_NAV = {
+    "up", "down", "left", "right", "home", "end", "page_up", "page_down", "tab",
+}
+_MOD = {
+    "shift", "shift_r", "shift_l", "ctrl", "ctrl_r", "ctrl_l", "alt", "alt_r",
+    "alt_l", "alt_gr", "cmd", "cmd_r", "cmd_l", "caps_lock",
+}
+
+
+def classify(key) -> str:
+    """Map a key event to its CLASS and return only that.
+
+    The caller must discard `key` immediately. Nothing downstream of this
+    function ever sees which key was pressed.
+    """
+    name = getattr(key, "name", None)
+    if name is None:
+        return "other"
+    if name == "backspace":
+        return "backspace"
+    if name == "delete":
+        return "delete"
+    if name in ("enter", "return", "kp_enter"):
+        return "enter"
+    if name in _NAV:
+        return "nav"
+    if name in _MOD:
+        return "mod"
+    return "other"
+
+
+# ---------------------------------------------------------------- evdev (Linux)
+#
+# WHY THIS EXISTS. Every Linux capture path here used to be X11-only (XRecord
+# for keys, Xlib GetImage for light, _NET_CLIENT_LIST for windows). When this
+# box moved to GNOME 50 / Wayland on 2026-08-16 keystroke capture fell from
+# 31,127/day to 323/day: under XWayland an X listener still connects but only
+# sees XWayland clients, so it went silently PARTIAL — the exact failure mode
+# this harness exists to prevent. Ubuntu 26.04 ships no GNOME X11 session, so
+# there is no way back. evdev reads the kernel input layer directly and is
+# therefore compositor-independent: it works identically on X11 and Wayland,
+# and no future display-stack change can blind it again.
+#
+# THE PRIVACY BOUNDARY IS UNCHANGED. classify_evdev() takes an integer keycode
+# and returns a CLASS. The code is never buffered, never stored, never logged —
+# exactly as classify() does for pynput. Reading /dev/input does give this
+# process keystroke IDENTITY; dropping it here, at the boundary, before any
+# accumulation, is what keeps the store's structural guarantee intact.
+
+# ecodes are stable kernel ABI numbers; hardcoded so this maps identically
+# whether or not python-evdev is importable.
+_EV_BACKSPACE = 14
+_EV_DELETE = 111
+_EV_ENTER = {28, 96}                       # KEY_ENTER, KEY_KPENTER
+_EV_NAV = {
+    103, 108, 105, 106,                    # up, down, left, right
+    102, 107, 104, 109,                    # home, end, pageup, pagedown
+    15,                                    # tab
+}
+_EV_MOD = {
+    42, 54,                                # leftshift, rightshift
+    29, 97,                                # leftctrl, rightctrl
+    56, 100,                               # leftalt, rightalt
+    125, 126,                              # leftmeta, rightmeta
+    58,                                    # capslock
+}
+_EV_BTN = {272, 273, 274}                  # BTN_LEFT / RIGHT / MIDDLE
+# A device having EV_KEY is NOT a keyboard. This box exposes a Keychron
+# "System Control" node with 19 power/sleep codes and ZERO typing keys, and it
+# is the ONE device readable without the input group (a uaccess ACL). Accepting
+# it would select the evdev backend, capture nothing, and still report "ok" —
+# a textbook silent zero. Require a quorum of the main typing block instead.
+_EV_TYPING_BLOCK = range(2, 54)   # 1..0 - = bs tab q..p [ ] enter a..l ; ' ` \ z..m , . /
+_EV_TYPING_QUORUM = 20
+
+
+def _is_typing_keyboard(caps) -> bool:
+    codes = caps.get(_EV_TYPE_KEY) or []
+    return sum(1 for c in codes if c in _EV_TYPING_BLOCK) >= _EV_TYPING_QUORUM
+
+
+_EV_TYPE_KEY, _EV_TYPE_REL = 1, 2
+_EV_REL_WHEEL, _EV_REL_HWHEEL = 8, 6       # NOT the HI_RES variants: devices
+                                           # emit both and counting both doubles
+
+
+def classify_evdev(code: int) -> str:
+    """Map a kernel keycode to its CLASS and return only that.
+
+    Same contract as classify(): the caller must discard `code` immediately.
+    """
+    if code == _EV_BACKSPACE:
+        return "backspace"
+    if code == _EV_DELETE:
+        return "delete"
+    if code in _EV_ENTER:
+        return "enter"
+    if code in _EV_NAV:
+        return "nav"
+    if code in _EV_MOD:
+        return "mod"
+    return "other"
+
+
+class EvdevListener:
+    """Kernel-input reader. One thread, all keyboards and pointers.
+
+    Mirrors the small slice of the pynput Listener API this daemon uses
+    (`start()`, `stop()`, `.running`) so the backend swap is local to
+    cmd_daemon and nothing downstream has to know which one is live.
+    """
+
+    RESCAN_SECONDS = 60      # devices come and go (USB keyboards, Bluetooth)
+
+    def __init__(self, on_key=None, on_click=None, on_scroll=None):
+        self._on_key, self._on_click, self._on_scroll = on_key, on_click, on_scroll
+        self._thread = None
+        self._stop = threading.Event()
+        self._devices = {}
+        self.running = False
+        self.reason = ""
+
+    @staticmethod
+    def available() -> tuple[bool, str]:
+        """Can this box capture through evdev at all? (ok, reason)."""
+        if sys.platform == "darwin":
+            return (False, "evdev-not-on-darwin")
+        try:
+            import evdev  # noqa: F401
+        except Exception as exc:
+            return (False, f"evdev-unavailable:{type(exc).__name__}")
+        n, denied, opened = 0, 0, 0
+        try:
+            import evdev
+            for path in evdev.list_devices():
+                try:
+                    d = evdev.InputDevice(path)
+                except PermissionError:
+                    denied += 1
+                    continue
+                except OSError:
+                    continue
+                opened += 1
+                try:
+                    if _is_typing_keyboard(d.capabilities()):
+                        n += 1
+                finally:
+                    d.close()
+        except Exception as exc:
+            return (False, f"evdev-enumerate-failed:{type(exc).__name__}")
+        if n:
+            return (True, "")
+        # Distinguish "no permission" from "no hardware". They need opposite
+        # fixes and must never collapse into one vague reason.
+        # Three different faults, three different fixes — never collapsed:
+        #   denied      -> the user is not in the `input` group
+        #   no keyboard -> readable devices exist but none of them types
+        #   no devices  -> nothing at all
+        if denied:
+            return (False, "evdev-permission-denied")
+        return (False, "evdev-no-keyboard" if opened else "evdev-no-devices")
+
+    def _open(self):
+        import evdev
+        wanted = {}
+        for path in evdev.list_devices():
+            try:
+                d = evdev.InputDevice(path)
+            except (PermissionError, OSError):
+                continue
+            caps = d.capabilities()
+            # Pointers (EV_REL) are kept for clicks/scroll; key devices only if
+            # they actually type, so a power-button node cannot masquerade as
+            # a keyboard. BTN_* live on the pointer, so both branches matter.
+            if _is_typing_keyboard(caps) or _EV_TYPE_REL in caps:
+                wanted[path] = d
+            else:
+                d.close()
+        for path, d in list(self._devices.items()):
+            if path not in wanted:
+                try:
+                    d.close()
+                except OSError:
+                    pass
+                self._devices.pop(path, None)
+        for path, d in wanted.items():
+            if path in self._devices:
+                d.close()
+            else:
+                self._devices[path] = d
+
+    def _run(self):
+        import selectors
+        last_scan = 0.0
+        sel = None
+        try:
+            while not self._stop.is_set():
+                now = time.monotonic()
+                if now - last_scan >= self.RESCAN_SECONDS:
+                    last_scan = now
+                    try:
+                        self._open()
+                    except Exception as exc:
+                        self.reason = f"evdev-rescan-failed:{type(exc).__name__}"
+                    if sel is not None:
+                        sel.close()
+                    sel = selectors.DefaultSelector()
+                    for d in self._devices.values():
+                        try:
+                            sel.register(d, selectors.EVENT_READ)
+                        except (KeyError, ValueError, OSError):
+                            pass
+                if sel is None or not self._devices:
+                    self._stop.wait(1.0)
+                    continue
+                for key, _ in sel.select(timeout=1.0):
+                    dev = key.fileobj
+                    try:
+                        for ev in dev.read():
+                            self._dispatch(ev)
+                    except (OSError, BlockingIOError):
+                        # Device vanished mid-read (unplug). Drop it; the next
+                        # rescan rebuilds the selector.
+                        try:
+                            sel.unregister(dev)
+                        except (KeyError, ValueError):
+                            pass
+                        self._devices.pop(dev.path, None)
+        finally:
+            if sel is not None:
+                sel.close()
+            for d in self._devices.values():
+                try:
+                    d.close()
+                except OSError:
+                    pass
+            self._devices.clear()
+            self.running = False
+
+    def _dispatch(self, ev) -> None:
+        if ev.type == _EV_TYPE_KEY:
+            code, value = ev.code, ev.value
+            if value not in (1, 2):        # 1 = press, 2 = autorepeat, 0 = release
+                return
+            if code in _EV_BTN:
+                if value == 1 and self._on_click:
+                    self._on_click()
+                return
+            if self._on_key:
+                # Identity dies here, exactly as in classify().
+                self._on_key(classify_evdev(code))
+            del code
+        elif ev.type == _EV_TYPE_REL and ev.code in (_EV_REL_WHEEL, _EV_REL_HWHEEL):
+            if self._on_scroll:
+                self._on_scroll()
+
+    def start(self) -> None:
+        self._open()
+        self.running = True
+        self._thread = threading.Thread(target=self._run, name="evdev",
+                                        daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self.running = False
+
+
+# --------------------------------------------------------------------------- io
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+_sess_cache = {"t": 0.0, "v": "unknown"}
+
+
+def live_session_type() -> str:
+    """Query the LIVE login session type.
+
+    Deliberately NOT os.environ["XDG_SESSION_TYPE"]: a process's environment is
+    fixed at exec, so reading it in a loop can never observe a later switch to
+    Wayland — the exact case this check exists to catch. Cached for 30s.
+    """
+    now = time.monotonic()
+    if now - _sess_cache["t"] < 30:
+        return _sess_cache["v"]
+    # Scan ALL of this user's sessions and pick the GRAPHICAL one. Do not trust
+    # $XDG_SESSION_ID: a systemd --user service inherits the session that
+    # started the user manager, which is routinely the tty. Reading that alone
+    # reports "tty" while X11 capture is in fact working perfectly — a false
+    # "degraded" that would poison every row with a fault that is not real.
+    uid = str(os.getuid())
+    types: list[str] = []
+
+    # Fast path: read logind's own state files. These are the same records
+    # sd_session_get_type() reads, are world-readable plain text, and cost no
+    # fork at all — measured ~0.08 ms for a full scan versus ~28 ms for the
+    # loginctl subprocess path, which was the single largest CPU line in the
+    # daemon (~44% of its total budget) purely to answer "am I still on X11".
+    try:
+        for entry in os.scandir("/run/systemd/sessions"):
+            # Skip the `<id>.ref` entries: they are FIFOs, and opening a named
+            # pipe can block indefinitely. Never open anything but a plain file.
+            if "." in entry.name or not entry.is_file(follow_symlinks=False):
+                continue
+            u = t = None
+            with open(entry.path, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if line.startswith("UID="):
+                        u = line[4:].strip()
+                    elif line.startswith("TYPE="):
+                        t = line[5:].strip()
+                    if u and t:
+                        break
+            if u == uid and t:
+                types.append(t)
+    except OSError:
+        types = []
+
+    if not types:
+        # Fallback for non-systemd hosts (and macOS later): one batched call.
+        try:
+            r = subprocess.run(["loginctl", "list-sessions", "--no-legend"],
+                               capture_output=True, text=True, timeout=5)
+            ids = [p[0] for p in (l.split() for l in r.stdout.splitlines())
+                   if len(p) >= 2 and p[1] == uid]
+            if ids:
+                s = subprocess.run(
+                    ["loginctl", "show-session", *ids, "-p", "Type", "--value"],
+                    capture_output=True, text=True, timeout=5)
+                types = [t.strip() for t in s.stdout.splitlines() if t.strip()]
+        except (OSError, subprocess.SubprocessError):
+            types = []
+
+    # Wayland wins if present at all: under XWayland an X listener still
+    # connects but sees only XWayland clients, i.e. silently PARTIAL capture —
+    # the one failure this check exists to catch.
+    if "wayland" in types:
+        val = "wayland"
+    elif "x11" in types:
+        val = "x11"
+    elif types:
+        val = next((t for t in types if t != "unspecified"), types[0])
+    else:
+        val = "unknown"
+    _sess_cache.update(t=now, v=val)
+    return val
+
+
+def _row_channel_expectation(recs: list[dict]) -> tuple[bool, bool]:
+    """(screen_expected, light_expected) for a day, from that day's OWN rows.
+
+    Derived from what the session that produced each row could actually
+    deliver — NEVER from the device's CURRENT declaration. That distinction is
+    load-bearing and was a real bug: re-digesting under a Wayland declaration
+    made 2026-08-11 (windows=100, ok=98, light_ok=0) flip from invalid to
+    VALID, because "not declared now" and "was blind then" collapsed into the
+    same answer. A day the light channel was blind for must stay blind forever;
+    that is the anti-silent-zero property applied to history.
+
+    Expectation is the OR across the day: if any part of the day ran a session
+    that could deliver the channel, the channel was expected. A day that began
+    on X11 and ended on Wayland is still a day whose morning should have had
+    light, so it must not be exempted by its afternoon.
+    """
+    # Platform is a property of the STORE, not of a row: a store never migrates
+    # between operating systems, and `backend` was hardcoded to
+    # "pynput/xrecord" on macOS too, so it cannot carry this. macOS declines
+    # screen/light by design (the window-list API can pull TITLES into the
+    # process), so its days are exempt regardless of session.
+    if sys.platform == "darwin":
+        return (False, False)
+    if not recs:
+        # No rows to reason from: fall back to the declaration. Such a day has
+        # windows == 0 and reads "sin datos" downstream anyway.
+        ch = device().get("channels", {})
+        return (bool(ch.get("screen", True)), bool(ch.get("light", True)))
+    screen_exp = light_exp = False
+    for r in recs:
+        if str(r.get("backend") or "").endswith("/mac"):
+            continue
+        st = str(r.get("session_type") or "")
+        if st == "wayland":
+            # XWayland gives no root image and only XWayland clients.
+            continue
+        # x11 delivers both. tty/unspecified/unknown is INDETERMINATE, and an
+        # indeterminate session is not a licence to stop expecting a channel —
+        # exempting on doubt is exactly how a blind day reads as a calm one.
+        screen_exp = light_exp = True
+        break
+    return (screen_exp, light_exp)
+
+
+GNOME_BUS = "org.claudemaxxing.Cogload"
+GNOME_PATH = "/org/claudemaxxing/Cogload"
+# Coarser than the X11 sampler's 3 s, and that is a STATED TRADE-OFF, not a
+# free win: each sample forks gdbus (~8 ms measured for the sibling `tmux ls`
+# fork), so 3 s would cost ~0.27% of a core — more than the entire daemon
+# budget (0.159%). 5 s halves that. Switch counts are therefore slightly
+# coarser under Wayland than under X11; they are only ever read as a daily
+# aggregate, which is what makes that acceptable.
+GNOME_SAMPLE_SECONDS = 5.0
+_gnome_cache = {"t": 0.0, "v": None}
+
+
+def gnome_shell_available() -> bool:
+    """Is the cogload GNOME Shell extension exported on the session bus?
+
+    Cached for 60 s. This is what lets `screen` come BACK on its own once the
+    extension is installed, instead of staying false forever.
+    """
+    now = time.monotonic()
+    if now - _gnome_cache["t"] < 60 and _gnome_cache["v"] is not None:
+        return _gnome_cache["v"]
+    ok = False
+    try:
+        r = subprocess.run(
+            ["gdbus", "call", "--session", "--dest", GNOME_BUS,
+             "--object-path", GNOME_PATH,
+             "--method", f"{GNOME_BUS}.Sample"],
+            capture_output=True, text=True, timeout=3)
+        ok = r.returncode == 0 and r.stdout.strip().startswith("(")
+    except (OSError, subprocess.SubprocessError):
+        ok = False
+    _gnome_cache.update(t=now, v=ok)
+    return ok
+
+
+def gnome_shell_sample() -> tuple[str | None, int | None, bool]:
+    """(app_id, open_windows, ok) via the extension. NEVER a window title."""
+    try:
+        r = subprocess.run(
+            ["gdbus", "call", "--session", "--dest", GNOME_BUS,
+             "--object-path", GNOME_PATH,
+             "--method", f"{GNOME_BUS}.Sample"],
+            capture_output=True, text=True, timeout=3)
+        if r.returncode != 0:
+            return (None, None, False)
+        # gdbus prints a GVariant tuple: ('org.gnome.Nautilus.desktop', 7)
+        out = r.stdout.strip()
+        if not (out.startswith("(") and out.endswith(")")):
+            return (None, None, False)
+        body = out[1:-1].rstrip(",")
+        app_part, _, count_part = body.rpartition(",")
+        app = app_part.strip().strip("'\"") or None
+        count = None
+        digits = "".join(ch for ch in count_part if ch.isdigit())
+        if digits:
+            count = int(digits)
+        return (app, count, True)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return (None, None, False)
+
+
+def detect_channels() -> dict | None:
+    """What this device can collect RIGHT NOW, or None when that is unknowable.
+
+    Returning None on an indefinite reading is the anti-flap rule: a
+    `systemd --user` service can transiently see session type "tty" (it
+    inherits the session that started the user manager), and redeclaring on
+    that would silently disable channels that work perfectly.
+    """
+    base = {"keys": True, "mouse": True, "agents": True}
+    if sys.platform == "darwin":
+        return {**base, "screen": False, "light": False}
+    st = live_session_type()
+    if st == "x11":
+        return {**base, "screen": True, "light": True}
+    if st == "wayland":
+        # light stays false unconditionally: the only route is the ScreenCast
+        # portal, which hands over a full-resolution frame, and "no image above
+        # legibility is ever constructed" is an arithmetic property of this
+        # design, not a policy promise.
+        #
+        # screen CAN come back — but only through our own GNOME Shell
+        # extension (deploy/gnome-cogload-extension), because Mutter
+        # allow-lists org.gnome.Shell.Introspect. Detected, never assumed, so
+        # installing the extension is all it takes and uninstalling it
+        # degrades honestly rather than silently zeroing.
+        return {**base, "screen": gnome_shell_available(), "light": False}
+    return None
+
+
+def _ensure_store() -> None:
+    for d in (STORE, KEYS_DIR, AGENT_DIR):
+        d.mkdir(parents=True, exist_ok=True)
+    try:
+        STORE.chmod(0o700)
+    except OSError:
+        pass
+
+
+def _day_file(when: datetime) -> Path:
+    local = when.astimezone()
+    month = KEYS_DIR / local.strftime("%Y-%m")
+    month.mkdir(parents=True, exist_ok=True)
+    return month / f"keys-{local.strftime('%Y-%m-%d')}.jsonl"
+
+
+def write_record(rec: dict) -> None:
+    """Append one window record, enforcing the field whitelist."""
+    extra = set(rec) - RECORD_FIELDS
+    if extra:
+        raise ValueError(f"record carries non-whitelisted fields: {sorted(extra)}")
+    path = _day_file(datetime.fromisoformat(rec["ts"]))
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec, separators=(",", ":"), sort_keys=True) + "\n")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _read_records(days: int = 1, day: str | None = None) -> list[dict]:
+    out: list[dict] = []
+    if day:
+        wanted = [datetime.strptime(day, "%Y-%m-%d").date()]
+    else:
+        today = datetime.now().date()
+        # OLDEST first. Callers rely on the returned list being chronological —
+        # `_last_record()` takes recs[-1]. Building this newest-first made
+        # recs[-1] yesterday's final row, so a perfectly healthy collector
+        # reported itself stale by exactly one day's worth of seconds. A false
+        # DEGRADED is as damaging as a false OK: it teaches you to distrust a
+        # working instrument.
+        wanted = [today - timedelta(days=i) for i in reversed(range(days))]
+    for d in wanted:
+        p = KEYS_DIR / d.strftime("%Y-%m") / f"keys-{d.strftime('%Y-%m-%d')}.jsonl"
+        if not p.exists():
+            gz = p.with_suffix(".jsonl.gz")
+            if gz.exists():
+                import gzip
+                with gzip.open(gz, "rt", encoding="utf-8") as fh:
+                    for line in fh:
+                        try:
+                            out.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
+            continue
+        with p.open(encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    return out
+
+
+# ---------------------------------------------------------------------- screen
+
+
+class ScreenSampler:
+    """Samples the ACTIVE APPLICATION CLASS and open-window count via Xlib.
+
+    Never reads window titles. Degrades loudly: on any failure the sampler
+    reports unavailable rather than returning zeros that would read as calm.
+
+    Health is tracked INDEPENDENTLY per subsystem (screen vs light). Screen
+    samples every 2 s, light every 10 s; a single shared streak would let the
+    frequent screen successes perpetually reset a permanently-dead light path
+    so it never reached the down threshold. A subsystem is "down" only after
+    >= FAIL_STREAK_DOWN consecutive failures, and a down subsystem attempts a
+    Display re-init at most once per _REINIT_INTERVAL_S. A transient X error
+    (BadWindow race: the active window is destroyed between reading
+    _NET_ACTIVE_WINDOW and fetching WM_CLASS) bumps the streak but does NOT
+    latch a permanent ok=False — the next success resets it.
+    """
+
+    def __init__(self) -> None:
+        # Per-subsystem health. Each carries: ok, reason, fail_streak,
+        # last_ok_at (monotonic), last_reinit_at (monotonic).
+        # screen and light are tracked INDEPENDENTLY — self._health['screen']
+        # and self._health['light'] keep separate streaks so the 2s screen
+        # path cannot perpetually reset a permanently-dead 10s light path.
+        self._health = {
+            "screen": {"ok": False, "reason": "not-initialized",
+                       "fail_streak": 0, "last_ok_at": 0.0,
+                       "last_reinit_at": 0.0},
+            "light":  {"ok": False, "reason": "not-initialized",
+                       "fail_streak": 0, "last_ok_at": 0.0,
+                       "last_reinit_at": 0.0},
+        }
+        self._d = None
+        try:
+            from Xlib import X, display  # noqa: F401
+            from Xlib.protocol import request as _Req
+
+            self._X = X
+            self._Req = _Req
+            self._d = display.Display()
+            self._root = self._d.screen().root
+            self._a_active = self._d.intern_atom("_NET_ACTIVE_WINDOW")
+            self._a_list = self._d.intern_atom("_NET_CLIENT_LIST")
+            self._geo = None
+            self._geo_at = 0.0
+            self._class_cache: dict[int, tuple[str, float]] = {}
+            # Both subsystems share one Display; mark both ok on a successful
+            # init. A later failure of either is tracked per-subsystem.
+            for sub in self._health.values():
+                sub["ok"] = True
+                sub["reason"] = ""
+                sub["last_ok_at"] = time.monotonic()
+        except Exception as exc:  # pragma: no cover - environment dependent
+            self._health["screen"]["reason"] = f"xlib-unavailable:{type(exc).__name__}"
+            self._health["light"]["reason"] = f"xlib-unavailable:{type(exc).__name__}"
+
+    # Back-compat shims: older callers read .ok / .reason directly. Keep them
+    # as derived views over the screen subsystem so the daemon's flush() and
+    # the tests' direct assignments keep working.
+    @property
+    def ok(self) -> bool:
+        return self._health["screen"]["ok"]
+
+    @ok.setter
+    def ok(self, v: bool) -> None:
+        self._health["screen"]["ok"] = v
+
+    @property
+    def reason(self) -> str:
+        return self._health["screen"]["reason"]
+
+    @reason.setter
+    def reason(self, v: str) -> None:
+        self._health["screen"]["reason"] = v
+
+    def _reinit(self, sub: str) -> bool:
+        """Attempt to re-establish the X connection for a down subsystem.
+
+        At most one attempt per _REINIT_INTERVAL_S. Returns True when the
+        TRANSPORT was rebuilt (Display re-opened), which is permission to retry
+        the real call — it is NOT a claim that the subsystem works.
+
+        A reconnect must not clear a failure it did not fix. It used to: one
+        Display is shared by both subsystems, so re-opening it reset `ok`,
+        `reason` and `fail_streak` for BOTH. On GNOME Wayland (measured
+        2026-08-17) `screen` genuinely works while `light` fails every sample —
+        GetImage on the XWayland root is BadMatch — so light cycled forever:
+        fail 5x, go down, get "recovered" by a reconnect that fixed nothing,
+        fail 5x again. Its specific cause was wiped on every cycle, so the
+        channel reported a generic "no-sample-in-window" and was permanently
+        blind while never once saying why. Health is now cleared in exactly one
+        place: `_succeed()`, on an actual successful call.
+
+        `last_reinit_at` is stamped on every subsystem because the Display is
+        shared: that is a fact about the transport, not about health, and
+        without it the sibling immediately re-does the rebuild.
+        """
+        h = self._health[sub]
+        now = time.monotonic()
+        if now - h["last_reinit_at"] < _REINIT_INTERVAL_S:
+            return False
+        for s in self._health.values():
+            s["last_reinit_at"] = now
+        try:
+            from Xlib import display
+            self._d = display.Display()
+            self._root = self._d.screen().root
+            self._a_active = self._d.intern_atom("_NET_ACTIVE_WINDOW")
+            self._a_list = self._d.intern_atom("_NET_CLIENT_LIST")
+            self._geo = None
+            self._geo_at = 0.0
+            self._class_cache = {}
+            return True
+        except Exception as exc:  # pragma: no cover - environment dependent
+            for s in self._health.values():
+                s["ok"] = False
+                s["reason"] = f"xlib-reinit-failed:{type(exc).__name__}"
+            return False
+
+    def _fail(self, sub: str, reason: str) -> None:
+        h = self._health[sub]
+        h["fail_streak"] += 1
+        h["reason"] = reason
+        # "ok" means "this subsystem is still usable", NOT "the last call
+        # succeeded". A single transient error (BadWindow race) must NOT latch
+        # ok=False — that would make the entry guard return early forever, the
+        # real X call would never be retried, the streak would stay at 1, and
+        # _down() (streak >= FAIL_STREAK_DOWN) would never fire. Only mark the
+        # subsystem unusable once the streak is exhausted.
+        if h["fail_streak"] >= FAIL_STREAK_DOWN:
+            h["ok"] = False
+
+    def _succeed(self, sub: str) -> None:
+        h = self._health[sub]
+        h["fail_streak"] = 0
+        h["ok"] = True
+        h["reason"] = ""
+        h["last_ok_at"] = time.monotonic()
+
+    def _down(self, sub: str) -> bool:
+        return self._health[sub]["fail_streak"] >= FAIL_STREAK_DOWN
+
+    def luminance_grid(self) -> list[float] | None:
+        """Sample a LIGHT_GRID_X x LIGHT_GRID_Y luminance grid (32x6 = 192
+        values) — the content-free stand-in for a screenshot, and the
+        measurement for light-exposure sensitivity.
+
+        The privacy property is ARITHMETIC, not policy: 192 samples of a
+        1920x1080 screen retains 1 part in ~10,800. No image above legibility
+        is ever constructed, held, or discarded — it never exists, so there is
+        nothing to leak, blur, or promise to delete. This is the same paradigm
+        as privacy-preserving activity recognition at extreme low resolution
+        (arXiv:1604.03196 works at 16x12); we are coarser still, and we only
+        want scalar aggregates from it, not recognition.
+
+        Returns row-major luminance in 0..255, or None when unavailable.
+        """
+        sub = "light"
+        # Skip the attempt ONLY when the subsystem is DOWN (streak exhausted)
+        # and a rate-limited _reinit() did not recover it. Otherwise ALWAYS
+        # attempt the call — a transient failure bumped the streak but must not
+        # prevent the next call from retrying the real X round-trip.
+        if self._down(sub) and not self._reinit(sub):
+            return None
+        try:
+            # Screen geometry changes only on resolution change or monitor
+            # hotplug, so re-querying it every sample was a whole extra X
+            # round trip (~0.29 ms CPU / 5.5 ms wall) for a constant. Cache it
+            # for 60 s — still picks up a resolution change within a minute.
+            now = time.monotonic()
+            if self._geo is None or now - self._geo_at > 60:
+                geo = self._root.get_geometry()
+                self._geo = (geo.width, geo.height)
+                self._geo_at = now
+            w, h = self._geo
+            if w <= 0 or h <= 0:
+                self._fail(sub, "xlib-image-failed:zero-geometry")
+                return None
+            rows = [int((gy + 0.5) * h / LIGHT_GRID_Y) for gy in range(LIGHT_GRID_Y)]
+
+            def _sample(strip, out):
+                for gx in range(LIGHT_GRID_X):
+                    o = int((gx + 0.5) * w / LIGHT_GRID_X) * 4
+                    if o + 2 >= len(strip):
+                        continue
+                    b, g, r = strip[o], strip[o + 1], strip[o + 2]
+                    out.append(0.2126 * r + 0.7152 * g + 0.0722 * b)
+
+            out: list[float] = []
+            # PIPELINED: issue all row requests, then collect. Cost here is X
+            # round-trip latency, not pixels, so blocking on each reply in turn
+            # was ~10x the total: measured 10.3 ms sequential vs 1.0 ms
+            # pipelined, bit-identical output (192 samples, exact match).
+            # Peak transient rises from one strip (7 KB) to all six (45 KB) —
+            # still six 1-pixel-tall rows, 1/184th of a full 8.3 MB frame, so
+            # no full-resolution image is ever constructed. That ratio is the
+            # invariant; if LIGHT_GRID_Y ever grows a lot, re-check it.
+            try:
+                pending = [self._Req.GetImage(
+                    display=self._d.display, defer=True, format=self._X.ZPixmap,
+                    drawable=self._root.id, x=0, y=y, width=w, height=1,
+                    plane_mask=0xffffffff) for y in rows]
+                for rq in pending:
+                    rq.reply()          # returns None; data lands on the object
+                    _sample(rq.data, out)
+            except Exception:
+                # Fall back to the plain loop: this uses Xlib's *protocol*
+                # layer, not the documented drawable API, so a future
+                # python-xlib could move it. Same output, just slower.
+                out = []
+                for y in rows:
+                    _sample(self._root.get_image(
+                        0, y, w, 1, self._X.ZPixmap, 0xffffffff).data, out)
+            if out:
+                self._succeed(sub)
+            else:
+                self._fail(sub, "xlib-image-failed:empty")
+            return out or None
+        except Exception as exc:
+            self._fail(sub, f"xlib-image-failed:{type(exc).__name__}")
+            return None
+
+    def sample(self) -> tuple[str | None, int | None, bool]:
+        """Return (app_class, open_window_count, ok).
+
+        ok is EXPLICIT: (None, None, False) is a failure; (None, None, True)
+        is a genuine no-properties result (active window with no WM_CLASS, or
+        an empty _NET_CLIENT_LIST). Inferring failure from (None, None) is
+        ambiguous and was the pre-fix behavior.
+        """
+        sub = "screen"
+        # Skip the attempt ONLY when the subsystem is DOWN (streak exhausted)
+        # and a rate-limited _reinit() did not recover it. Otherwise ALWAYS
+        # attempt the call — a transient failure bumped the streak but must not
+        # prevent the next call from retrying the real X round-trip. The old
+        # guard read `ok` (which _fail() latched to False on the FIRST error)
+        # and returned early forever, so the sampler made 0 further X calls
+        # after one transient error.
+        if self._down(sub) and not self._reinit(sub):
+            return None, None, False
+        try:
+            prop = self._root.get_full_property(self._a_active, self._X.AnyPropertyType)
+            app = None
+            if prop and prop.value:
+                wid = prop.value[0]
+                now = time.monotonic()
+                hit = self._class_cache.get(wid)
+                if hit and now - hit[1] < 60:
+                    app = hit[0]
+                else:
+                    win = self._d.create_resource_object("window", wid)
+                    cls = win.get_wm_class()
+                    if cls:
+                        # class name only; never WM_NAME / the title
+                        app = cls[-1]
+                        # WM_CLASS is effectively immutable per window id, and
+                        # focus changes far less often than we sample. Expire at
+                        # 60 s anyway: X window ids are recycled, so an unbounded
+                        # cache could eventually mislabel a reused id.
+                        self._class_cache[wid] = (app, now)
+                        if len(self._class_cache) > 256:
+                            for k, v in list(self._class_cache.items()):
+                                if now - v[1] > 60:
+                                    del self._class_cache[k]
+            # sizehint: the default (10) asks for 40 bytes and issues a SECOND
+            # GetProperty whenever more windows are open — the normal case here.
+            lst = self._root.get_full_property(
+                self._a_list, self._X.AnyPropertyType, sizehint=64)
+            count = len(lst.value) if lst else None
+            self._succeed(sub)
+            return app, count, True
+        except Exception as exc:
+            self._fail(sub, f"xlib-read-failed:{type(exc).__name__}")
+            return None, None, False
+
+
+def self_d_pending(sampler) -> int:
+    """Pending X events on the sampler's connection (0 when unavailable)."""
+    try:
+        return sampler._d.pending_events()
+    except Exception:
+        return 0
+
+
+def agent_sessions() -> int | None:
+    """Concurrent tmux agent sessions — the orchestration-WIP proxy."""
+    try:
+        res = subprocess.run(
+            ["tmux", "ls"], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode != 0:
+        return 0 if "no server running" in (res.stderr or "").lower() else None
+    return sum(
+        1
+        for line in res.stdout.splitlines()
+        if line.split(":", 1)[0].startswith(("claude-", "codex-", "opencode-"))
+    )
+
+
+# ---------------------------------------------------------------------- window
+
+
+class Window:
+    """In-memory aggregate for one time window. Nothing here is ever persisted
+    per-event: timestamps live only long enough to compute interval stats."""
+
+    def __init__(self) -> None:
+        self.keys = {k: 0 for k in KEY_CLASSES}
+        self.clicks = 0
+        self.scrolls = 0
+        self._press_times: list[float] = []
+        self.app_samples: list[str] = []
+        self.app_switches = 0
+        self.win_counts: list[int] = []
+        self.agents: list[int] = []
+        self.screen_ok = True
+        self.screen_reason = ""
+        # Per-window SUCCESS count: how many screen samples actually landed
+        # (app_samples holds only non-None apps; a window with no WM_CLASS on
+        # the active window would have app_samples=[] but screen_samples>0,
+        # which is a real sample, not a silent zero).
+        self.screen_samples = 0
+        # Light health, tracked independently from screen health.
+        self.light_ok = True
+        self.light_reason = ""
+        # Luminance aggregates only. The grid vectors themselves are consumed
+        # here and never retained beyond the previous one (for churn).
+        self.lum_means: list[float] = []
+        self.lum_contrast: list[float] = []
+        self.lum_churn: list[float] = []
+        self._lum_prev: list[float] | None = None
+
+    def on_light(self, grid: list[float]) -> None:
+        """Fold one luminance grid into scalars and drop it."""
+        self.lum_means.append(statistics.fmean(grid))
+        self.lum_contrast.append(statistics.pstdev(grid) if len(grid) > 1 else 0.0)
+        if self._lum_prev is not None and len(self._lum_prev) == len(grid):
+            self.lum_churn.append(
+                statistics.fmean(abs(a - b) for a, b in zip(grid, self._lum_prev)))
+        self._lum_prev = grid
+
+    def light(self) -> dict:
+        if not self.lum_means:
+            return {"available": False,
+                    "reason": self.light_reason or "no-sample-in-window"}
+        return {
+            "available": True,
+            "n": len(self.lum_means),
+            # Mean screen luminance 0-255 — the light-exposure measure.
+            "mean": round(statistics.fmean(self.lum_means), 1),
+            # Within-frame spread: visual busyness / contrast load.
+            "contrast": round(statistics.fmean(self.lum_contrast), 1),
+            # Between-frame change: visual churn (animation, scrolling, switching).
+            "churn": round(statistics.fmean(self.lum_churn), 2) if self.lum_churn else None,
+        }
+
+    def on_key(self, cls_name: str, when: float) -> None:
+        self.keys[cls_name] += 1
+        self._press_times.append(when)
+
+    @property
+    def total(self) -> int:
+        return sum(self.keys.values())
+
+    def iki(self) -> dict:
+        """Inter-keystroke intervals. Raw times are consumed here and dropped."""
+        # No sorted() on the timestamps: they come from time.monotonic() and are
+        # already non-decreasing by construction, so sorting only bought a full
+        # copy of the list. At 4000 presses that copy is ~126 KB, and combined
+        # with the second sort below the old version could transiently hold
+        # ~350 KB for a computation whose entire output is four floats.
+        t = self._press_times
+        gaps = [(b - a) * 1000.0 for a, b in zip(t, t[1:])]
+        typing = sorted(g for g in gaps if g <= PAUSE_LO_MS)   # sorted ONCE
+        out = {
+            "n": len(gaps),
+            "mean_ms": None,
+            "p50_ms": None,
+            "p95_ms": None,
+            "pause_2_10s": sum(1 for g in gaps if PAUSE_LO_MS < g <= PAUSE_HI_MS),
+        }
+        if typing:
+            # Both percentiles come off the one sorted list.
+            out["mean_ms"] = round(statistics.fmean(typing), 1)
+            out["p50_ms"] = round(statistics.median(typing), 1)
+            out["p95_ms"] = round(typing[min(len(typing) - 1, int(0.95 * len(typing)))], 1)
+        return out
+
+    def screen(self) -> dict:
+        # A window with screen_ok=True but ZERO successful samples is NOT
+        # "available" — that is a silent zero inside the anti-silent-zero
+        # design. screen_samples counts actual landed samples (including
+        # no-WM_CLASS results), so a genuine no-properties sample reads as
+        # available while a never-sampled window reads as blind.
+        if not self.screen_ok or self.screen_samples == 0:
+            return {"available": False,
+                    "reason": self.screen_reason or "no-sample-in-window"}
+        apps = self.app_samples
+        dwell = None
+        if apps:
+            runs, cur = [], 1
+            for a, b in zip(apps, apps[1:]):
+                if a == b:
+                    cur += 1
+                else:
+                    runs.append(cur)
+                    cur = 1
+            runs.append(cur)
+            dwell = round(statistics.fmean(runs) * SAMPLE_SECONDS, 1)
+        return {
+            "available": True,
+            "app": apps[-1] if apps else None,
+            "distinct_apps": len(set(apps)),
+            "switches": self.app_switches,
+            "focus_fragment_s": dwell,
+            "open_windows": (
+                round(statistics.fmean(self.win_counts), 1) if self.win_counts else None
+            ),
+        }
+
+    def record(self, ts: datetime, backend: str, session_type: str, status: str) -> dict:
+        return {
+            "ts": ts.isoformat(),
+            "v": SCHEMA_VERSION,
+            "host": device_id(),
+            "win_s": WINDOW_SECONDS,
+            "backend": backend,
+            "session_type": session_type,
+            "status": status,
+            "keys": dict(self.keys),
+            "mouse": {"click": self.clicks, "scroll": self.scrolls},
+            "iki": self.iki(),
+            "screen": self.screen(),
+            "light": self.light(),
+            "agents": (
+                round(statistics.fmean(self.agents)) if self.agents else None
+            ),
+            "total": self.total,
+        }
+
+
+# ---------------------------------------------------------------------- daemon
+
+
+def cmd_daemon(args) -> int:
+    _ensure_store()
+    state = {"win": Window(), "degraded": ""}
+    session_type = live_session_type
+
+    # Backend selection. evdev is preferred on Linux because it is
+    # compositor-independent: the X11-only path went silently partial the day
+    # this box moved to Wayland, and the kernel input layer cannot. pynput
+    # stays the macOS backend (TCC-gated) and the Linux/X11 fallback for a box
+    # where the input group was never granted.
+    _evdev_ok, _evdev_reason = EvdevListener.available()
+    if _evdev_ok:
+        backend = "evdev"
+    elif sys.platform == "darwin":
+        # Was hardcoded "pynput/xrecord" even here, which made macOS rows
+        # indistinguishable from Linux ones in every downstream consumer.
+        backend = "pynput/mac"
+    else:
+        backend = "pynput/xrecord"
+        if _evdev_reason:
+            sys.stderr.write(
+                f"cogload: evdev unavailable ({_evdev_reason}); "
+                "falling back to pynput/xrecord — this is X11-only and will "
+                "capture only partially under Wayland\n")
+
+    # pynput is only needed when it IS the backend. Under evdev the daemon must
+    # not hard-fail because an X-only library is missing or unimportable.
+    keyboard = mouse = None
+    try:
+        if backend != "evdev":
+            from pynput import keyboard, mouse
+    except Exception as exc:
+        # Cannot capture at all — still emit heartbeats so the gap is visible.
+        reason = f"pynput-unavailable:{type(exc).__name__}"
+        sys.stderr.write(f"cogload: {reason}; emitting degraded heartbeats\n")
+        while True:
+            time.sleep(WINDOW_SECONDS)
+            w = Window()
+            w.screen_ok = False
+            w.screen_reason = reason
+            write_record(w.record(_now(), backend, session_type(), f"degraded:{reason}"))
+
+    _tcc_reason = mac_tcc_reason()
+    if _tcc_reason:
+        sys.stderr.write(f"cogload: macOS capture not permitted ({_tcc_reason}); "
+                         "writing degraded rows until restarted after granting\n")
+    screen = ScreenSampler()
+    PIDFILE.write_text(str(os.getpid()), encoding="utf-8")
+
+    def on_press(key):
+        try:
+            state["win"].on_key(classify(key), time.monotonic())
+        finally:
+            del key  # explicit: identity is not retained
+
+    def on_click(x, y, button, pressed):
+        if pressed:
+            state["win"].clicks += 1
+
+    def on_scroll(x, y, dx, dy):
+        state["win"].scrolls += 1
+
+    _use_gnome = (sys.platform != "darwin"
+                  and live_session_type() == "wayland"
+                  and gnome_shell_available())
+    if _use_gnome:
+        sys.stderr.write("cogload: sampling windows via the GNOME Shell "
+                         "extension (app id + count only, never titles)\n")
+    _last_gnome = 0.0
+    _gnome_last = (None, None, False)
+    # A channel this device does NOT declare must not be sampled at all.
+    # Observed live on 2026-08-20: with `screen` declared false under Wayland,
+    # the X sampler kept running, saw only XWayland clients, and wrote
+    # screen.available=True with app_switches=0 — which aggregates into
+    # "he never switched apps" instead of "this was not measured". That is the
+    # silent zero this whole harness exists to prevent, arriving through the
+    # back door. Not sampling leaves screen_samples == 0, so Window.screen()
+    # reports unavailable and carries the reason below.
+    _ch_decl = device().get("channels", {})
+    _want_screen = bool(_ch_decl.get("screen", True)) or _use_gnome
+    _want_light = bool(_ch_decl.get("light", True))
+    if not _want_screen:
+        sys.stderr.write("cogload: screen channel not declared — not sampling "
+                         "windows (install the GNOME extension to restore it)\n")
+    if not _want_light:
+        sys.stderr.write("cogload: light channel not declared — not sampling "
+                         "luminance\n")
+
+    def flush(_signum=None, _frame=None):
+        win, state["win"] = state["win"], Window()
+        st = state["degraded"] or "ok"
+        if DISABLED.exists():
+            st = "disabled"
+            win = Window()
+        # Per-subsystem: a dead light path must mark the window's light blind
+        # even when the screen path is still ok (and vice versa). The window
+        # carries the reason into the record so a blind subsystem is visible
+        # downstream rather than reading as a silent zero.
+        if not screen._health["screen"]["ok"]:
+            win.screen_ok = False
+            win.screen_reason = screen._health["screen"]["reason"]
+        if not _want_light:
+            win.light_ok = False
+            win.light_reason = "channel-not-declared"
+        elif not screen._health["light"]["ok"]:
+            win.light_ok = False
+            win.light_reason = screen._health["light"]["reason"]
+        write_record(win.record(_now(), backend, session_type(), st))
+        # Reclaim reference cycles once per window. MEASURED, not assumed:
+        # an identical daemon-shaped loop over 210 s grew +23.10 MB/h without
+        # this and -10.38 MB/h with it (RSS actually returns). The per-call
+        # sites are all individually clean (sample() 0.107 kB/call, luminance,
+        # agent_sessions and live_session_type all 0.000), so this is cyclic
+        # garbage the automatic collector was not getting to, NOT a leak in
+        # any one place — which is why bisecting call sites kept coming back
+        # empty. Once per 60 s window, on a ~20 MB heap, so the observer stays
+        # cheaper than the thing it observes.
+        gc.collect()
+
+    signal.signal(signal.SIGUSR1, flush)
+
+    def _term(_signum, _frame):
+        # Flush the partial window before dying, or every stop silently
+        # discards up to WINDOW_SECONDS of real signal.
+        try:
+            flush()
+        finally:
+            # Remove our own pidfile so `cogload off` can never signal a
+            # recycled PID after we are gone.
+            PIDFILE.unlink(missing_ok=True)
+            sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _term)
+    signal.signal(signal.SIGINT, _term)
+
+    if backend == "evdev":
+        # One reader thread serves keys, clicks and scroll, so both names point
+        # at the same object and the liveness checks below stay unchanged.
+        # EvdevListener hands back a CLASS, never a keycode — identity is
+        # already gone by the time it calls us.
+        k_listener = m_listener = EvdevListener(
+            on_key=lambda cls: state["win"].on_key(cls, time.monotonic()),
+            on_click=lambda: state["win"].__setattr__("clicks", state["win"].clicks + 1),
+            on_scroll=lambda: state["win"].__setattr__("scrolls", state["win"].scrolls + 1),
+        )
+        k_listener.start()
+    else:
+        k_listener = keyboard.Listener(on_press=on_press)
+        m_listener = mouse.Listener(on_click=on_click, on_scroll=on_scroll)
+        k_listener.start()
+        m_listener.start()
+
+    # Align to the next minute boundary so windows are comparable across days.
+    next_flush = (int(time.time()) // WINDOW_SECONDS + 1) * WINDOW_SECONDS
+    last_app = None
+    last_light = 0.0
+    # Under Wayland the X sampler sees only XWayland clients (2 windows and 2
+    # switches/day on a box that really had 6 and 260). If our GNOME Shell
+    # extension is exported, sample through it instead; otherwise `screen` is
+    # declared false and this never runs. Decided once per process — the
+    # extension cannot be enabled without a shell restart anyway.
+    while True:
+        time.sleep(SAMPLE_SECONDS)
+        disabled = DISABLED.exists()
+
+        if not disabled:
+            st = session_type()
+            if backend != "evdev" and st not in ("x11", "unknown"):
+                # A Wayland switch gives silently PARTIAL capture through
+                # XWayland — worse than none, because it looks like calm.
+                # evdev reads the kernel input layer, so the session type does
+                # not bound what it can see and this must NOT fire for it:
+                # leaving it in would mark honest, complete capture degraded
+                # forever, which teaches you to ignore the one signal that
+                # matters.
+                state["degraded"] = f"degraded:session-{st}-xrecord-partial"
+            elif backend == "evdev" and not getattr(k_listener, "_devices", None):
+                # Every input device vanished (unplug, or the input-group grant
+                # was revoked). Blind, not idle.
+                state["degraded"] = "degraded:evdev-no-devices"
+            elif not k_listener.running:
+                state["degraded"] = "degraded:listener-died"
+            elif _tcc_reason:
+                # Permission denied => we are BLIND, not idle. Without this the
+                # row would read ok/total:0 and present as a calm day.
+                state["degraded"] = f"degraded:{_tcc_reason}"
+            elif not m_listener.running:
+                # A dead mouse thread is otherwise INVISIBLE: clicks/scrolls
+                # stay at their 0 initialisers and the row still says "ok", so
+                # a broken mouse channel is indistinguishable from a genuinely
+                # mouse-free hour. Unlike screen/light, `mouse` carries no
+                # availability flag of its own — this is where it gets caught.
+                state["degraded"] = "degraded:mouse-listener-died"
+            else:
+                state["degraded"] = ""
+
+            if not _want_screen:
+                app, wcount, sok = None, None, False
+                state["win"].screen_reason = "channel-not-declared"
+            elif _use_gnome:
+                # Own cadence (5 s): each call forks gdbus, so running it at
+                # the 3 s loop rate would cost more than the whole daemon
+                # budget. Between samples the last reading is reused, exactly
+                # as a slower sensor would behave.
+                _nowm = time.monotonic()
+                if _nowm - _last_gnome >= GNOME_SAMPLE_SECONDS:
+                    _last_gnome = _nowm
+                    _gnome_last = gnome_shell_sample()
+                app, wcount, sok = _gnome_last
+                if not sok:
+                    screen._fail("screen", "gnome-extension-unreachable")
+                else:
+                    screen._succeed("screen")
+            else:
+                app, wcount, sok = screen.sample()
+            w = state["win"]
+            if not sok:
+                # sample() already bumped the screen streak; record the failure
+                # reason on the window so a flush mid-failure (or a window that
+                # ends with ZERO successful samples) carries that specific
+                # reason rather than the generic "no-sample-in-window". Do NOT
+                # latch w.screen_ok = False here: one transient error inside an
+                # otherwise healthy 60s window would mark the whole window
+                # blind — a false DEGRADED, which this file's own comments call
+                # as damaging as a false OK. Availability is decided by
+                # screen_samples == 0 (Window.screen()) and by flush() marking
+                # the window when the subsystem is actually DOWN.
+                w.screen_reason = screen._health["screen"]["reason"]
+            if sok:
+                # A landed sample counts regardless of whether the active
+                # window had a WM_CLASS. (None, None, True) is a genuine
+                # no-properties result, not a silent zero — incrementing inside
+                # `if app is not None` made a no-WM_CLASS desktop read blind.
+                w.screen_samples += 1
+            if app is not None:
+                if last_app is not None and app != last_app:
+                    w.app_switches += 1
+                last_app = app
+                w.app_samples.append(app)
+            if wcount is not None:
+                w.win_counts.append(wcount)
+            if int(time.time()) % 20 < SAMPLE_SECONDS:
+                a = agent_sessions()
+                if a is not None:
+                    w.agents.append(a)
+
+            now_m = time.monotonic()
+            if _want_light and now_m - last_light >= LIGHT_EVERY_SECONDS:
+                last_light = now_m
+                grid = screen.luminance_grid()
+                if grid:
+                    # NOTE: on_light() folds this to scalars but DOES retain the
+                    # vector in _lum_prev until the next sample (~10 s), because
+                    # churn is a between-frame difference. An earlier comment
+                    # here claimed the grid did not outlive this scope, which was
+                    # simply false — 192 floats (~6 KB) do persist, by design.
+                    # Stated accurately because a wrong memory claim in a comment
+                    # is worse than no comment: it gets trusted later.
+                    w.on_light(grid)
+
+        if time.time() >= next_flush:
+            flush()
+            next_flush += WINDOW_SECONDS
+            # python-xlib appends every server-initiated event to a plain list
+            # that only next_event() pops. We select no input mask, so this is
+            # near-empty in practice (measured 0 after 1200 samples) — but it is
+            # genuinely unbounded over a 400-day retention horizon, and this
+            # daemon is meant to run for months. One line closes it.
+            try:
+                while screen.ok and self_d_pending(screen):
+                    screen._d.next_event()
+            except Exception:
+                pass
+    return 0
+
+
+# --------------------------------------------------------------------- reading
+
+
+MAC_AGENT = "com.claudemaxxing.cogload-keys"
+
+
+def _is_mac() -> bool:
+    return sys.platform == "darwin"
+
+
+def _launchctl(*a) -> subprocess.CompletedProcess:
+    return subprocess.run(["launchctl", *a], capture_output=True, text=True, timeout=15)
+
+
+def mac_tcc_status() -> dict:
+    """Are the macOS capture permissions actually granted?
+
+    THIS IS THE ANTI-SILENT-ZERO KEYSTONE ON macOS. Without a preflight,
+    pynput on an unauthorized process observes nothing and raises nothing: the
+    daemon writes `status:"ok", total:0` forever, which is indistinguishable
+    from a person who simply is not typing. Observed live on first rollout.
+
+    ctypes against the system frameworks — no new dependency, and a wrong
+    symbol degrades loudly (returns unknown) rather than silently claiming ok.
+    """
+    if not _is_mac():
+        return {"applicable": False}
+    out = {"applicable": True, "input_monitoring": None, "accessibility": None}
+    try:
+        import ctypes, ctypes.util
+        cg = ctypes.util.find_library("CoreGraphics") or (
+            "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+        lib = ctypes.cdll.LoadLibrary(cg)
+        if hasattr(lib, "CGPreflightListenEventAccess"):
+            lib.CGPreflightListenEventAccess.restype = ctypes.c_bool
+            out["input_monitoring"] = bool(lib.CGPreflightListenEventAccess())
+    except Exception as exc:
+        out["input_monitoring_error"] = f"{type(exc).__name__}"
+    try:
+        import ctypes, ctypes.util
+        ax = ctypes.util.find_library("ApplicationServices") or (
+            "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+        lib2 = ctypes.cdll.LoadLibrary(ax)
+        if hasattr(lib2, "AXIsProcessTrusted"):
+            lib2.AXIsProcessTrusted.restype = ctypes.c_bool
+            out["accessibility"] = bool(lib2.AXIsProcessTrusted())
+    except Exception as exc:
+        out["accessibility_error"] = f"{type(exc).__name__}"
+    return out
+
+
+def mac_tcc_reason() -> str:
+    """'' when capture is permitted (or not macOS); a degrade reason otherwise."""
+    t = mac_tcc_status()
+    if not t.get("applicable"):
+        return ""
+    im, ax = t.get("input_monitoring"), t.get("accessibility")
+    if im is False:
+        return "tcc-input-monitoring-denied"
+    if ax is False:
+        return "tcc-accessibility-denied"
+    if im is None and ax is None:
+        # Could not ASK. Unknown is not permission — say so rather than
+        # assuming the happy case.
+        return "tcc-unknown"
+    return ""
+
+
+def _unit_active() -> bool:
+    if _is_mac():
+        # launchd, not systemd. Without this the Mac always reports its
+        # collector inactive and `status` reads permanently unhealthy.
+        try:
+            r = _launchctl("print", f"gui/{os.getuid()}/{MAC_AGENT}")
+            return r.returncode == 0 and "state = running" in r.stdout
+        except (OSError, subprocess.SubprocessError):
+            return False
+    try:
+        r = subprocess.run(
+            ["systemctl", "--user", "is-active", "cogload-keys"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return r.stdout.strip() == "active"
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _last_record() -> dict | None:
+    recs = _read_records(days=2)
+    return recs[-1] if recs else None
+
+
+def _subsystem_state(rec: dict) -> dict:
+    """Derive per-subsystem availability from the newest record.
+
+    screen / light each carry {available, reason}. A subsystem that never
+    landed a sample reports available=False with a reason — the anti-silent-zero
+    property at the status layer, not just the record layer.
+    """
+    scr = rec.get("screen") or {}
+    lit = rec.get("light") or {}
+    return {
+        "screen": {"available": bool(scr.get("available")),
+                   "reason": scr.get("reason", "")},
+        "light": {"available": bool(lit.get("available")),
+                  "reason": lit.get("reason", "")},
+    }
+
+
+def cmd_status(args) -> int:
+    _ensure_store()
+    if DISABLED.exists():
+        print("DISABLED — kill switch is on (`cogload on` to resume)")
+        return 2
+    last = _last_record()
+    active = _unit_active()
+    if last is None:
+        print("NO DATA — collector has never written a record")
+        print(f"  unit active: {active}")
+        return 1
+    age = (_now() - datetime.fromisoformat(last["ts"])).total_seconds()
+    st = last["status"]
+    subs = _subsystem_state(last)
+    screen_ok = subs["screen"]["available"]
+    light_ok = subs["light"]["available"]
+    # Top-level OK requires the unit active, a fresh record, status=="ok",
+    # AND both capture subsystems available. A blind subsystem must NOT read
+    # as healthy — that was the live failure this check exists to catch.
+    # A channel this device DECLARES it cannot collect is not a broken channel.
+    # macOS has no X server, so screen/light legitimately report unavailable
+    # there; without this the Mac reads DEGRADED forever and the health line
+    # becomes noise you learn to ignore — the exact opposite of its purpose.
+    # A channel the device DOES claim and cannot deliver still degrades.
+    _ch = device().get("channels", {})
+    screen_ok = screen_ok or not _ch.get("screen", True)
+    light_ok = light_ok or not _ch.get("light", True)
+    ok = bool(active and age < STALE_SECONDS and st == "ok" and screen_ok and light_ok)
+
+    if args.json:
+        out = {
+            "ok": ok,
+            "unit_active": active,
+            "age_s": int(age),
+            "stale_at_s": STALE_SECONDS,
+            "last_status": st,
+            "session_type": last.get("session_type"),
+            "store": str(STORE),
+            "subsystems": {
+                "keys": {"available": True, "reason": ""},
+                "screen": subs["screen"],
+                "light": subs["light"],
+            },
+        }
+        print(json.dumps(out, indent=2, sort_keys=True))
+        return 0 if ok else 1
+
+    if args.gate:
+        return 0 if ok else 1
+
+    print(f"{'OK' if ok else 'DEGRADED'}")
+    print(f"  unit active   : {active}")
+    print(f"  last record   : {int(age)}s ago  (stale at {STALE_SECONDS}s)")
+    print(f"  last status   : {st}")
+    print(f"  session_type  : {last['session_type']}")
+    # Name the blind subsystem by name + state, so a dead path is visible in
+    # the human-readable output, not just the exit code.
+    for name, s in subs.items():
+        if s["available"]:
+            print(f"  {name:<13}: ok")
+        else:
+            state = ("down" if "down" in (s["reason"] or "")
+                     else "blind" if "no-sample" in (s["reason"] or "")
+                     else "degraded")
+            print(f"  {name:<13}: {state} — {s['reason']}")
+    print(f"  store         : {STORE}")
+    return 0 if ok else 1
+
+
+def cmd_show(args) -> int:
+    _ensure_store()
+    print("cogload — exactly what is recorded\n")
+    print("Per-window fields (whitelist enforced at write time):")
+    print(f"  {sorted(RECORD_FIELDS)}\n")
+    print(f"Key classes (identity dropped at classify(), never stored):")
+    print(f"  {list(KEY_CLASSES)}\n")
+    print("NOT recorded: key identity, typed text, window titles, screen pixels,")
+    print("clipboard, URLs, file contents, message contents.\n")
+    recs = _read_records(days=1) if args.today else _read_records(days=2)
+    n = args.n
+    print(f"Last {min(n, len(recs))} raw records verbatim ({len(recs)} today/yesterday):")
+    for r in recs[-n:]:
+        print("  " + json.dumps(r, sort_keys=True))
+    if not recs:
+        print("  (none yet)")
+    return 0
+
+
+def cmd_on(args) -> int:
+    _ensure_store()
+    if DISABLED.exists():
+        DISABLED.unlink()
+    if _is_mac():
+        plist = Path.home() / "Library/LaunchAgents" / f"{MAC_AGENT}.plist"
+        if not plist.exists():
+            print(f"missing {plist} — run the Mac setup first", file=sys.stderr)
+            return 1
+        _launchctl("bootstrap", f"gui/{os.getuid()}", str(plist))
+        _launchctl("kickstart", "-k", f"gui/{os.getuid()}/{MAC_AGENT}")
+    else:
+        subprocess.run(["systemctl", "--user", "enable", "--now", "cogload-keys"], check=False)
+    print("cogload ON")
+    return 0
+
+
+def _signal_daemon(sig) -> bool:
+    """Signal OUR daemon, or nobody. Returns True iff a signal was delivered.
+
+    The pidfile outlives the process that wrote it (crash, kill -9, reboot), so
+    a bare `os.kill(int(pidfile))` eventually signals whatever unrelated process
+    the OS recycled that PID onto — and SIGUSR1's default disposition is
+    TERMINATE. Worse, killing the wrong process raises no error, so a plain
+    `except OSError` swallows it silently. Verify identity via /proc before
+    signalling anything, and treat an unverifiable pid as absent.
+    """
+    try:
+        pid = int(PIDFILE.read_text().strip())
+    except (OSError, ValueError):
+        return False
+    if pid <= 1 or pid == os.getpid():
+        return False
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(
+            "utf-8", "replace")
+    except OSError:
+        PIDFILE.unlink(missing_ok=True)      # dead pid: clear the stale file
+        return False
+    if "cogload" not in cmdline:
+        # PID recycled onto something else. Do NOT signal it.
+        PIDFILE.unlink(missing_ok=True)
+        return False
+    try:
+        os.kill(pid, sig)
+        return True
+    except OSError:
+        return False
+
+
+def cmd_off(args) -> int:
+    _ensure_store()
+    DISABLED.write_text(f"disabled at {_now().isoformat()}\n", encoding="utf-8")
+    # Order matters: let the running daemon observe the sentinel and write its
+    # final `disabled` record BEFORE the unit is torn down. Stopping first
+    # would leave the log ending on an ordinary record, making a deliberate
+    # kill-switch indistinguishable from a crash.
+    if _signal_daemon(signal.SIGUSR1):
+        time.sleep(0.5)
+    else:
+        time.sleep(SAMPLE_SECONDS + 0.5)
+    if _is_mac():
+        _launchctl("bootout", f"gui/{os.getuid()}/{MAC_AGENT}")
+    else:
+        subprocess.run(["systemctl", "--user", "disable", "--now", "cogload-keys"], check=False)
+    print("cogload OFF — sentinel set, final record flushed, unit stopped")
+    return 0
+
+
+def cmd_mark(args) -> int:
+    """Ground-truth label. Passive signal is uncalibrated without these."""
+    _ensure_store()
+    # `day` is the LOCAL calendar day and is authoritative for joins.
+    # `ts` alone is not enough: it is UTC, digest rows are keyed by local date,
+    # and the evening ask fires at 21:15 local — which is already the NEXT day in
+    # UTC. Truncating the UTC timestamp would file every evening label against
+    # the following day's behaviour, silently inverting the association the
+    # whole calibration effort exists to measure. Stamp the local day at capture
+    # time; never re-derive it downstream from a timezone-naive prefix.
+    now = _now()
+    local = now.astimezone()
+    today = local.strftime("%Y-%m-%d")
+    # A day now has TWO measurement moments, not one. the psychologist's design asks for
+    # anxiety at the start AND end of the day; a one-label-per-DAY guard would
+    # refuse the evening reading outright, silently discarding half the
+    # instrument. Uniqueness is therefore per (day, slot).
+    slot = getattr(args, "slot", None) or ("morning" if local.hour < 12 else "evening")
+    if all(getattr(args, k, None) is None
+           for k in ("stress", "eff", "tol", "anx", "anx_day")):
+        print("refusing: a label needs at least one measure "
+              "(--stress / --eff / --tol / --anx / --anx-day).", file=sys.stderr)
+        return 3
+    if getattr(args, "anx_day", None) is not None and slot != "evening":
+        print("refusing: --anx-day is a whole-day recall; it belongs to the "
+              "evening slot only.", file=sys.stderr)
+        return 3
+
+    # ONE label per local day, unless deliberately overridden. Without this the
+    # store silently accumulates several labels for one day and every reader has
+    # to invent its own reconciliation — which is exactly how a "median of
+    # today's labels" would quietly average away a correction. The store stays
+    # append-only for audit; readers take the LATEST ts per day as authoritative
+    # (last-writer-wins), so a wrong label is fully correctable with --force
+    # rather than permanently baked in.
+    rec = {
+        "ts": now.isoformat(),
+        "day": local.strftime("%Y-%m-%d"),
+        "tz": local.strftime("%z"),
+        "stress": args.stress,
+        "eff": args.eff,
+        "tol": getattr(args, "tol", None),
+        "anx": getattr(args, "anx", None),
+        "anx_day": getattr(args, "anx_day", None),
+        "slot": slot,
+        "note": (args.note or "")[:280],
+        "src": args.src,
+    }
+    # Check-then-append under ONE cross-process lock. There are two live
+    # writers — the dashboard POST and the Telegram MCP handler — so an
+    # unlocked check/append lets both pass the guard and land two labels for
+    # the same day. The lock, not the check, is what makes "one per day" true.
+    import fcntl
+    LOCK = STORE / "labels.lock"
+    with LOCK.open("a+") as lk:
+        fcntl.flock(lk.fileno(), fcntl.LOCK_EX)
+        try:
+            if not getattr(args, "force", False) and LABELS.exists():
+                for line in LABELS.read_text(encoding="utf-8").splitlines():
+                    try:
+                        prev = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if prev.get("day") == today and (prev.get("slot") or "evening") == slot:
+                        print(f"refusing: {today} already has a {slot} label "
+                              f"(stress={prev.get('stress')}, anx={prev.get('anx')}). "
+                              "Use --force to correct it.", file=sys.stderr)
+                        return 3
+            with LABELS.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec, separators=(",", ":"), sort_keys=True) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+        finally:
+            fcntl.flock(lk.fileno(), fcntl.LOCK_UN)
+    try:
+        LABELS.chmod(0o600)
+    except OSError:
+        pass
+    bits = [f"slot={slot}"]
+    for k in ("stress", "eff", "tol", "anx", "anx_day"):
+        v = rec.get(k)
+        if v is not None:
+            bits.append(f"{k}={v}")
+    print("marked " + " ".join(bits))
+    return 0
+
+
+def cmd_wipe(args) -> int:
+    if not args.confirm:
+        print("refusing: `cogload wipe` deletes all collected data. Pass --confirm.",
+              file=sys.stderr)
+        return 3
+    import shutil
+    for d in (KEYS_DIR, AGENT_DIR):
+        if d.exists():
+            shutil.rmtree(d)
+    if LABELS.exists():
+        LABELS.unlink()
+    print("wiped keys/, agent/, labels.jsonl (transcript mirror left intact)")
+    return 0
+
+
+DIGEST_DIR = STORE / "digest"
+
+
+def _digest_day(cg_recs: list[dict], day: str) -> dict:
+    """Fold a day of per-minute rows into one durable row.
+
+    This is what makes pruning safe: the analytically relevant content survives
+    at ~1/1000 the size, so `rotate` can delete raw minutes without deleting
+    the record. It is also *better* than keeping everything — filtering a
+    continuous activity stream raised key-information recall from 0.38 to 0.61
+    in FOCAL (arXiv:2604.19541); an undifferentiated pile of frames buries the
+    signal it contains.
+    """
+    ok = [r for r in cg_recs if r.get("status") == "ok"]
+    degraded = [r for r in cg_recs if str(r.get("status", "")).startswith("degraded")]
+    active = [r for r in ok if r.get("total", 0) >= ACTIVE_MIN_KEYS]
+    act_tot = sum(r["total"] for r in active)
+    bs = sum(r["keys"]["backspace"] + r["keys"]["delete"] for r in active)
+
+    # Per-subsystem coverage: a window counts toward screen_ok / light_ok only
+    # if that subsystem actually landed a sample (available=True), not merely
+    # if the row's top-level status was "ok". This is the digest-layer echo of
+    # the anti-silent-zero property — a blind subsystem must not read as calm.
+    windows_screen_ok = sum(
+        1 for r in ok if (r.get("screen") or {}).get("available") is True)
+    windows_light_ok = sum(
+        1 for r in ok if (r.get("light") or {}).get("available") is True)
+
+    # Expectation comes from the day's OWN rows, not from today's device.json.
+    # See _row_channel_expectation: keying this off the current declaration let
+    # a redeclaration retroactively forgive a day that was genuinely blind.
+    _exp_screen, _exp_light = _row_channel_expectation(cg_recs)
+
+    # Continuity: expected_slots is INCLUSIVE. 60 consecutive minute rows span
+    # 59 minutes, so a naive (span - count) gives -1. gap_minutes is floored at
+    # 0 so it can NEVER be negative — a negative gap is an off-by-one, not a
+    # real signal.
+    expected_slots = 0
+    gap_minutes = 0
+    day_expected_slots = 0
+    covered_minutes = 0
+    day_gap_minutes = 0
+    edge_gap_minutes = 0
+    if cg_recs:
+        ts = [datetime.fromisoformat(r["ts"]) for r in cg_recs if r.get("ts")]
+        if ts:
+            first_ts = min(ts)
+            last_ts = max(ts)
+            # Divide by 60 ONCE: seconds -> minutes. The previous code divided
+            # again (// 60) turning minutes into hours, so a full 1440-row day
+            # read expected_slots=24 and gap_minutes was permanently 0 — every
+            # day with real outages read as complete. 60 consecutive minute
+            # rows span 59 minutes -> expected_slots = 59 + 1 = 60.
+            expected_slots = int((last_ts - first_ts).total_seconds() // 60) + 1
+            gap_minutes = max(0, expected_slots - len(cg_recs))
+
+            # INTERIOR gaps only — that is the limit of the measure above, and
+            # on its own it is a silent zero: anchoring the window to the
+            # surviving rows means a daemon that was dead 00:00-12:00 has
+            # first_ts=12:00, so expected_slots == len(recs) and a HALF-BLIND
+            # day reports PERFECT continuity. Leading and trailing outages are
+            # exactly the ones a crash or a late start produces, so they are the
+            # ones that matter most. Anchor a second measure to the DAY.
+            local_first = first_ts.astimezone()
+            day_start = local_first.replace(hour=0, minute=0, second=0, microsecond=0)
+            now_local = datetime.now().astimezone()
+            day_end = day_start + timedelta(days=1)
+            # For today, the day is only elapsed up to now — otherwise every
+            # partial day would read as a massive outage.
+            horizon = min(day_end, now_local)
+            elapsed = max(1, int((horizon - day_start).total_seconds() // 60))
+            covered_from = int((local_first - day_start).total_seconds() // 60)
+            covered_to = int((horizon - last_ts.astimezone()).total_seconds() // 60)
+            # Count DISTINCT minutes covered, not rows. A daemon restart can
+            # write more than one row inside the same minute, and using the raw
+            # row count produced day_coverage_pct = 1.0285 on real data — a
+            # coverage above 100% is arithmetic nonsense, and nonsense on a
+            # health surface teaches you to distrust the instrument.
+            covered_minutes = len({t.astimezone().strftime("%Y-%m-%dT%H:%M")
+                                   for t in ts})
+            day_expected_slots = elapsed
+            day_gap_minutes = max(0, elapsed - covered_minutes)
+            edge_gap_minutes = max(0, covered_from) + max(0, covered_to)
+
+    def mean_of(path, rows):
+        vals = []
+        for r in rows:
+            v = r
+            for k in path:
+                v = (v or {}).get(k) if isinstance(v, dict) else None
+            if isinstance(v, (int, float)):
+                vals.append(v)
+        return round(statistics.fmean(vals), 2) if vals else None
+
+    p50s = [r["iki"]["p50_ms"] for r in active
+            if isinstance(r.get("iki"), dict) and r["iki"].get("p50_ms")]
+    agents = [r["agents"] for r in ok if isinstance(r.get("agents"), (int, float))]
+    night = [r for r in ok
+             if datetime.fromisoformat(r["ts"]).astimezone().hour >= 23
+             or datetime.fromisoformat(r["ts"]).astimezone().hour < 7]
+
+    hosts = {r.get("host") for r in cg_recs if r.get("host")}
+    if len(hosts) > 1:
+        # Digestion is per-device by construction. Folding two machines' minutes
+        # into one day row is precisely the fusion this schema exists to stop.
+        raise ValueError(f"refusing to digest rows from {len(hosts)} hosts: {sorted(hosts)}")
+    return {
+        "day": day,
+        "host": (hosts.pop() if hosts else device_id()),
+        # What this DEVICE claims it can collect. Without these, a Mac row —
+        # which legitimately has windows_screen_ok=0 because macOS has no
+        # X server — fails day_valid forever, and person_days silently drops
+        # the Mac's entire contribution. A channel a device never claimed is
+        # not a broken channel.
+        "screen_expected": _exp_screen,
+        "light_expected": _exp_light,
+        "v": SCHEMA_VERSION,
+        # Coverage first: every downstream number is meaningless without it,
+        # and a day that was 80% blind must never read as a calm day.
+        "windows": len(cg_recs),
+        "windows_ok": len(ok),
+        "windows_degraded": len(degraded),
+        "windows_screen_ok": windows_screen_ok,
+        "windows_light_ok": windows_light_ok,
+        "active_minutes": len(active),
+        "keys_total": sum(r["total"] for r in ok),
+        "keys_enter": sum(r["keys"]["enter"] for r in ok),
+        # Sums for honest weekly aggregation: a weekly backspace ratio must be
+        # sum(keys_bs_active)/sum(keys_active_total), NOT a mean of per-day
+        # ratios (mean-of-ratios is biased by low-activity days). Keeping the
+        # raw sums lets a weekly roll-up compute the correct ratio.
+        "keys_active_total": act_tot,
+        "keys_bs_active": bs,
+        "expected_slots": expected_slots,
+        "gap_minutes": gap_minutes,
+        # Day-anchored continuity. gap_minutes sees only INTERIOR holes; these
+        # see the leading/trailing outages a crash or a late start produces.
+        # day_coverage_pct is the number a health surface should show — it is
+        # the one that cannot report a half-blind day as complete.
+        "day_expected_slots": day_expected_slots,
+        "day_gap_minutes": day_gap_minutes,
+        "edge_gap_minutes": edge_gap_minutes,
+        "day_coverage_pct": (round(min(1.0, covered_minutes / day_expected_slots), 4)
+                             if day_expected_slots else None),
+        "covered_minutes": covered_minutes,
+        "backspace_ratio": round(bs / act_tot, 5) if act_tot else None,
+        "iki_p50_median_ms": round(statistics.median(p50s), 1) if p50s else None,
+        "pauses_2_10s": sum(r["iki"]["pause_2_10s"] for r in ok
+                            if isinstance(r.get("iki"), dict)),
+        "clicks": sum(r["mouse"]["click"] for r in ok),
+        "app_switches": sum((r.get("screen") or {}).get("switches") or 0 for r in ok),
+        "open_windows_mean": mean_of(("screen", "open_windows"), ok),
+        "focus_fragment_s_mean": mean_of(("screen", "focus_fragment_s"), ok),
+        "agents_mean": round(statistics.fmean(agents), 1) if agents else None,
+        "agents_peak": max(agents) if agents else None,
+        # Light exposure — the screenshot replacement, and the measure tied to
+        # the light/sound overstimulation thread that prompted it.
+        "light_mean": mean_of(("light", "mean"), ok),
+        "light_contrast": mean_of(("light", "contrast"), ok),
+        "light_churn": mean_of(("light", "churn"), ok),
+        "night_minutes": len(night),
+    }
+
+
+def cmd_digest(args) -> int:
+    _ensure_store()
+    DIGEST_DIR.mkdir(parents=True, exist_ok=True)
+    days: list[str] = []
+    if args.day:
+        days = [args.day]
+    else:
+        for month_dir in sorted(KEYS_DIR.glob("[0-9][0-9][0-9][0-9]-[0-9][0-9]")):
+            for p in sorted(month_dir.iterdir()):
+                n = p.name.replace("keys-", "").replace(".jsonl.gz", "").replace(".jsonl", "")
+                if len(n) == 10 and n not in days:
+                    days.append(n)
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    written = 0
+    for day in days:
+        recs = _read_records(day=day)
+        if not recs:
+            continue
+        row = _digest_day(recs, day)
+        # A day still in progress is written but flagged, so a partial day is
+        # never silently compared against complete ones.
+        row["partial"] = (day == today)
+        dest = DIGEST_DIR / f"{day[:7]}.jsonl"
+        existing = {}
+        if dest.exists():
+            for line in dest.read_text(encoding="utf-8").splitlines():
+                try:
+                    r = json.loads(line)
+                    existing[r["day"]] = r
+                except (json.JSONDecodeError, KeyError):
+                    pass
+        existing[day] = row
+        with dest.open("w", encoding="utf-8") as fh:
+            for d in sorted(existing):
+                fh.write(json.dumps(existing[d], sort_keys=True) + "\n")
+        try:
+            dest.chmod(0o600)
+        except OSError:
+            pass
+        written += 1
+
+    if args.json:
+        print(json.dumps([_digest_day(_read_records(day=d), d)
+                          for d in days if _read_records(day=d)], indent=2, sort_keys=True))
+    else:
+        print(f"digested {written} day(s) -> {DIGEST_DIR}")
+        for day in days[-args.tail:]:
+            dest = DIGEST_DIR / f"{day[:7]}.jsonl"
+            if not dest.exists():
+                continue
+            for line in dest.read_text(encoding="utf-8").splitlines():
+                r = json.loads(line)
+                if r["day"] != day:
+                    continue
+                cov = f"{r['windows_ok']}/{r['windows']}"
+                print(f"  {day}  cov {cov:>9}  active {r['active_minutes']:>4}m  "
+                      f"bs {str(r['backspace_ratio'] or '-'):>7}  "
+                      f"light {str(r['light_mean'] or '-'):>5}  "
+                      f"agents {str(r['agents_peak'] or '-'):>3}"
+                      + ("  [partial]" if r.get("partial") else ""))
+    return 0
+
+
+def cmd_rotate(args) -> int:
+    _ensure_store()
+    import gzip
+    import shutil
+    keep = int(os.environ.get("COGLOAD_KEEP_DAYS", DEFAULT_KEEP_DAYS))
+    cutoff = datetime.now().date() - timedelta(days=keep)
+    this_month = datetime.now().strftime("%Y-%m")
+    gz, pruned, skipped = 0, 0, 0
+    for month_dir in sorted(KEYS_DIR.glob("[0-9][0-9][0-9][0-9]-[0-9][0-9]")):
+        for p in sorted(month_dir.glob("keys-*.jsonl")):
+            try:
+                d = datetime.strptime(p.stem.replace("keys-", ""), "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if d < cutoff:
+                # Never prune a day that was never digested — that is the only
+                # thing that makes pruning lossless rather than amnesia.
+                dg = DIGEST_DIR / f"{d.strftime('%Y-%m')}.jsonl"
+                digested = dg.exists() and any(
+                    json.loads(l).get("day") == d.strftime("%Y-%m-%d")
+                    for l in dg.read_text(encoding="utf-8").splitlines() if l.strip())
+                if not digested:
+                    skipped += 1
+                    continue
+                p.unlink()
+                pruned += 1
+            elif month_dir.name != this_month:
+                with p.open("rb") as src, gzip.open(str(p) + ".gz", "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                p.unlink()
+                gz += 1
+    msg = f"rotated: {gz} gzipped, {pruned} pruned (keep={keep}d)"
+    if skipped:
+        msg += f", {skipped} KEPT — past keep-days but not digested (run `cogload digest`)"
+    print(msg)
+    return 0
+
+
+# -------------------------------------------------------------------- analysis
+
+
+def _iter_transcripts(since_days: int):
+    """Yield transcript events from the live dir AND the mirror.
+
+    The mirror matters: ~/.claude/projects is on a 30-day rolling cleanup, so
+    the mirror is the only copy of anything older.
+    """
+    cutoff = time.time() - since_days * 86400
+    seen: set[str] = set()
+    for root in (CLAUDE_PROJECTS, MIRROR):
+        if not root.exists():
+            continue
+        for p in root.rglob("*.jsonl"):
+            key = str(p.relative_to(root))
+            if key in seen:
+                continue
+            try:
+                if p.stat().st_mtime < cutoff:
+                    continue
+            except OSError:
+                continue
+            seen.add(key)
+            try:
+                with p.open(encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        try:
+                            yield json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+            except OSError:
+                continue
+
+
+def cmd_transcripts(args) -> int:
+    """Aggregate the agent-interaction corpus. Never emits prompt CONTENT."""
+    _ensure_store()
+    # The kill switch has to stop OBSERVING, not just stop the keystroke daemon.
+    # This verb reads ~/.claude/projects and persists a derived per-day record,
+    # so without this guard `cogload off && cogload transcripts` would keep
+    # ingesting the agent corpus while the user believes collection is off.
+    if DISABLED.exists():
+        print("cogload is OFF (kill switch set) — not reading transcripts")
+        return 0
+    days: dict[str, dict] = {}
+    for ev in _iter_transcripts(args.since):
+        ts = ev.get("timestamp")
+        if not ts:
+            continue
+        try:
+            when = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone()
+        except ValueError:
+            continue
+        day = when.strftime("%Y-%m-%d")
+        d = days.setdefault(day, {
+            "user_turns": 0, "assistant_turns": 0, "sidechain": 0,
+            "queue_ops": 0, "tool_results": 0, "night_events": 0,
+            "projects": set(), "sessions": set(), "hours": set(),
+            "prompt_chars": [],
+        })
+        t = ev.get("type")
+        if t == "user":
+            d["user_turns"] += 1
+        elif t == "assistant":
+            d["assistant_turns"] += 1
+        elif t == "queue-operation":
+            d["queue_ops"] += 1
+        if ev.get("isSidechain"):
+            d["sidechain"] += 1
+        if ev.get("toolUseResult") is not None:
+            d["tool_results"] += 1
+        if ev.get("cwd"):
+            d["projects"].add(ev["cwd"])
+        if ev.get("sessionId"):
+            d["sessions"].add(ev["sessionId"])
+        d["hours"].add(when.strftime("%Y-%m-%dT%H"))
+        if when.hour >= 23 or when.hour < 7:
+            d["night_events"] += 1
+        lp = ev.get("lastPrompt")
+        if isinstance(lp, str):
+            d["prompt_chars"].append(len(lp))  # LENGTH only, never the text
+
+    out = []
+    for day in sorted(days):
+        d = days[day]
+        out.append({
+            "day": day,
+            "user_turns": d["user_turns"],
+            "assistant_turns": d["assistant_turns"],
+            "projects": len(d["projects"]),      # <- the load variable L
+            "sessions": len(d["sessions"]),
+            "active_hours": len(d["hours"]),
+            "sidechain_events": d["sidechain"],
+            "queue_ops": d["queue_ops"],
+            "tool_results": d["tool_results"],
+            "night_events": d["night_events"],
+            "prompt_chars_mean": (
+                round(statistics.fmean(d["prompt_chars"])) if d["prompt_chars"] else None
+            ),
+        })
+    dest = AGENT_DIR / "daily.jsonl"
+    with dest.open("w", encoding="utf-8") as fh:
+        for row in out:
+            fh.write(json.dumps(row, sort_keys=True) + "\n")
+    if args.json:
+        print(json.dumps(out, indent=2, sort_keys=True))
+    else:
+        print(f"{'day':<12}{'proj':>5}{'sess':>6}{'turns':>7}{'queue':>7}{'night':>7}")
+        for row in out[-args.tail:]:
+            print(f"{row['day']:<12}{row['projects']:>5}{row['sessions']:>6}"
+                  f"{row['user_turns']:>7}{row['queue_ops']:>7}{row['night_events']:>7}")
+        print(f"\n{len(out)} days -> {dest}")
+    return 0
+
+
+def _labels_for(day: str) -> list[dict]:
+    if not LABELS.exists():
+        return []
+    out = []
+    for line in LABELS.read_text(encoding="utf-8").splitlines():
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if datetime.fromisoformat(r["ts"]).astimezone().strftime("%Y-%m-%d") == day:
+            out.append(r)
+    return out
+
+
+def cmd_report(args) -> int:
+    _ensure_store()
+    day = args.day or datetime.now().strftime("%Y-%m-%d")
+    recs = _read_records(day=day)
+    ok = [r for r in recs if r["status"] == "ok"]
+    degraded = [r for r in recs if r["status"].startswith("degraded")]
+    active = [r for r in ok if r["total"] >= ACTIVE_MIN_KEYS]
+
+    tot = sum(r["total"] for r in ok)
+    bs = sum(r["keys"]["backspace"] + r["keys"]["delete"] for r in active)
+    act_tot = sum(r["total"] for r in active)
+    enters = sum(r["keys"]["enter"] for r in ok)
+    clicks = sum(r["mouse"]["click"] for r in ok)
+    switches = sum((r["screen"] or {}).get("switches") or 0 for r in ok)
+    p50s = [r["iki"]["p50_ms"] for r in active if r["iki"]["p50_ms"]]
+    pauses = sum(r["iki"]["pause_2_10s"] for r in ok)
+    agents = [r["agents"] for r in ok if r.get("agents") is not None]
+    wins = [(r["screen"] or {}).get("open_windows") for r in ok]
+    wins = [w for w in wins if w is not None]
+
+    print(f"cogload report — {day}\n" + "=" * 46)
+    print(f"coverage        {len(recs)} windows recorded, {len(degraded)} degraded")
+    if not recs:
+        print("\nNO DATA for this day. If the collector should have been running,")
+        print("that is a fault, not calm — check `cogload status`.")
+        return 1
+    print(f"active minutes  {len(active)}  (>= {ACTIVE_MIN_KEYS} keys/min)")
+    print(f"keystrokes      {tot}   enter={enters}   clicks={clicks}")
+    print("\n-- stress proxies (Vizer 2009 / Lau CMU-ML-18-104) --")
+    if act_tot:
+        print(f"backspace_ratio {bs/act_tot:.4f}   ({bs}/{act_tot} over active minutes)")
+    else:
+        print("backspace_ratio n/a (no active typing minutes)")
+    print(f"iki p50 median  {statistics.median(p50s):.0f} ms" if p50s else "iki p50 median  n/a")
+    print(f"pauses 2-10s    {pauses}")
+    print("\n-- attentional load (Mark et al.: switching correlates with HRV stress) --")
+    print(f"app switches    {switches}")
+    print(f"open windows    {statistics.fmean(wins):.1f} mean" if wins else "open windows    n/a")
+    print(f"agent sessions  {statistics.fmean(agents):.1f} mean, {max(agents)} peak" if agents else "agent sessions  n/a")
+
+    agg = AGENT_DIR / "daily.jsonl"
+    if agg.exists():
+        for line in agg.read_text(encoding="utf-8").splitlines():
+            row = json.loads(line)
+            if row["day"] == day:
+                print("\n-- agent orchestration (the load variable L) --")
+                print(f"projects touched {row['projects']}   sessions {row['sessions']}")
+                print(f"user turns       {row['user_turns']}   queued-while-busy {row['queue_ops']}")
+                print(f"night events     {row['night_events']} (23:00-07:00)")
+                break
+
+    labels = _labels_for(day)
+    print("\n-- ground truth --")
+    if labels:
+        for l in labels:
+            t = datetime.fromisoformat(l["ts"]).astimezone().strftime("%H:%M")
+            # Print what the reading ACTUALLY carries. Hardcoding stress/eff
+            # rendered a morning check-in (anxiety + estrés, no efectividad) as
+            # "stress=None eff=None" — a real reading shown as a missing one.
+            bits = " ".join(f"{k}={l[k]}" for k in
+                            ("anx", "anx_day", "stress", "eff", "tol")
+                            if l.get(k) is not None)
+            slot = l.get("slot") or "evening"
+            print(f"  {t}  [{slot}] {bits} {l.get('note') or ''}".rstrip())
+    else:
+        print("  no labels — passive signal stays uncalibrated without them")
+    return 0
+
+
+# ==========================================================================
+# COGNITIVE PROCESSING LAYER — the interpretation tier.
+#
+# Origin: the 2026-08-11 conversation with a psychologist and two other
+# collaborators. The operator's framing was a "coworker digital" giving
+# support "sostenible y empatico al estado interno de la persona".
+#
+# THE DESIGN PROBLEM, stated plainly: this is the layer where over-claiming
+# creeps back in. Every other tier refuses structurally — `curve` refuses
+# below threshold, the dashboard computes counts not correlations, the UI
+# draws no trend line. A language model narrating internal state from thin,
+# uncalibrated data would undo all of it in one sentence, and it would be
+# PERSUASIVE while doing so, which is worse than a wrong number: prose
+# invites belief.
+#
+# So there is NO MODEL ANYWHERE IN THIS PATH. Every sentence the system can
+# utter is a fixed template in a closed catalog whose slots accept ONLY
+# numbers and dates. Over-claiming is therefore a TYPE ERROR, not an act of
+# disobedience — you cannot instruct your way past it, and no prompt needs
+# to be trusted.
+#
+# An "LLM narrates from a fact sheet" design was considered and rejected:
+# validating prose can only blacklist vocabulary, and a model can over-claim
+# with no numbers at all ("pareces estresado").
+# ==========================================================================
+
+CLAIM_TIERS = ("T0", "T1", "T2", "T3", "T4")
+
+# Words that assert an internal state. A template whose evidence is merely
+# instrumental or self-reported may never contain one — enforced by contract,
+# not by review.
+CONSTRUCT_LEXICON = (
+    "estrés", "estres", "fatiga", "burnout", "ansiedad", "agotamiento",
+    "ánimo", "animo", "depres", "diagn", "salud mental", "bienestar",
+)
+
+
+def _t(tier: str, scopes: tuple, template: str, params: dict,
+       construct_source: str = "none") -> dict:
+    return {"tier": tier, "scopes": scopes, "template_es": template,
+            "params": params, "construct_source": construct_source}
+
+
+# The closed catalog. Adding a sentence means adding an entry here; there is
+# no other way to make this system say anything.
+CLAIM_CATALOG = {
+    # ---- T0: instrument health. Always available, says nothing about the operator.
+    "capture.coverage": _t(
+        "T0", ("day", "week", "month"),
+        "[dato] Captura {coverage_pct}% del día ({covered_minutes} min de {expected_minutes}).",
+        {"coverage_pct": float, "covered_minutes": int, "expected_minutes": int}),
+    "capture.blind": _t(
+        "T0", ("day", "week", "month"),
+        "[instrumento] Día no válido para comparar: captura parcial ({coverage_pct}%).",
+        {"coverage_pct": float}),
+    "capture.nodata": _t(
+        "T0", ("day", "week", "month"),
+        "[instrumento] Sin datos este día — no es un día tranquilo, es un día no medido.",
+        {}),
+
+    # ---- T1: description of a single valid day. Counts only, no comparison.
+    "day.activity": _t(
+        "T1", ("day",),
+        "[dato] {active_minutes} min activos, {keys_total} pulsaciones, {enter_count} Enter.",
+        {"active_minutes": int, "keys_total": int, "enter_count": int}),
+    "day.switching": _t(
+        "T1", ("day",),
+        "[dato] {switches} cambios de aplicación; foco medio {focus_s}s.",
+        {"switches": int, "focus_s": float}),
+    "day.light": _t(
+        "T1", ("day",),
+        "[dato] Luz media {light_mean}/255, contraste {light_contrast}.",
+        {"light_mean": float, "light_contrast": float}),
+    # the psychologist asked for decision-fatigue. We can count EVENTS, and that is all
+    # we may say: the construct needs a decision inventory and characterised
+    # key auto-repeat, neither of which exists. Note construct_source=none.
+    "day.events": _t(
+        "T1", ("day",),
+        "[dato] {enter_count} Enter y {agent_turns} turnos de agente (eventos, no decisiones).",
+        {"enter_count": int, "agent_turns": int}),
+
+    # ---- T2: within-person comparison against the person's own history.
+    "cmp.backspace": _t(
+        "T2", ("day", "week", "month"),
+        "[comparativa] Corrección {bs_pct}% vs tu mediana {median_pct}% ({n_days} días válidos).",
+        {"bs_pct": float, "median_pct": float, "n_days": int}),
+    "cmp.switching": _t(
+        "T2", ("day", "week", "month"),
+        "[comparativa] {switches_h}/h de cambio vs tu mediana {median_h}/h ({n_days} días).",
+        {"switches_h": float, "median_h": float, "n_days": int}),
+    "cmp.light": _t(
+        "T2", ("day", "week", "month"),
+        "[comparativa] Luz {light_mean} vs tu mediana {median_light} ({n_days} días).",
+        {"light_mean": float, "median_light": float, "n_days": int}),
+
+    # ---- T3: association with SELF-REPORTED labels. Never causal, always N=1,
+    #          always with both group sizes shown.
+    "assoc.metric_label": _t(
+        "T3", ("week", "month"),
+        "[asociación N=1] Con {dim} alto (n={n_hi}) la mediana de {metric} fue {med_hi}; "
+        "con {dim} bajo (n={n_lo}) fue {med_lo}. Asociación, no causa.",
+        {"n_hi": int, "n_lo": int, "med_hi": float, "med_lo": float},
+        construct_source="calibrated"),
+
+    # ---- T4: prospective prediction, only after the ledger earns it.
+    "predict.rule": _t(
+        "T4", ("week", "month"),
+        "[predictivo] La regla {rule} acertó {acc_pct}% en {n} días posteriores "
+        "(base {base_pct}%, p={p_value}).",
+        {"acc_pct": float, "n": int, "base_pct": float, "p_value": float},
+        construct_source="calibrated"),
+
+    # ---- Refusals. A locked tier still SAYS something: what is missing.
+    "refuse.t2": _t(
+        "T2", ("day", "week", "month"),
+        "[instrumento] Comparativas bloqueadas: {have}/{need} días válidos.",
+        {"have": int, "need": int}),
+    "refuse.t3": _t(
+        "T3", ("day", "week", "month"),
+        "[instrumento] Asociaciones de {dim} bloqueadas: {pairs}/{need} días con dato y etiqueta.",
+        {"pairs": int, "need": int}),
+    "refuse.t4": _t(
+        "T4", ("day", "week", "month"),
+        "[instrumento] Predicción bloqueada: {rule} lleva {scored}/{need} días evaluados.",
+        {"scored": int, "need": int}),
+}
+
+
+class ClaimError(ValueError):
+    """A claim could not be rendered. Always a programming error, never data."""
+
+
+def render_claim(claim_id: str, scope: str, **params) -> str:
+    """Render one catalog claim. This is the ONLY way to produce a sentence.
+
+    Refuses: unknown ids, claims outside their declared scope, missing params,
+    and — critically — any param that is not a number or a date. There is no
+    free-text slot in this system, so no model output and no label note can
+    ever reach an outbound surface through here.
+    """
+    spec = CLAIM_CATALOG.get(claim_id)
+    if spec is None:
+        raise ClaimError(f"unknown claim id: {claim_id!r}")
+    if scope not in spec["scopes"]:
+        raise ClaimError(f"claim {claim_id!r} is not permitted in scope {scope!r}")
+    allowed = set(spec["params"]) | {"dim", "metric", "rule"}
+    extra = set(params) - allowed
+    if extra:
+        raise ClaimError(f"claim {claim_id!r} got unexpected params: {sorted(extra)}")
+    for name, want in spec["params"].items():
+        if name not in params:
+            raise ClaimError(f"claim {claim_id!r} missing param {name!r}")
+        v = params[name]
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ClaimError(
+                f"claim {claim_id!r} param {name!r} must be numeric, got {type(v).__name__}")
+    # dim/metric/rule are enum-like identifiers, not free text: they must match
+    # a short safe pattern so nothing arbitrary can be injected through them.
+    for k in ("dim", "metric", "rule"):
+        if k in params:
+            s = str(params[k])
+            if not s or len(s) > 32 or not all(c.isalnum() or c in "-_." for c in s):
+                raise ClaimError(f"claim {claim_id!r} param {k!r} is not a safe identifier")
+    return spec["template_es"].format(**params)
+
+
+# ---------------------------------------------------------------- evidence
+
+MIN_PAIRS_T3 = 14        # days with BOTH a valid digest row and the label dim
+MIN_GROUP_T3 = 5         # each comparison group
+MIN_SCORED_T4 = 28       # days scored prospectively
+MIN_CLASS_T4 = 5         # observations in EACH outcome class
+ALPHA_T4 = 0.05          # one-sided
+
+
+def _binom_tail(k: int, n: int, p: float) -> float:
+    """P(X >= k) for X ~ Binomial(n, p). Exact, stdlib only.
+
+    This replaces an 'accuracy >= base_rate + 0.10' rule that would have
+    CERTIFIED NOISE: at n=28 against a balanced base rate, 17 correct is 60.7%
+    and clears +0.10, yet P(X>=17) = 0.172 for a fair coin — roughly a 1-in-6
+    chance of blessing a coin flip as "predictive". The gate built to prevent
+    over-claiming was itself over-claiming.
+    """
+    if n <= 0:
+        return 1.0
+    k = max(0, min(k, n))
+    total = 0.0
+    for i in range(k, n + 1):
+        total += math.comb(n, i) * (p ** i) * ((1.0 - p) ** (n - i))
+    return min(1.0, max(0.0, total))
+
+
+def ledger_verdict(correct: int, n: int, base_rate: float,
+                   class_counts: tuple) -> dict:
+    """Grade a rule. Returns verdict in {insufficient, not-better, better}.
+
+    `better` requires ALL of: enough scored days, enough observations in BOTH
+    outcome classes (so a rule cannot win by always predicting the majority on
+    a lopsided sample), and an exact one-sided binomial test against the
+    observed base rate.
+    """
+    lo, hi = (min(class_counts), max(class_counts)) if class_counts else (0, 0)
+    acc = (correct / n) if n else 0.0
+    p = _binom_tail(correct, n, base_rate) if n else 1.0
+    if n < MIN_SCORED_T4 or lo < MIN_CLASS_T4:
+        verdict = "insufficient"
+    elif p < ALPHA_T4 and acc > base_rate:
+        verdict = "better"
+    else:
+        verdict = "not-better"
+    return {"verdict": verdict, "n": n, "correct": correct,
+            "accuracy": round(acc, 4), "base_rate": round(base_rate, 4),
+            "p_value": round(p, 4), "class_min": lo, "class_max": hi}
+
+
+# Preregistered rules. `since` is structural preregistration: the ledger scores
+# a rule ONLY on days strictly after it shipped, so a rule can never be graded
+# on the data that inspired it. Thresholds are RELATIVE to the operator's own
+# trailing median — no personal absolute numbers live in this repo.
+RULES = [
+    {"id": "bs-stress-v1", "since": "2026-08-12", "dim": "stress",
+     "doc": "backspace_ratio above own trailing-30 median AND >=30 active min -> stress >= 4"},
+    {"id": "switch-stress-v1", "since": "2026-08-12", "dim": "stress",
+     "doc": "switches/captured-hour above own trailing median -> stress >= 4"},
+    {"id": "light-tol-v1", "since": "2026-08-12", "dim": "tol",
+     "doc": "light_mean above own trailing median -> tolerancia <= 2 (the sensory-tolerance question)"},
+]
+
+
+MIN_DAYS_CURVE = 14
+MIN_LOAD_LEVELS = 3
+
+
+def _digest_rows(day: str | None = None) -> list[dict]:
+    """All digest day rows, optionally one day. Sorted by day."""
+    out = []
+    if not DIGEST_DIR.exists():
+        return out
+    for p in sorted(DIGEST_DIR.glob("*.jsonl")):
+        for line in p.read_text(encoding="utf-8").splitlines():
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if day is None or r.get("day") == day:
+                out.append(r)
+    return sorted(out, key=lambda r: r.get("day") or "")
+
+
+def day_valid(row: dict) -> tuple:
+    """Is this day comparable? ONE definition, shared by every consumer.
+
+    There were three incompatible answers to "which day counts": capture_health
+    in the dashboard, cmd_curve's raw-record scan, and the readiness counter.
+    Three definitions means the tier that gates a claim and the tier that
+    reports readiness can disagree, and a comparative can render off a blind
+    day. This is the single source; the contract pins it against the dashboard.
+    """
+    if not isinstance(row, dict):
+        return False, "sin datos"
+    w = row.get("windows") or 0
+    wok = row.get("windows_ok") or 0
+    if w == 0:
+        return False, "sin datos"
+    if w < 60:
+        return False, "pocas ventanas (<60)"
+    if wok / w < 0.9:
+        return False, "captura baja (<90%)"
+    for key, label, flag in (("windows_screen_ok", "pantalla", "screen_expected"),
+                             ("windows_light_ok", "luz", "light_expected")):
+        # Absent flag => legacy Linux row => strict (unchanged behaviour).
+        if row.get(flag) is False:
+            continue
+        v = row.get(key)
+        if v is None or not wok or v / wok < 0.8:
+            return False, f"captura de {label} baja (<80%)"
+    if row.get("partial"):
+        return False, "día parcial"
+    gap = row.get("gap_minutes")
+    if gap is None:
+        return False, "continuidad no medida"
+    if gap > 120:
+        return False, "huecos grandes (>120 min)"
+    return True, ""
+
+
+def _labels_by_day() -> dict:
+    """label rows keyed by their LOCAL day (see cmd_mark: `day` is authoritative)."""
+    out = {}
+    if not LABELS.exists():
+        return out
+    for line in LABELS.read_text(encoding="utf-8").splitlines():
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        d = r.get("day")
+        if not d and isinstance(r.get("ts"), str):
+            try:
+                d = datetime.fromisoformat(
+                    r["ts"].replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d")
+            except ValueError:
+                d = None
+        if d:
+            out.setdefault(d, []).append(r)
+    return out
+
+
+# A measure taken at two moments is TWO series. The check-in rides the two
+# prompts the operator already answers — the 07:15 morning reflection and the 18:45
+# evening one — so `anx` and `stress` arrive twice a day, from two different
+# moments. Treating them as one dimension is not a rounding error: with a low
+# morning and a high evening reading, last-writer-wins reported n_hi=14, n_lo=0
+# over 14 days — every morning answer collected, stored, and then discarded,
+# and the series permanently locked because one comparison group was empty.
+# `anx_day` and `eff` are whole-day judgements and exist only in the evening;
+# `tol` is not asked by either prompt yet, so it carries no slot.
+LABEL_SERIES = (
+    ("anx", "morning"), ("anx", "evening"),
+    ("stress", "morning"), ("stress", "evening"),
+    ("anx_day", "evening"), ("eff", "evening"), ("tol", None),
+)
+
+
+def series_id(dim: str, slot: str | None) -> str:
+    """Stable name for one (dimension, moment) series — a safe identifier, so
+    a refusal can say WHICH reading is missing without a free-text slot."""
+    return f"{dim}_{slot}" if slot else dim
+
+
+def t3_eligibility(dim: str, slot: str | None = None) -> dict:
+    """Per-SERIES T3 gate — (dimension, moment). NOT one global flag.
+
+    `eff` and `tol` are optional on a label, so 14 stress labels could
+    otherwise unlock a TOLERANCE association backed by zero tolerance
+    observations. Eligibility is counted per label dimension, over days that
+    have BOTH a valid digest row and that specific dimension present — and,
+    when a slot is given, only over readings taken AT that moment.
+    """
+    rows = {r["day"]: r for r in _digest_rows() if r.get("day")}
+    labs = _labels_by_day()
+    pairs, hi, lo = 0, 0, 0
+    for day, lrs in labs.items():
+        row = rows.get(day)
+        if row is None or not day_valid(row)[0]:
+            continue
+        # LAST WRITER WINS *WITHIN A SLOT*: take the newest row that carries
+        # this dimension at this moment, not a median across the day's rows. A
+        # median would blend a correction back together with the mistake it was
+        # correcting — and, across slots, would blend two different moments.
+        # Rows predating the slot field are evening readings (see cmd_mark).
+        withdim = [l for l in lrs if isinstance(l.get(dim), int)
+                   and (slot is None or (l.get("slot") or "evening") == slot)]
+        if not withdim:
+            continue
+        pairs += 1
+        v = max(withdim, key=lambda l: l.get("ts") or "")[dim]
+        if v >= 4:
+            hi += 1
+        elif v <= 2:
+            lo += 1
+    return {"dim": dim, "slot": slot, "series": series_id(dim, slot),
+            "pairs": pairs, "need": MIN_PAIRS_T3,
+            "n_hi": hi, "n_lo": lo, "need_group": MIN_GROUP_T3,
+            "unlocked": pairs >= MIN_PAIRS_T3 and hi >= MIN_GROUP_T3 and lo >= MIN_GROUP_T3}
+
+
+# ---------------------------------------------------------------- fleet identity
+
+DEVICE_FILE = STORE / "device.json"
+
+
+def device() -> dict:
+    """This store's frozen identity. Created once, never rewritten.
+
+    Every record carries `host`. Without it, two machines' rows are
+    indistinguishable and merge into one phantom person: event counts fuse
+    (two keyboards, one total) and any gate that counts ROWS instead of
+    person-DAYS unlocks at half the real evidence. Measured: 7 real days across
+    2 devices reported as 14.
+
+    The id is slug+uuid, frozen at creation: a hostname change must not fork a
+    device's history, and two stores created under the same hostname must not
+    collide.
+    """
+    if DEVICE_FILE.exists():
+        try:
+            d = json.loads(DEVICE_FILE.read_text(encoding="utf-8"))
+            if d.get("id"):
+                return d
+        except (OSError, json.JSONDecodeError):
+            pass
+    import platform, uuid as _uuid
+    raw = (platform.node() or "device").split(".")[0].lower()
+    slug = "".join(c if c.isalnum() or c == "-" else "-" for c in raw)[:24] or "device"
+    is_mac = sys.platform == "darwin"
+    d = {
+        "id": f"{slug}-{_uuid.uuid4().hex[:8]}",
+        "slug": slug,
+        "uuid": str(_uuid.uuid4()),
+        "created": _now().isoformat(),
+        "platform": sys.platform,
+        "role": "solo",
+        "hub": None,
+        # Declared capability per channel. A channel this device CANNOT collect
+        # must be declared false, so day-validity does not damn every one of its
+        # days — and so a missing channel is never read as a quiet one.
+        #
+        # Detect it rather than guessing from the platform: keying this off
+        # is_mac alone is what made a Linux box on Wayland keep claiming
+        # screen+light it could not deliver. Fall back to the platform guess
+        # only when detection is indeterminate, and `cogload channels
+        # --redeclare` fixes it the moment the session is readable.
+        "channels": detect_channels() or {
+            "keys": True, "mouse": True, "screen": not is_mac,
+            "light": not is_mac, "agents": True},
+    }
+    _ensure_store()
+    tmp = DEVICE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, DEVICE_FILE)
+    try:
+        DEVICE_FILE.chmod(0o600)
+    except OSError:
+        pass
+    return d
+
+
+_DEVICE_CACHE = {}
+
+
+def device_id() -> str:
+    if "id" not in _DEVICE_CACHE:
+        _DEVICE_CACHE["id"] = device()["id"]
+    return _DEVICE_CACHE["id"]
+
+
+# ------------------------------------------------------- canonical reconciliation
+
+def person_days(rows: list) -> dict:
+    """THE reducer. (day, host) instrument rows -> exactly one person-day each.
+
+    This is the only place a fleet dataset becomes a per-person series, and it
+    exists because every consumer previously counted ROWS. With N devices that
+    is pseudo-replication: the same calendar day, observed twice, counts twice,
+    and a 14-day gate unlocks on 7 real days.
+
+    What may and may not combine across devices:
+      * ADDITIVE counts (keys, backspace, enter, clicks) SUM — two keyboards,
+        one human.
+      * RATES and COVERAGE do NOT. Coverage is a property of an instrument, not
+        of a person; summing covered minutes across machines is what produced a
+        coverage figure above 100%. They stay stratified per device.
+      * A day is person-valid iff at least ONE device was valid that day. A
+        device that reported nothing contributes nothing and invalidates
+        nothing — a closed laptop is absence of evidence, not evidence of calm.
+    """
+    by_day = {}
+    for r in rows:
+        day = r.get("day")
+        if not day:
+            continue
+        host = r.get("host") or "legacy"
+        slot = by_day.setdefault(day, {"day": day, "devices": {}})
+        # Last row wins per (day, host) — a re-digest supersedes, never doubles.
+        slot["devices"][host] = r
+
+    out = {}
+    for day, slot in by_day.items():
+        devs = list(slot["devices"].values())
+        valid = [d for d in devs if day_valid(d)[0]]
+        bs = sum(d.get("keys_bs_active") or 0 for d in valid)
+        act = sum(d.get("keys_active_total") or 0 for d in valid)
+        out[day] = {
+            "day": day,
+            "hosts": sorted(slot["devices"]),
+            "n_devices": len(devs),
+            "n_valid_devices": len(valid),
+            "valid": bool(valid),
+            # Additive across devices — explicitly the only things that may sum.
+            "keys_total": sum(d.get("keys_total") or 0 for d in valid),
+            "keys_enter": sum(d.get("keys_enter") or 0 for d in valid),
+            "keys_bs_active": bs,
+            "keys_active_total": act,
+            "backspace_ratio": (bs / act) if act else None,
+            "active_minutes": sum(d.get("active_minutes") or 0 for d in valid),
+            # Stratified — never pooled.
+            "per_device": {d.get("host") or "legacy": {
+                "coverage": d.get("day_coverage_pct"),
+                "valid": day_valid(d)[0],
+                "reason": day_valid(d)[1],
+                "app_switches": d.get("app_switches"),
+                "light_mean": d.get("light_mean"),
+            } for d in devs},
+        }
+    return out
+
+
+# ------------------------------------------------------------------ fleet sync
+
+# CLOSED payload schema. Egress is validated FIELD BY FIELD, not by filename:
+# a filename allowlist proves which paths move, never what is inside them, so a
+# future digest field carrying free text would sail straight through it. Only
+# these keys may cross a device boundary, and only as numbers/bools/short ids.
+DIGEST_EGRESS_FIELDS = {
+    "day", "host", "v", "windows", "windows_ok", "windows_degraded",
+    "windows_screen_ok", "windows_light_ok", "active_minutes", "keys_total",
+    "keys_enter", "keys_active_total", "keys_bs_active", "backspace_ratio",
+    "iki_p50_median_ms", "pauses_2_10s", "clicks", "app_switches",
+    "open_windows_mean", "focus_fragment_s_mean", "agents_mean", "agents_peak",
+    "light_mean", "light_contrast", "light_churn", "night_minutes",
+    "screen_expected", "light_expected",
+    "expected_slots", "gap_minutes", "day_expected_slots", "day_gap_minutes",
+    "edge_gap_minutes", "day_coverage_pct", "covered_minutes", "partial",
+}
+_ID_RE = "abcdefghijklmnopqrstuvwxyz0123456789-_."
+
+
+def _egress_safe(row: dict) -> tuple:
+    """Validate ONE digest row for transmission. Returns (ok, reason)."""
+    if not isinstance(row, dict):
+        return False, "not an object"
+    extra = set(row) - DIGEST_EGRESS_FIELDS
+    if extra:
+        return False, f"non-egress fields: {sorted(extra)}"
+    for k, v in row.items():
+        if v is None or isinstance(v, bool) or isinstance(v, (int, float)):
+            continue
+        if isinstance(v, str):
+            # Only identifiers and dates may be strings, and only short ones.
+            if len(v) > 64 or not all(c in _ID_RE for c in v.lower()):
+                return False, f"field {k!r} is free-form text"
+            continue
+        return False, f"field {k!r} has type {type(v).__name__}"
+    return True, ""
+
+
+def egress_rows(day_rows: list) -> tuple:
+    """Filter digest rows to what may legitimately leave this device."""
+    ok, rejected = [], []
+    for r in day_rows:
+        good, why = _egress_safe(r)
+        (ok if good else rejected).append(r if good else (r.get("day"), why))
+    return ok, rejected
+
+
+def cmd_channels(args) -> int:
+    """Show, and optionally re-declare, what this device can collect.
+
+    Channel capability used to be written ONCE at device creation, keyed only
+    on `is_mac`. When this box moved from X11 to GNOME 50 / Wayland on
+    2026-08-16 the declaration kept claiming screen+light, so `capture_health`
+    damned every subsequent day with "captura de luz baja" — a real fault
+    reported as the wrong fault, for a channel the device could no longer
+    physically deliver. Capability is a fact about the running system, so it
+    has to be re-derivable, not frozen.
+    """
+    _ensure_store()
+    dev = device()
+    declared = dev.get("channels", {})
+    detected = detect_channels()
+
+    if args.json:
+        print(json.dumps({"declared": declared, "detected": detected,
+                          "session_type": live_session_type(),
+                          "platform": sys.platform,
+                          "channels_updated": dev.get("channels_updated")},
+                         indent=2, sort_keys=True))
+    else:
+        print(f"device   : {dev.get('id')}  ({sys.platform}, "
+              f"session={live_session_type()})")
+        names = sorted(set(declared) | set(detected or {}))
+        print(f"{'channel':<10} {'declared':>9}  {'detected':>9}")
+        for n in names:
+            d = declared.get(n)
+            t = (detected or {}).get(n)
+            flag = "" if detected is None or d == t else "   <- differs"
+            print(f"{n:<10} {str(d):>9}  {str(t):>9}{flag}")
+        if detected is None:
+            print("\ndetected: INDETERMINATE (session type is neither x11 nor "
+                  "wayland) — refusing to redeclare on an indefinite reading.")
+
+    if not args.redeclare:
+        return 0
+    if detected is None:
+        print("refusing to redeclare: session type is indeterminate. Re-run "
+              "from the graphical session.", file=sys.stderr)
+        return 1
+    if detected == declared:
+        print("\nno change: declaration already matches what this device can collect.")
+        return 0
+
+    # Rewrite ONLY `channels` (plus its timestamp). Identity fields are frozen:
+    # a device that forks its id here would fork its whole history, and the
+    # fleet hub would see a phantom second person.
+    updated = dict(dev)
+    updated["channels"] = detected
+    updated["channels_updated"] = _now().isoformat()
+    tmp = DEVICE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(updated, indent=2, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, DEVICE_FILE)
+    try:
+        DEVICE_FILE.chmod(0o600)
+    except OSError:
+        pass
+    _DEVICE_CACHE.clear()
+    changed = [n for n in sorted(set(declared) | set(detected))
+               if declared.get(n) != detected.get(n)]
+    print(f"\nredeclared: {', '.join(changed)} "
+          f"(identity, role and hub untouched)")
+    print("run `cogload digest` to refold day rows under the new declaration.")
+    return 0
+
+
+def cmd_fleet(args) -> int:
+    _ensure_store()
+    dev = device()
+
+    if args.action == "id":
+        print(json.dumps(dev, indent=2, sort_keys=True))
+        return 0
+
+    if args.action == "init":
+        role = args.role or "hub"
+        dev["role"] = role
+        tmp = DEVICE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(dev, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, DEVICE_FILE)
+        print(f"this device is now role={role} (id={dev['id']})")
+        return 0
+
+    if args.action == "join":
+        if not args.hub:
+            print("usage: cogload fleet join --hub <ssh-target>", file=sys.stderr)
+            return 2
+        dev["role"], dev["hub"] = "spoke", args.hub
+        DEVICE_FILE.write_text(json.dumps(dev, indent=2, sort_keys=True), encoding="utf-8")
+        print(f"joined fleet: role=spoke hub={args.hub} id={dev['id']}")
+        return 0
+
+    if args.action == "push":
+        # The kill switch gates EGRESS, not just collection. `off` must mean the
+        # device stops talking about you as well as stops watching you.
+        if DISABLED.exists():
+            print("cogload is OFF — not pushing")
+            return 0
+        if dev.get("role") != "spoke" or not dev.get("hub"):
+            print("not a spoke (run `cogload fleet join --hub <target>`)")
+            return 0
+        rows = []
+        for p in sorted(DIGEST_DIR.glob("*.jsonl")):
+            for line in p.read_text(encoding="utf-8").splitlines():
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+        good, bad = egress_rows(rows)
+        if bad:
+            print(f"refusing: {len(bad)} digest row(s) failed egress validation: "
+                  f"{bad[:2]}", file=sys.stderr)
+            return 3
+        payload = json.dumps({"device": {k: dev[k] for k in
+                                         ("id", "slug", "platform", "channels")},
+                              "rows": good}, sort_keys=True)
+        if args.dry_run:
+            print(payload if args.print_payload else
+                  f"would push {len(good)} rows ({len(payload)} bytes) to {dev['hub']}")
+            return 0
+        try:
+            # PATH prefix is load-bearing: a NON-INTERACTIVE ssh gets a minimal
+            # PATH that does not include ~/.local/bin, so a bare `cogload` here
+            # resolves to nothing and every push dies with "command not found".
+            # Proven live across the real Mac->hub boundary.
+            r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+                                dev["hub"], 'PATH="$HOME/.local/bin:$PATH"',
+                                "cogload", "fleet", "ingest"],
+                               input=payload, capture_output=True, text=True, timeout=120)
+        except (OSError, subprocess.SubprocessError) as e:
+            print(f"push failed: {e}", file=sys.stderr)
+            return 1
+        print(r.stdout.strip() or r.stderr.strip()[:200])
+        return r.returncode
+
+    if args.action == "ingest":
+        if DISABLED.exists():
+            print("hub is OFF — refusing ingest")
+            return 0
+        if dev.get("role") != "hub":
+            print("refusing: not a hub — run `cogload fleet init --role hub`",
+                  file=sys.stderr)
+            return 3
+        try:
+            payload = json.loads(sys.stdin.read())
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"refusing: unparseable payload ({e})", file=sys.stderr)
+            return 3
+        d = payload.get("device") or {}
+        did = str(d.get("id") or "")
+        if not did or len(did) > 64 or not all(c in _ID_RE for c in did.lower()):
+            print("refusing: bad device id", file=sys.stderr)
+            return 3
+        rows = payload.get("rows") or []
+        # Re-validate on RECEIPT. The sender's word is not the check.
+        good, bad = egress_rows(rows)
+        if bad:
+            print(f"refusing: {len(bad)} row(s) failed egress validation on ingest",
+                  file=sys.stderr)
+            return 3
+        if any((r.get("host") or did) != did for r in good):
+            print("refusing: a row claims a different host than the sender",
+                  file=sys.stderr)
+            return 3
+        dest = STORE / "fleet" / did
+        dest.mkdir(parents=True, exist_ok=True)
+        tmp = dest / ".digest.tmp"
+        tmp.write_text("\n".join(json.dumps(r, sort_keys=True) for r in good) + "\n",
+                       encoding="utf-8")
+        os.replace(tmp, dest / "digest.jsonl")          # atomic, idempotent
+        (dest / "device.json").write_text(json.dumps(d, indent=2, sort_keys=True),
+                                          encoding="utf-8")
+        for f in (dest / "digest.jsonl", dest / "device.json"):
+            try:
+                f.chmod(0o600)
+            except OSError:
+                pass
+        print(f"ingested {len(good)} rows from {did}")
+        return 0
+
+    if args.action == "status":
+        print(f"this device: {dev['id']}  role={dev.get('role')}  hub={dev.get('hub')}")
+        root = STORE / "fleet"
+        if not root.exists():
+            print("  no remote devices have pushed")
+            return 0
+        for sub in sorted(root.iterdir()):
+            dj = sub / "device.json"
+            dg = sub / "digest.jsonl"
+            n = len(dg.read_text(encoding="utf-8").splitlines()) if dg.exists() else 0
+            age = "never"
+            if dg.exists():
+                age = f"{int((time.time() - dg.stat().st_mtime) / 3600)}h ago"
+            print(f"  {sub.name}: {n} day rows, last push {age}")
+        return 0
+    return 2
+
+
+def cmd_claims(args) -> int:
+    """Emit only what the evidence supports, as catalog claims."""
+    _ensure_store()
+    scope = "day"
+    target = args.day or datetime.now().strftime("%Y-%m-%d")
+    rows = _digest_rows()
+    valid_rows = [r for r in rows if day_valid(r)[0]]
+    row = next((r for r in rows if r.get("day") == target), None)
+    claims = []
+
+    def emit(cid, **kw):
+        try:
+            claims.append({"id": cid, "tier": CLAIM_CATALOG[cid]["tier"],
+                           "text": render_claim(cid, scope, **kw)})
+        except ClaimError as e:
+            claims.append({"id": cid, "tier": "ERR", "text": f"[error] {e}"})
+
+    # T0 — always.
+    if row is None:
+        emit("capture.nodata")
+    else:
+        cov = round((row.get("day_coverage_pct") or 0) * 100, 1)
+        emit("capture.coverage", coverage_pct=cov,
+             covered_minutes=int(row.get("covered_minutes") or 0),
+             expected_minutes=int(row.get("day_expected_slots") or 0))
+        ok, why = day_valid(row)
+        if not ok:
+            emit("capture.blind", coverage_pct=cov)
+
+    # T1 — only for a valid day.
+    if row is not None and day_valid(row)[0]:
+        emit("day.activity", active_minutes=int(row.get("active_minutes") or 0),
+             keys_total=int(row.get("keys_total") or 0),
+             enter_count=int(row.get("keys_enter") or 0))
+        emit("day.switching", switches=int(row.get("app_switches") or 0),
+             focus_s=float(row.get("focus_fragment_s_mean") or 0))
+        if row.get("light_mean") is not None:
+            emit("day.light", light_mean=float(row["light_mean"]),
+                 light_contrast=float(row.get("light_contrast") or 0))
+
+    # T2 — comparison needs enough of the person's own history.
+    if len(valid_rows) < MIN_DAYS_CURVE:
+        emit("refuse.t2", have=len(valid_rows), need=MIN_DAYS_CURVE)
+    elif row is not None and day_valid(row)[0]:
+        meds = [r["backspace_ratio"] for r in valid_rows
+                if isinstance(r.get("backspace_ratio"), (int, float))]
+        if meds and isinstance(row.get("backspace_ratio"), (int, float)):
+            emit("cmp.backspace", bs_pct=round(row["backspace_ratio"] * 100, 2),
+                 median_pct=round(statistics.median(meds) * 100, 2),
+                 n_days=len(meds))
+
+    # T3 — per SERIES, and NEVER in day scope (anti-anchoring: reading an
+    # association before tonight's label would contaminate the label).
+    # the psychologist's instrument adds two anxiety dimensions. anx (momentary) and
+    # anx_day (recalled) are gated INDEPENDENTLY: they are different
+    # measurements and one having enough pairs says nothing about the other.
+    # The momentary ones are gated per MOMENT for the same reason — the 07:15
+    # and 18:45 readings are what the instrument exists to compare.
+    for dim, slot in LABEL_SERIES:
+        el = t3_eligibility(dim, slot)
+        if not el["unlocked"]:
+            emit("refuse.t3", pairs=el["pairs"], need=MIN_PAIRS_T3,
+                 dim=el["series"])
+
+    # T4 — only what the ledger has earned.
+    for rule in RULES:
+        emit("refuse.t4", scored=0, need=MIN_SCORED_T4, rule=rule["id"])
+
+    if args.json:
+        print(json.dumps({"scope": scope, "day": target, "claims": claims},
+                         indent=2, ensure_ascii=False))
+    else:
+        print(f"cogload claims — {target} (scope: {scope})")
+        print("=" * 58)
+        for c in claims:
+            print(f"  {c['text']}")
+    return 0
+
+
+def cmd_curve(args) -> int:
+    """The marginal-load curve the psychologist asked for.
+
+    Refuses to print until the data could honestly support it. The
+    falsifiability guard lives in the tool, not in a caveat someone can skip.
+    """
+    _ensure_store()
+    agg = AGENT_DIR / "daily.jsonl"
+    if not agg.exists():
+        print("no agent aggregates yet — run `cogload transcripts` first", file=sys.stderr)
+        return 1
+    load_by_day = {}
+    for line in agg.read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        load_by_day[row["day"]] = row["projects"]
+
+    points = []
+    for day, load in sorted(load_by_day.items()):
+        recs = [r for r in _read_records(day=day) if r["status"] == "ok"]
+        active = [r for r in recs if r["total"] >= ACTIVE_MIN_KEYS]
+        act_tot = sum(r["total"] for r in active)
+        if not act_tot:
+            continue
+        bs = sum(r["keys"]["backspace"] + r["keys"]["delete"] for r in active)
+        points.append((day, load, bs / act_tot))
+
+    levels = {p[1] for p in points}
+    if len(points) < MIN_DAYS_CURVE or len(levels) < MIN_LOAD_LEVELS:
+        print("REFUSING to plot a marginal-load curve.\n")
+        print(f"  joint days available : {len(points)}  (need >= {MIN_DAYS_CURVE})")
+        print(f"  distinct load levels : {len(levels)}  (need >= {MIN_LOAD_LEVELS})")
+        print("\nA curve from less than this would be noise with a trend line on it.")
+        print("Keep collecting; this refusal is the honest answer today.")
+        return 1
+
+    bins: dict[int, list[float]] = {}
+    for _day, load, metric in points:
+        bins.setdefault(load, []).append(metric)
+    print(f"marginal-load curve — backspace_ratio vs projects/day  (n={len(points)} days)")
+    print(f"{'projects':>9}{'days':>6}{'median':>10}{'IQR':>18}")
+    for load in sorted(bins):
+        vals = sorted(bins[load])
+        q1 = vals[len(vals) // 4] if len(vals) >= 4 else vals[0]
+        q3 = vals[(3 * len(vals)) // 4] if len(vals) >= 4 else vals[-1]
+        print(f"{load:>9}{len(vals):>6}{statistics.median(vals):>10.4f}"
+              f"{f'[{q1:.4f}, {q3:.4f}]':>18}")
+    if len(points) < 30:
+        print("\nNOTE: < 30 joint days — insufficient for knee estimation.")
+        print("Read this as a description of what happened, not a capacity law.")
+    return 0
+
+
+def _screen_sample_recovered(sample, sampler_ok: bool) -> bool:
+    """Whether a post-error screen sample proves the X connection recovered.
+
+    WM_CLASS may legitimately be absent under Wayland/XWayland. The explicit
+    success bit returned by ScreenSampler.sample(), not the app label, is the
+    authoritative health signal.
+    """
+    return bool(
+        sampler_ok
+        and isinstance(sample, tuple)
+        and len(sample) == 3
+        and sample[2] is True
+    )
+
+
+def _selftest_evdev() -> int:
+    """Real-boundary check for the evdev backend.
+
+    Nothing is injected. Injection is what made the old verb dishonest, and
+    there is no kernel-level equivalent that proves a REAL key reached us
+    without uinput (another privilege, and another thing that could pass while
+    the real path is broken). So this asks for a real keypress and observes it.
+    """
+    ok, reason = EvdevListener.available()
+    if not ok:
+        print(f"FAIL: evdev unavailable ({reason})", file=sys.stderr)
+        return 1
+    if not sys.stdin.isatty():
+        # Never return 0 from a check that did not run. A non-interactive
+        # caller gets an explicit PARTIAL, not a pass by default.
+        print("PARTIAL: evdev devices open, but no TTY to observe a real "
+              "keypress. Run `cogload selftest` interactively to cross the "
+              "boundary.", file=sys.stderr)
+        return 1
+
+    seen = {"n": 0}
+    lis = EvdevListener(on_key=lambda cls: seen.__setitem__("n", seen["n"] + 1))
+    lis.start()
+    print("press any key within 10 s to prove real capture... ", end="", flush=True)
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and seen["n"] == 0:
+        time.sleep(0.1)
+    lis.stop()
+    if seen["n"] == 0:
+        print()
+        print("FAIL: no key observed in 10 s — evdev opened devices but is not "
+              "receiving events.", file=sys.stderr)
+        return 1
+    print(f"\nPASS: real keypress observed through evdev ({seen['n']} event(s), "
+          "class only — no identity retained)")
+    return 0
+
+
+def cmd_selftest(args) -> int:
+    """Tier-1c real-boundary check: cross a real boundary, not a mock.
+
+    THE FALSE GREEN THIS FIXES. On 2026-08-19, with the box on Wayland and real
+    keystroke capture down ~99% (31,127 keys/day on X11 -> 323/day), this verb
+    printed "PASS: capture works (injected 3, observed 3)". XTEST injection is
+    delivered through XWayland, and an XRecord listener sees XWayland traffic,
+    so the loop below proves only that X can talk to itself. It says nothing
+    about typing into a native Wayland application, which is where the real
+    keystrokes were being lost. A check that certifies capture it never
+    observed is worse than no check — the same lesson as the C1 red-proof.
+    """
+    _ensure_store()
+    sess = live_session_type()
+    evdev_ok, evdev_reason = EvdevListener.available()
+
+    if evdev_ok:
+        return _selftest_evdev()
+
+    if sess == "wayland":
+        # Decisive: refuse to grade the xrecord path under Wayland AT ALL,
+        # whatever the injection returns. There is no injection that can
+        # distinguish working capture from XWayland-only capture here.
+        print("FAIL: session is Wayland and the evdev backend is unavailable "
+              f"({evdev_reason or 'unknown'}).", file=sys.stderr)
+        print("      XTEST injection would ride XWayland and XRecord would see "
+              "it, so a PASS here would prove nothing about typing into native "
+              "Wayland apps — which is exactly where capture is lost.",
+              file=sys.stderr)
+        print("      Fix: add this user to the `input` group, then restart the "
+              "user manager (`loginctl terminate-user $USER`) — a plain "
+              "logout is NOT enough while lingering is enabled.",
+              file=sys.stderr)
+        return 1
+
+    try:
+        from pynput import keyboard
+    except Exception as exc:
+        print(f"FAIL: pynput unavailable ({exc})", file=sys.stderr)
+        return 1
+    before = _last_record()
+    counts = {"mod": 0}
+
+    lis = keyboard.Listener(on_press=lambda k: counts.__setitem__(
+        "mod", counts["mod"] + (1 if classify(k) == "mod" else 0)))
+    lis.start()
+    time.sleep(0.8)
+    ctl = keyboard.Controller()
+    for _ in range(3):
+        ctl.press(keyboard.Key.shift)
+        ctl.release(keyboard.Key.shift)
+        time.sleep(0.12)
+    time.sleep(0.8)
+    lis.stop()
+
+    if counts["mod"] < 3:
+        print(f"FAIL: injected 3 modifier keys, observed {counts['mod']} — "
+              "global capture is NOT working", file=sys.stderr)
+        return 1
+    print(f"PASS: capture works (injected 3, observed {counts['mod']})")
+    print("      NOTE: XTEST-injected keys are observed twice by XRecord, so")
+    print("      absolute counts from injection are inflated; ratios are not.")
+
+    # Tier-1c real-boundary counterpart to the MOCKED C8 recovery test. C8 proves
+    # the recovery LOGIC against a scripted display; this proves the real X
+    # connection actually survives a real error — which is the property that
+    # failed in production (a benign BadWindow permanently blinded screen+light
+    # for hours while status still read "ok"). Destroying a window and then
+    # fetching its WM_CLASS raises a genuine BadWindow on our own connection.
+    scr = ScreenSampler()
+    if scr.ok:
+        try:
+            root = scr._d.screen().root
+            win = root.create_window(0, 0, 10, 10, 0, scr._d.screen().root_depth)
+            scr._d.sync()
+            dead = win.id
+            win.destroy()
+            scr._d.sync()
+            real_err = None
+            try:
+                scr._d.create_resource_object("window", dead).get_wm_class()
+            except Exception as exc:
+                real_err = type(exc).__name__
+            after = scr.sample()
+            recovered = _screen_sample_recovered(after, scr.ok)
+            if real_err and recovered:
+                print(f"PASS: sampler survived a REAL {real_err} on its own connection")
+            elif not real_err:
+                print("SKIP: could not provoke a real X error on this server")
+            else:
+                print(f"FAIL: sampler poisoned by a real {real_err} — "
+                      f"after={after} ok={scr.ok}", file=sys.stderr)
+                return 1
+        except Exception as exc:
+            # Failing to *provoke* the error is not a failure of the collector.
+            print(f"SKIP: real-BadWindow check unavailable ({type(exc).__name__})")
+    if before:
+        age = (_now() - datetime.fromisoformat(before["ts"])).total_seconds()
+        print(f"      daemon last wrote {int(age)}s ago")
+    return 0
+
+
+# ------------------------------------------------------------------------ main
+
+
+VENV_PY = STORE / "venv/bin/python3"
+NEEDS_PYNPUT = {"daemon", "selftest"}
+
+
+def _reexec_in_venv_if_needed(argv) -> None:
+    """Re-exec under the collector's venv when the verb needs pynput.
+
+    The systemd unit hardcodes the venv interpreter, so the daemon always had
+    its dependencies — but running `cogload selftest` from PATH used the system
+    python3 (per the shebang). Merely checking whether that interpreter can
+    import pynput is insufficient: a stale global pynput can import successfully
+    and then crash on Python 3.13 while the venv has the compatible release.
+    Pynput verbs always use the collector's governed environment.
+    """
+    verb = next((a for a in argv if not a.startswith("-")), None)
+    if verb not in NEEDS_PYNPUT:
+        return
+    if not VENV_PY.exists() or os.environ.get("COGLOAD_NO_REEXEC"):
+        return
+    # Compare sys.prefix, NOT resolved executable paths: a venv's python3 is a
+    # symlink to the system interpreter, so .resolve() makes both sides equal
+    # and the guard silently swallows every re-exec.
+    if Path(sys.prefix) == (STORE / "venv"):
+        return  # already inside the venv; do not loop
+    os.environ["COGLOAD_NO_REEXEC"] = "1"
+    os.execv(str(VENV_PY), [str(VENV_PY), os.path.abspath(__file__), *argv])
+
+
+def main(argv=None) -> int:
+    _reexec_in_venv_if_needed(list(sys.argv[1:] if argv is None else argv))
+    p = argparse.ArgumentParser(
+        prog="cogload", description=__doc__.split("\n")[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("daemon", help="run the collector (systemd user unit)").set_defaults(fn=cmd_daemon)
+
+    sp = sub.add_parser("status", help="is it actually recording?")
+    sp.add_argument("--gate", action="store_true", help="exit code only")
+    sp.add_argument("--json", action="store_true",
+                    help="emit a per-subsystem breakdown as JSON")
+    sp.set_defaults(fn=cmd_status)
+
+    sp = sub.add_parser("show", help="exactly what is being recorded")
+    sp.add_argument("--today", action="store_true")
+    sp.add_argument("-n", type=int, default=5)
+    sp.set_defaults(fn=cmd_show)
+
+    sub.add_parser("on", help="enable collection").set_defaults(fn=cmd_on)
+    sub.add_parser("off", help="kill switch").set_defaults(fn=cmd_off)
+
+    sp = sub.add_parser("mark", help="record a ground-truth label")
+    sp.add_argument("--stress", type=int, default=None, choices=range(1, 6))
+    sp.add_argument("--eff", type=int, default=None, choices=range(1, 6))
+    sp.add_argument("--note", default="")
+    sp.add_argument("--src", default="cli")
+    sp.add_argument("--tol", type=int, default=None, choices=range(1, 6),
+                    help="tolerancia/paciencia 1-5 (the sensory-tolerance question)")
+    # The psychologist's instrument (2026-08-12): momentary anxiety at BOTH ends of
+    # the day, plus a retrospective whole-day rating in the evening. Momentary
+    # and retrospective ratings are different measurements — the recalled day is
+    # reconstructed, not averaged — so they are stored as separate dimensions
+    # and never folded together.
+    sp.add_argument("--anx", type=int, default=None, choices=range(1, 6),
+                    help="ansiedad AHORA 1-5 (5=mucha) — momentary, both slots")
+    sp.add_argument("--anx-day", dest="anx_day", type=int, default=None,
+                    choices=range(1, 6),
+                    help="ansiedad percibida del DIA 1-5 — retrospective, evening only")
+    sp.add_argument("--slot", choices=("morning", "evening"), default=None,
+                    help="measurement moment; inferred from the hour when omitted")
+    sp.add_argument("--force", action="store_true",
+                    help="overwrite today's label (append; latest ts wins)")
+    sp.set_defaults(fn=cmd_mark)
+
+    sp = sub.add_parser("transcripts", help="aggregate the agent corpus")
+    sp.add_argument("--since", type=int, default=45, help="days back")
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--tail", type=int, default=14)
+    sp.set_defaults(fn=cmd_transcripts)
+
+    sp = sub.add_parser("report", help="one day, joined")
+    sp.add_argument("--day", default=None)
+    sp.set_defaults(fn=cmd_report)
+
+    sp = sub.add_parser("digest", help="fold per-minute rows into durable day rows")
+    sp.add_argument("--day", default=None)
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--tail", type=int, default=10)
+    sp.set_defaults(fn=cmd_digest)
+
+    sp = sub.add_parser("channels",
+                        help="what this device can collect (and re-declare it)")
+    sp.add_argument("--redeclare", action="store_true",
+                    help="rewrite device.json channels to match what is detected")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(fn=cmd_channels)
+
+    sp = sub.add_parser("fleet", help="N-device identity and digest sync")
+    sp.add_argument("action", choices=("id", "init", "join", "push", "ingest", "status"))
+    sp.add_argument("--role", choices=("hub", "solo"), default=None)
+    sp.add_argument("--hub", default=None, help="ssh target of the hub")
+    sp.add_argument("--dry-run", action="store_true")
+    sp.add_argument("--print-payload", action="store_true")
+    sp.set_defaults(fn=cmd_fleet)
+
+    sp = sub.add_parser("claims", help="what the evidence supports (no LLM in this path)")
+    sp.add_argument("--day", default=None)
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(fn=cmd_claims)
+
+    sp = sub.add_parser("curve", help="marginal-load curve (refuses if premature)")
+    sp.set_defaults(fn=cmd_curve)
+
+    sub.add_parser("selftest", help="real-boundary capture check").set_defaults(fn=cmd_selftest)
+
+    sp = sub.add_parser("wipe", help="delete collected data")
+    sp.add_argument("--confirm", action="store_true")
+    sp.set_defaults(fn=cmd_wipe)
+
+    sub.add_parser("rotate", help="gzip old months, prune past keep-days").set_defaults(fn=cmd_rotate)
+
+    args = p.parse_args(argv)
+    try:
+        return args.fn(args)
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

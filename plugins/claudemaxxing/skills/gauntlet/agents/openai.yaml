@@ -1,0 +1,4 @@
+interface:
+  display_name: "Gauntlet"
+  short_description: "Divide a broad request into gated increments"
+  default_prompt: "Use $claudemaxxing:gauntlet one step before planning to divide a broad request into incremental parts, each with a rubric and a real-world bar at delivery; the verdict promotes, deterministic contracts accept."

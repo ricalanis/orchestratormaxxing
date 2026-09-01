@@ -1,0 +1,653 @@
+#!/usr/bin/env python3
+"""Graduate the public core of this repo from a committed tree, gated, to a public remote.
+
+The manifest (deploy/graduation.manifest) is the graduation list: a feature ships publicly
+by being added there. The public checkout is the sibling dev-folder project
+../orchestratormaxxing, which this repo maintains and never edits by hand.
+
+The private repo is tenant #1. The public repo ("core") is a deterministic,
+allowlist-driven projection of a committed tree-ish of the private repo:
+
+  select   only tracked paths named by `include` lines, minus `exclude` globs
+  strip    <!-- tenant:begin --> … <!-- tenant:end --> blocks from `strip` files
+  gate     every `block` regex must match nothing; gitleaks must find nothing
+  write    an atomic tree + EXPORT-MANIFEST.json (source commit, per-file sha256)
+  push     (opt-in) sync the tree into a checkout of the public remote, commit, push
+  pr       (opt-in) same, but on a tool-owned rolling branch with ONE open PR (gh)
+  absorb   bring a public PR back into the private working tree (paths are identical)
+
+Content comes from git objects (`git archive <tree-ish>`), never from the working
+tree: an uncommitted or ignored file (.env, a DB) cannot leak by construction.
+The gate runs AFTER stripping, on exactly the bytes that would be published.
+
+Exit codes: 0 ok · 1 usage/error · 2 manifest or marker invalid · 3 gate blocked
+· 4 gate unavailable (gitleaks missing while pushing).
+"""
+
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+MARKER_RE = re.compile(r"^\s*(?:<!--\s*tenant:(begin|end)\b[^>]*-->|#\s*tenant:(begin|end)\b.*)\s*$")
+MANIFEST_NAME = "EXPORT-MANIFEST.json"
+DEFAULT_MANIFEST = "deploy/graduation.manifest"
+DEFAULT_OUT = ".results/core-export/tree"
+DEFAULT_PUBLIC_PROJECT = "orchestratormaxxing"  # sibling dev-folder: <private-repo>/../orchestratormaxxing
+
+
+class ExportError(Exception):
+    def __init__(self, message: str, code: int = 1):
+        super().__init__(message)
+        self.code = code
+
+
+def log(msg: str) -> None:
+    print(f"core-export: {msg}", file=sys.stderr)
+
+
+def run(cmd, *, cwd=None, check=True, capture=True, env=None, input_bytes=None):
+    proc = subprocess.run(
+        cmd, cwd=cwd, check=False, env=env, input=input_bytes,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else None,
+    )
+    if check and proc.returncode != 0:
+        err = (proc.stderr or b"").decode("utf-8", "replace").strip()
+        raise ExportError(f"{' '.join(map(str, cmd))} failed ({proc.returncode}): {err}")
+    return proc
+
+
+def git(repo: Path, *args, **kw):
+    return run(["git", "-C", str(repo), *args], **kw)
+
+
+def repo_root(start: Path) -> Path:
+    proc = run(["git", "-C", str(start), "rev-parse", "--show-toplevel"], check=False)
+    if proc.returncode != 0:
+        raise ExportError(f"{start} is not inside a git repository")
+    return Path(proc.stdout.decode().strip())
+
+
+# ── manifest ─────────────────────────────────────────────────────────────────
+
+class Manifest:
+    def __init__(self):
+        self.include: list[str] = []
+        self.exclude: list[str] = []
+        self.strip: list[str] = []
+        self.block: list[tuple[str, re.Pattern]] = []
+        self.remote: str | None = None
+        self.branch: str = "main"
+        self.gitleaks_config: str | None = None
+
+    @classmethod
+    def parse(cls, text: str, source: str) -> "Manifest":
+        m = cls()
+        for n, raw in enumerate(text.splitlines(), 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(None, 1)
+            verb = parts[0]
+            arg = parts[1].strip() if len(parts) > 1 else ""
+            if not arg:
+                raise ExportError(f"{source}:{n}: `{verb}` needs an argument", 2)
+            if verb == "include":
+                if arg.startswith("/") or ".." in Path(arg).parts:
+                    raise ExportError(f"{source}:{n}: include must be a repo-relative path", 2)
+                m.include.append(arg.rstrip("/"))
+            elif verb == "exclude":
+                m.exclude.append(arg)
+            elif verb == "strip":
+                m.strip.append(arg)
+            elif verb == "block":
+                try:
+                    m.block.append((arg, re.compile(arg)))
+                except re.error as exc:
+                    raise ExportError(f"{source}:{n}: bad block regex: {exc}", 2)
+            elif verb == "remote":
+                m.remote = arg
+            elif verb == "branch":
+                m.branch = arg
+            elif verb == "gitleaks-config":
+                m.gitleaks_config = arg
+            else:
+                raise ExportError(f"{source}:{n}: unknown verb `{verb}`", 2)
+        if not m.include:
+            raise ExportError(f"{source}: manifest has no `include` lines", 2)
+        return m
+
+
+def _glob_match(path: str, pattern: str) -> bool:
+    if pattern.endswith("/"):
+        return path.startswith(pattern) or path == pattern[:-1]
+    if fnmatch.fnmatchcase(path, pattern):
+        return True
+    # a bare directory name excludes everything beneath it
+    return path.startswith(pattern + "/")
+
+
+def selected(path: str, m: Manifest) -> bool:
+    inc = any(path == i or path.startswith(i + "/") for i in m.include)
+    if not inc:
+        return False
+    return not any(_glob_match(path, e) for e in m.exclude)
+
+
+# ── selection + materialisation ──────────────────────────────────────────────
+
+def tracked_entries(repo: Path, tree_ish: str) -> list[tuple[str, str]]:
+    """[(mode, path)] for every blob/symlink in tree_ish."""
+    proc = git(repo, "ls-tree", "-r", "-z", tree_ish)
+    out = []
+    for rec in proc.stdout.split(b"\0"):
+        if not rec:
+            continue
+        meta, path = rec.split(b"\t", 1)
+        mode, kind, _sha = meta.decode().split(" ")
+        if kind == "blob":
+            out.append((mode, path.decode("utf-8", "surrogateescape")))
+        # commits (submodules) are never exported
+    return out
+
+
+def materialise(repo: Path, tree_ish: str, paths: list[str], dest: Path) -> None:
+    dest.mkdir(parents=True, exist_ok=True)
+    if not paths:
+        return
+    # git archive preserves modes + symlinks. Pathspecs go on argv in bounded
+    # batches (git archive has no --pathspec-from-file) with :(literal) magic so
+    # a path containing glob characters is never widened into a pattern.
+    batch = 400
+    for i in range(0, len(paths), batch):
+        specs = [":(literal)" + p for p in paths[i:i + batch]]
+        archive = run(["git", "-C", str(repo), "archive", "--format=tar", tree_ish, "--", *specs])
+        run(["tar", "-x", "-C", str(dest)], input_bytes=archive.stdout)
+
+
+# ── transforms + gate ────────────────────────────────────────────────────────
+
+def strip_tenant_blocks(text: str, label: str) -> tuple[str, int]:
+    out, depth, blocks = [], 0, 0
+    for n, line in enumerate(text.splitlines(keepends=True), 1):
+        mm = MARKER_RE.match(line)
+        if mm:
+            kind = mm.group(1) or mm.group(2)
+            if kind == "begin":
+                if depth:
+                    raise ExportError(f"{label}:{n}: nested tenant:begin", 2)
+                depth = 1
+                blocks += 1
+            else:
+                if not depth:
+                    raise ExportError(f"{label}:{n}: tenant:end without begin", 2)
+                depth = 0
+            continue
+        if not depth:
+            out.append(line)
+    if depth:
+        raise ExportError(f"{label}: tenant:begin without end", 2)
+    return "".join(out), blocks
+
+
+def is_text(data: bytes) -> bool:
+    return b"\0" not in data[:8192]
+
+
+def gate_literals(tree: Path, files: list[str], m: Manifest) -> list[str]:
+    hits = []
+    for rel in files:
+        p = tree / rel
+        if p.is_symlink():
+            continue
+        data = p.read_bytes()
+        if not is_text(data):
+            continue
+        text = data.decode("utf-8", "replace")
+        for n, line in enumerate(text.splitlines(), 1):
+            for src, rx in m.block:
+                if rx.search(line):
+                    hits.append(f"{rel}:{n}: /{src}/")
+    return hits
+
+
+def gate_gitleaks(tree: Path, config: str | None, *, required: bool) -> tuple[str, list[str]]:
+    exe = os.environ.get("CORE_EXPORT_GITLEAKS") or shutil.which("gitleaks")
+    if not exe:
+        if required:
+            raise ExportError("gitleaks not found on PATH (required to push; set CORE_EXPORT_GITLEAKS or --allow-no-gitleaks)", 4)
+        return "skipped", []
+    report = tree.parent / "gitleaks-report.json"
+    cmd = [exe, "dir", str(tree), "--no-banner", "--exit-code", "1",
+           "--report-format", "json", "--report-path", str(report)]
+    if config:
+        cmd += ["--config", config]
+    proc = run(cmd, check=False)
+    if proc.returncode == 0:
+        return "clean", []
+    if proc.returncode != 1:
+        err = (proc.stderr or b"").decode("utf-8", "replace").strip()
+        raise ExportError(f"gitleaks failed ({proc.returncode}): {err}", 4)
+    findings = []
+    try:
+        for f in json.loads(report.read_text() or "[]"):
+            raw = f.get("File", "?")
+            # gitleaks `dir` reports File relative to the scan root's parent on some
+            # versions and absolute on others; normalise to export-relative.
+            rel = os.path.relpath(raw, tree) if os.path.isabs(raw) else raw
+            if rel.startswith(tree.name + "/"):
+                rel = rel[len(tree.name) + 1:]
+            findings.append(f"{rel}:{f.get('StartLine')}: {f.get('RuleID')}")
+    except Exception:  # pragma: no cover - report shape drift
+        findings.append("gitleaks reported findings (report unreadable)")
+    return "findings", findings
+
+
+# ── manifest + push ──────────────────────────────────────────────────────────
+
+def sha256(p: Path) -> str:
+    h = hashlib.sha256()
+    if p.is_symlink():
+        h.update(os.readlink(p).encode())
+        return h.hexdigest()
+    with p.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def write_manifest(tree: Path, *, commit: str, tree_ish: str, manifest_path: str,
+                   manifest_sha: str, files: list[str], stripped: dict, gate: dict) -> None:
+    entries = []
+    for rel in sorted(files):
+        p = tree / rel
+        entries.append({
+            "path": rel,
+            "sha256": sha256(p),
+            "mode": "symlink" if p.is_symlink() else ("exec" if os.access(p, os.X_OK) else "file"),
+        })
+    doc = {
+        "tool": "core-export",
+        "source_commit": commit,
+        "source_tree_ish": tree_ish,
+        "manifest": manifest_path,
+        "manifest_sha256": manifest_sha,
+        "file_count": len(entries),
+        "stripped": stripped,
+        "gate": gate,
+        "files": entries,
+    }
+    (tree / MANIFEST_NAME).write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+
+
+def _gh_repo_from_remote(remote: str) -> str | None:
+    m = re.match(r"^(?:https://github\.com/|git@github\.com:)([^/]+)/([^/]+?)(?:\.git)?/?$", remote.strip())
+    return f"{m.group(1)}/{m.group(2)}" if m else None
+
+
+def _gh() -> str | None:
+    override = os.environ.get("CORE_EXPORT_GH")
+    if override:
+        return override if os.access(override, os.X_OK) else None
+    return shutil.which("gh")
+
+
+def prepare_checkout(tree: Path, repo_dir: Path, remote: str, base: str, work_branch: str) -> dict:
+    """Mirror the export tree into a checkout of the public remote on `work_branch`.
+
+    `work_branch == base` is the direct path (commit on main); otherwise the branch is
+    re-created from origin/<base> every time (a tool-owned rolling branch). Returns
+    {"changed": bool, "base_exists": bool}; commits nothing.
+    """
+    if not (repo_dir / ".git").is_dir():
+        repo_dir.parent.mkdir(parents=True, exist_ok=True)
+        if repo_dir.exists():
+            shutil.rmtree(repo_dir)
+        clone = run(["git", "clone", "--quiet", remote, str(repo_dir)], check=False)
+        if clone.returncode != 0:
+            raise ExportError(f"clone of {remote} failed: {(clone.stderr or b'').decode().strip()}")
+    else:
+        git(repo_dir, "remote", "set-url", "origin", remote)
+    git(repo_dir, "fetch", "--quiet", "--prune", "origin", check=False)
+    base_exists = git(repo_dir, "rev-parse", "--verify", "--quiet", f"origin/{base}", check=False).returncode == 0
+    if base_exists:
+        git(repo_dir, "checkout", "--quiet", "-B", work_branch, f"origin/{base}")
+    else:
+        git(repo_dir, "checkout", "--quiet", "--orphan", work_branch, check=False)
+        git(repo_dir, "rm", "-rfq", "--cached", ".", check=False)
+    for child in repo_dir.iterdir():
+        if child.name == ".git":
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+    for src in tree.rglob("*"):
+        rel = src.relative_to(tree)
+        dst = repo_dir / rel
+        if src.is_symlink():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(os.readlink(src), dst)
+        elif src.is_dir():
+            dst.mkdir(parents=True, exist_ok=True)
+        else:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+    git(repo_dir, "add", "-A")
+    changed = git(repo_dir, "diff", "--cached", "--quiet", check=False).returncode != 0
+    built_tree = git(repo_dir, "write-tree").stdout.decode().strip()
+    remote_branch_tree = None
+    if work_branch != base:
+        probe = git(repo_dir, "rev-parse", "--verify", "--quiet", f"origin/{work_branch}^{{tree}}", check=False)
+        if probe.returncode == 0:
+            remote_branch_tree = probe.stdout.decode().strip()
+    return {"changed": changed, "base_exists": base_exists, "tree": built_tree,
+            "remote_branch_tree": remote_branch_tree}
+
+
+def sync_and_push(tree: Path, repo_dir: Path, remote: str, branch: str, commit: str, *, dry: bool) -> dict:
+    state = prepare_checkout(tree, repo_dir, remote, branch, branch)
+    if not state["changed"]:
+        return {"pushed": False, "reason": "no changes", "remote": remote, "branch": branch}
+    if dry:
+        return {"pushed": False, "reason": "dry-run", "remote": remote, "branch": branch}
+    n = len(git(repo_dir, "diff", "--cached", "--name-only").stdout.decode().splitlines())
+    git(repo_dir, "commit", "--quiet", "-m", f"export: {commit[:12]} ({n} paths changed)")
+    push = git(repo_dir, "push", "--quiet", "origin", f"{branch}:{branch}", check=False)
+    if push.returncode != 0:
+        raise ExportError(f"push failed: {(push.stderr or b'').decode().strip()}")
+    return {"pushed": True, "remote": remote, "branch": branch,
+            "public_commit": git(repo_dir, "rev-parse", "HEAD").stdout.decode().strip()}
+
+
+def sync_and_pr(tree: Path, repo_dir: Path, remote: str, base: str, pr_branch: str, commit: str,
+                summary: dict, *, dry: bool) -> dict:
+    """Publish the export as a rolling pull request: force-update the tool-owned branch
+    `pr_branch` from origin/<base>, then create or refresh the ONE open PR for it."""
+    gh = _gh()
+    if not gh:
+        raise ExportError("gh not found on PATH (required for --pr; set CORE_EXPORT_GH)", 4)
+    gh_repo = _gh_repo_from_remote(remote)
+    if not gh_repo:
+        raise ExportError(f"--pr needs a GitHub remote (owner/repo), got {remote}", 2)
+    state = prepare_checkout(tree, repo_dir, remote, base, pr_branch)
+    if not state["base_exists"]:
+        raise ExportError(f"--pr needs an existing origin/{base}; do the first publication with --push", 2)
+    if not state["changed"]:
+        return {"mode": "pr", "pushed": False, "reason": "no changes vs origin/" + base, "branch": pr_branch}
+    if state["remote_branch_tree"] == state["tree"]:
+        # the rolling branch already carries exactly this projection: nothing to push, no PR churn
+        return {"mode": "pr", "pushed": False, "reason": f"no changes (origin/{pr_branch} already current)", "branch": pr_branch}
+    if dry:
+        return {"mode": "pr", "pushed": False, "reason": "dry-run", "branch": pr_branch}
+    n = len(git(repo_dir, "diff", "--cached", "--name-only").stdout.decode().splitlines())
+    title = f"graduate: {commit[:12]} ({n} paths)"
+    git(repo_dir, "commit", "--quiet", "-m", title)
+    push = git(repo_dir, "push", "--quiet", "--force", "origin", f"{pr_branch}:{pr_branch}", check=False)
+    if push.returncode != 0:
+        raise ExportError(f"push of {pr_branch} failed: {(push.stderr or b'').decode().strip()}")
+    body = (
+        f"Automated graduation from the private repo by `core-export --pr`.\n\n"
+        f"- source commit: `{commit}`\n- files: {summary.get('files')}\n"
+        f"- tenant blocks stripped: {summary.get('stripped_files')} file(s)\n"
+        f"- gate: {json.dumps(summary.get('gate'))}\n- manifest sha256: `{summary.get('manifest_sha256')}`\n\n"
+        f"This branch is tool-owned and force-updated on every graduation; review, then merge with "
+        f"`gh pr merge --squash`. Direct edits to the public tree are overwritten by the next graduation — "
+        f"open a PR against `{base}` instead; the maintainer absorbs it with `core-export --absorb-pr <n>`.\n"
+    )
+    listing = run([gh, "pr", "list", "--repo", gh_repo, "--head", pr_branch, "--base", base, "--state", "open",
+                   "--json", "number,url", "--limit", "5"], check=False)
+    if listing.returncode != 0:
+        raise ExportError(f"gh pr list failed: {(listing.stderr or b'').decode().strip()}", 4)
+    try:
+        open_prs = json.loads(listing.stdout.decode() or "[]")
+    except json.JSONDecodeError:
+        raise ExportError("gh pr list returned non-JSON", 4)
+    if open_prs:
+        num = open_prs[0]["number"]
+        edit = run([gh, "pr", "edit", str(num), "--repo", gh_repo, "--title", title, "--body", body], check=False)
+        if edit.returncode != 0:
+            raise ExportError(f"gh pr edit failed: {(edit.stderr or b'').decode().strip()}", 4)
+        return {"mode": "pr", "pushed": True, "branch": pr_branch, "pr": num, "url": open_prs[0].get("url"), "action": "updated",
+                "public_commit": git(repo_dir, "rev-parse", "HEAD").stdout.decode().strip()}
+    create = run([gh, "pr", "create", "--repo", gh_repo, "--base", base, "--head", pr_branch, "--title", title, "--body", body], check=False)
+    if create.returncode != 0:
+        raise ExportError(f"gh pr create failed: {(create.stderr or b'').decode().strip()}", 4)
+    url = create.stdout.decode().strip().splitlines()[-1] if create.stdout else None
+    return {"mode": "pr", "pushed": True, "branch": pr_branch, "url": url, "action": "created",
+            "public_commit": git(repo_dir, "rev-parse", "HEAD").stdout.decode().strip()}
+
+
+def absorb_pr(repo: Path, remote: str, number: int, chosen: set, *, apply: bool) -> dict:
+    """Bring a public-repo pull request back into the PRIVATE working tree (the source of truth).
+
+    Paths are identical on both sides for graduated files, so the PR diff applies directly.
+    A hunk touching a path outside the graduation selection cannot originate legitimately
+    from the public repo → refused. Applies through the index (`git apply --3way`), so the
+    change lands STAGED and never committed: the maintainer runs contracts, commits,
+    re-graduates, then closes the PR."""
+    gh = _gh()
+    if not gh:
+        raise ExportError("gh not found on PATH (required for --absorb-pr; set CORE_EXPORT_GH)", 4)
+    gh_repo = _gh_repo_from_remote(remote)
+    if not gh_repo:
+        raise ExportError(f"--absorb-pr needs a GitHub remote (owner/repo), got {remote}", 2)
+    view = run([gh, "pr", "view", str(number), "--repo", gh_repo, "--json", "number,title,url,headRefName,files"], check=False)
+    if view.returncode != 0:
+        raise ExportError(f"gh pr view failed: {(view.stderr or b'').decode().strip()}", 4)
+    meta = json.loads(view.stdout.decode() or "{}")
+    files = [f.get("path") for f in meta.get("files", []) if f.get("path")]
+    ignored = [f for f in files if f == MANIFEST_NAME]
+    outside = sorted(f for f in files if f not in chosen and f != MANIFEST_NAME)
+    if outside:
+        for f in outside:
+            log(f"OUTSIDE {f}")
+        raise ExportError(f"PR #{number} touches {len(outside)} path(s) outside the graduation selection — refuse to absorb", 3)
+    diff = run([gh, "pr", "diff", str(number), "--repo", gh_repo], check=False)
+    if diff.returncode != 0:
+        raise ExportError(f"gh pr diff failed: {(diff.stderr or b'').decode().strip()}", 4)
+    patch = diff.stdout
+    apply_cmd = ["git", "-C", str(repo), "apply", "--3way", f"--exclude={MANIFEST_NAME}"]
+    check = run(apply_cmd + ["--check"], input_bytes=patch, check=False)
+    applies = check.returncode == 0
+    result = {"pr": number, "title": meta.get("title"), "url": meta.get("url"), "head": meta.get("headRefName"),
+              "files": files, "ignored": ignored, "applies_cleanly": applies, "applied": False}
+    if not applies:
+        result["apply_error"] = (check.stderr or b"").decode("utf-8", "replace").strip()[:2000]
+        return result
+    if apply:
+        done = run(apply_cmd, input_bytes=patch, check=False)
+        if done.returncode != 0:
+            raise ExportError(f"git apply failed: {(done.stderr or b'').decode().strip()}")
+        result["applied"] = True
+    return result
+
+
+# ── main ─────────────────────────────────────────────────────────────────────
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog="core-export", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--repo", default=".", help="path inside the private repo (default: cwd)")
+    ap.add_argument("--tree-ish", default="HEAD", help="committed tree to export (default HEAD)")
+    ap.add_argument("--worktree", action="store_true", help="export the WORKING TREE (tracked + untracked, .gitignore honoured) via a temporary index — for iterating with --check; never pushable")
+    ap.add_argument("--manifest", default=None, help=f"manifest file (default {DEFAULT_MANIFEST})")
+    ap.add_argument("--out", default=None, help=f"export tree (default {DEFAULT_OUT})")
+    ap.add_argument("--check", action="store_true", help="select+strip+gate only; write nothing")
+    ap.add_argument("--push", action="store_true", help="sync the export into the public remote and push")
+    ap.add_argument("--dry-push", action="store_true", help="prepare the public checkout but neither commit nor push")
+    ap.add_argument("--pr", action="store_true", help="publish as a rolling pull request on the public repo (branch --pr-branch, one open PR, created/refreshed via gh)")
+    ap.add_argument("--pr-branch", default="graduate/next", help="tool-owned branch for --pr (default graduate/next)")
+    ap.add_argument("--absorb-pr", type=int, metavar="N", help="bring public PR #N back into the PRIVATE working tree (check-only unless --apply); never commits")
+    ap.add_argument("--apply", action="store_true", help="with --absorb-pr: actually apply the patch to the working tree")
+    ap.add_argument("--remote", default=None, help="public remote URL (overrides manifest `remote`)")
+    ap.add_argument("--branch", default=None, help="public branch (overrides manifest `branch`)")
+    ap.add_argument("--repo-dir", default=None, help=f"public checkout dir (default: sibling ../{DEFAULT_PUBLIC_PROJECT} of the private repo)")
+    ap.add_argument("--allow-no-gitleaks", action="store_true", help="push even when gitleaks is unavailable (literal gate still runs)")
+    ap.add_argument("--json", action="store_true", help="print a JSON summary to stdout")
+    a = ap.parse_args(argv)
+
+    try:
+        repo = repo_root(Path(a.repo).resolve())
+        manifest_rel = a.manifest or DEFAULT_MANIFEST
+        manifest_path = (repo / manifest_rel) if not os.path.isabs(manifest_rel) else Path(manifest_rel)
+        if not manifest_path.is_file():
+            raise ExportError(f"manifest not found: {manifest_path}", 2)
+        manifest_text = manifest_path.read_text()
+        m = Manifest.parse(manifest_text, str(manifest_path))
+        manifest_sha = hashlib.sha256(manifest_text.encode()).hexdigest()
+        if a.worktree:
+            if a.push or a.dry_push or a.pr:
+                raise ExportError("--worktree exports uncommitted content and can never be published; commit first", 2)
+            # A tree object of the working tree: same git-object path as a commit, so the
+            # selection/strip/gate code is identical, and .gitignore still excludes .env etc.
+            tmp_index = tempfile.NamedTemporaryFile(prefix="core-export-index.", delete=False)
+            tmp_index.close()
+            os.unlink(tmp_index.name)
+            idx_env = dict(os.environ, GIT_INDEX_FILE=tmp_index.name)
+            try:
+                run(["git", "-C", str(repo), "read-tree", "HEAD"], env=idx_env)
+                run(["git", "-C", str(repo), "add", "-A", "--", "."], env=idx_env)
+                a.tree_ish = run(["git", "-C", str(repo), "write-tree"], env=idx_env).stdout.decode().strip()
+            finally:
+                try: os.unlink(tmp_index.name)
+                except OSError: pass
+            commit = f"worktree:{a.tree_ish}"
+        else:
+            commit = git(repo, "rev-parse", f"{a.tree_ish}^{{commit}}").stdout.decode().strip()
+
+        entries = tracked_entries(repo, a.tree_ish)
+        chosen = [p for _mode, p in entries if selected(p, m)]
+        if not chosen:
+            raise ExportError("selection is empty — nothing to export", 2)
+        try:
+            manifest_in_repo = str(manifest_path.resolve().relative_to(repo.resolve()))
+        except ValueError:
+            manifest_in_repo = None
+        if manifest_in_repo in chosen:
+            # The manifest names the very literals the gate blocks — it is tenant policy and
+            # never ships. Swept in by a directory include → silently dropped; named by an
+            # explicit `include <manifest>` line → refused, because that is a manifest bug.
+            if manifest_in_repo in m.include:
+                raise ExportError(f"refusing to export the manifest itself ({manifest_in_repo}); it carries the blocklist", 2)
+            chosen = [p for p in chosen if p != manifest_in_repo]
+            log(f"note: {manifest_in_repo} excluded from the export (never ships)")
+
+        work = Path(tempfile.mkdtemp(prefix="core-export.", dir=str(repo / ".results") if (repo / ".results").is_dir() else None))
+        tree = work / "tree"
+        try:
+            materialise(repo, a.tree_ish, chosen, tree)
+            present = [p for p in chosen if (tree / p).exists() or (tree / p).is_symlink()]
+            missing = sorted(set(chosen) - set(present))
+            if missing:
+                raise ExportError(f"{len(missing)} selected paths did not materialise (first: {missing[0]})")
+
+            stripped: dict[str, int] = {}
+            for rel in present:
+                if not any(_glob_match(rel, g) for g in m.strip):
+                    continue
+                p = tree / rel
+                if p.is_symlink():
+                    continue
+                data = p.read_bytes()
+                if not is_text(data):
+                    continue
+                new, blocks = strip_tenant_blocks(data.decode("utf-8", "surrogateescape"), rel)
+                if blocks:
+                    p.write_bytes(new.encode("utf-8", "surrogateescape"))
+                    stripped[rel] = blocks
+
+            # a tenant marker left in a file we do NOT strip is a manifest bug, not a leak
+            for rel in present:
+                if rel in stripped or any(_glob_match(rel, g) for g in m.strip):
+                    continue
+                p = tree / rel
+                if p.is_symlink():
+                    continue
+                data = p.read_bytes()
+                if is_text(data) and any(MARKER_RE.match(l) for l in data.decode("utf-8", "replace").splitlines()):
+                    raise ExportError(f"{rel}: tenant markers present but file is not covered by a `strip` line", 2)
+
+            hits = gate_literals(tree, present, m)
+            wants_push = a.push or a.dry_push or a.pr
+            if a.push and a.pr:
+                raise ExportError("--push and --pr are exclusive: direct publication or rolling PR, not both", 2)
+            if wants_push and not m.block:
+                raise ExportError("refusing to push with a manifest that has no `block` lines (an ungated export)", 2)
+            gl_status, gl_findings = gate_gitleaks(
+                work, m.gitleaks_config and str((repo / m.gitleaks_config)),
+                required=wants_push and not a.allow_no_gitleaks,
+            )
+            gate = {"literal_hits": len(hits), "gitleaks": gl_status, "gitleaks_findings": len(gl_findings)}
+            if hits or gl_findings:
+                for h in hits[:200]:
+                    log(f"BLOCK {h}")
+                for f in gl_findings[:200]:
+                    log(f"GITLEAKS {f}")
+                raise ExportError(f"gate blocked: {len(hits)} literal hit(s), {len(gl_findings)} gitleaks finding(s)", 3)
+
+            write_manifest(tree, commit=commit, tree_ish=a.tree_ish, manifest_path=manifest_rel,
+                           manifest_sha=manifest_sha, files=present, stripped=stripped, gate=gate)
+
+            summary = {
+                "source_commit": commit, "files": len(present), "stripped_files": len(stripped),
+                "gate": gate, "manifest_sha256": manifest_sha, "out": None, "push": None,
+            }
+            if a.absorb_pr is not None:
+                remote = a.remote or m.remote
+                if not remote:
+                    raise ExportError("--absorb-pr needs --remote or a manifest `remote` line", 2)
+                summary["absorb"] = absorb_pr(repo, remote, a.absorb_pr, set(present), apply=a.apply)
+                log(f"absorb: {json.dumps({k: v for k, v in summary['absorb'].items() if k != 'files'})}")
+                if a.json:
+                    print(json.dumps(summary, indent=2, sort_keys=True))
+                return 0 if summary["absorb"]["applies_cleanly"] else 3
+            if a.check:
+                log(f"check ok: {len(present)} files, {len(stripped)} stripped, gate clean ({gl_status})")
+            else:
+                out = Path(a.out or (repo / DEFAULT_OUT))
+                out = out if out.is_absolute() else (Path.cwd() / out)
+                out.parent.mkdir(parents=True, exist_ok=True)
+                staged = out.parent / (out.name + ".staging")
+                if staged.exists():
+                    shutil.rmtree(staged)
+                shutil.copytree(tree, staged, symlinks=True)
+                if out.exists():
+                    shutil.rmtree(out)
+                os.replace(staged, out)
+                summary["out"] = str(out)
+                log(f"wrote {len(present)} files to {out} ({len(stripped)} stripped, gate clean, gitleaks {gl_status})")
+                if wants_push:
+                    remote = a.remote or m.remote
+                    if not remote:
+                        raise ExportError("--push needs --remote or a manifest `remote` line", 2)
+                    branch = a.branch or m.branch
+                    repo_dir = Path(a.repo_dir) if a.repo_dir else (repo.parent / DEFAULT_PUBLIC_PROJECT)
+                    if a.pr:
+                        summary["push"] = sync_and_pr(out, repo_dir, remote, branch, a.pr_branch, commit, summary, dry=a.dry_push)
+                    else:
+                        summary["push"] = sync_and_push(out, repo_dir, remote, branch, commit, dry=a.dry_push)
+                    log(f"push: {summary['push']}")
+            if a.json:
+                print(json.dumps(summary, indent=2, sort_keys=True))
+            return 0
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+    except ExportError as exc:
+        log(str(exc))
+        return exc.code
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

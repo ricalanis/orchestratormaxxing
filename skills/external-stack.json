@@ -1,0 +1,314 @@
+{
+  "schema_version": 1,
+  "decision": "ADOPT + EXTEND: pin upstream payloads and deploy the native claudemaxxing workflows through the same deterministic target-aware four-host lifecycle.",
+  "skills": [
+    {
+      "name": "anti-slop-design",
+      "kind": "internal-router",
+      "repo": "local://claudemaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "skills/anti-slop-design",
+      "include": [
+        "SKILL.md"
+      ],
+      "license": "MIT",
+      "tree_sha256": "565ca453689b81aa9fe8169ca31067a2d7f72d94510272415ebf15c10a4268d8",
+      "note": "Always-on generation router. The other eight entries are the user-requested upstream skills."
+    },
+    {
+      "name": "orchestration-practices",
+      "kind": "internal-router",
+      "repo": "local://claudemaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "skills/orchestration-practices",
+      "include": [
+        "SKILL.md",
+        "agents"
+      ],
+      "license": "MIT",
+      "tree_sha256": "9a9a7224322942a5a9e4a2847de1e16b047be7b611c0d6b5fd116935d2cdcacf",
+      "note": "Shared Orchestra-of-One vocabulary router: advisory matching, deterministic preflight, exact four brakes, typed rescue and evidence receipt across Hermes, Claude, Codex, OpenCode and Open Design."
+    },
+    {
+      "name": "humanizer",
+      "repo": "https://github.com/blader/humanizer.git",
+      "source_page": "https://oneaway.io/skills/humanizer",
+      "commit": "523374dee72d67c7b2b5f858ea0094ffda49c3ac",
+      "path": ".",
+      "include": [
+        "SKILL.md",
+        "LICENSE",
+        "agents",
+        "scripts"
+      ],
+      "license": "MIT",
+      "tree_sha256": "70e5daebd2924da1e50f21133977457e17565f9f4e9da10c37580c4e61534258",
+      "note": "OneAway's documented SKILL.md URL returns 404. Its page attributes Humanizer to blader; use the maintained MIT v2.9.1 source instead of scraping the page."
+    },
+    {
+      "name": "creator",
+      "repo": "https://github.com/Victorcorcos/skills.git",
+      "commit": "1d891eea6cec007f6394d38fe5b874e1ba1df5f0",
+      "path": "skills/creator",
+      "include": [
+        "SKILL.md",
+        "agents",
+        "references"
+      ],
+      "license": "NOASSERTION",
+      "tree_sha256": "a64f60f2303d978d4c29641a65716c994fe3419cbf227ad5388e762c5892755e",
+      "note": "Fetch-only: upstream has no declared license, so its payload is installed from the user's requested source but is not vendored in this repository."
+    },
+    {
+      "name": "filler",
+      "repo": "https://github.com/Victorcorcos/skills.git",
+      "commit": "1d891eea6cec007f6394d38fe5b874e1ba1df5f0",
+      "path": "skills/filler",
+      "include": [
+        "SKILL.md",
+        "agents",
+        "references"
+      ],
+      "license": "NOASSERTION",
+      "tree_sha256": "5b21b311841b07061d0ea54a5beb7b30ea5f53d96f3b9bfcfab7c1a8b54b4d9b",
+      "note": "Fetch-only: upstream has no declared license, so its payload is installed from the user's requested source but is not vendored in this repository."
+    },
+    {
+      "name": "improver",
+      "repo": "https://github.com/Victorcorcos/skills.git",
+      "commit": "1d891eea6cec007f6394d38fe5b874e1ba1df5f0",
+      "path": "skills/improver",
+      "include": [
+        "SKILL.md",
+        "agents"
+      ],
+      "license": "NOASSERTION",
+      "tree_sha256": "2ce25dd52914513cfb076ee443fd43700b73c83d9d2cd6b71c5c51ff6c3c1f7e",
+      "note": "Fetch-only: upstream has no declared license, so its payload is installed from the user's requested source but is not vendored in this repository."
+    },
+    {
+      "name": "reviewer",
+      "repo": "https://github.com/Victorcorcos/skills.git",
+      "commit": "1d891eea6cec007f6394d38fe5b874e1ba1df5f0",
+      "path": "skills/reviewer",
+      "include": [
+        "SKILL.md",
+        "agents"
+      ],
+      "license": "NOASSERTION",
+      "tree_sha256": "6ba82224ae6ff75ce2bce5ae041c3eb1a9ab6e12a731482f358422cccd6a4bfc",
+      "note": "Fetch-only: upstream has no declared license, so its payload is installed from the user's requested source but is not vendored in this repository."
+    },
+    {
+      "name": "hallmark",
+      "repo": "https://github.com/nutlope/hallmark.git",
+      "commit": "13ac0ec7e148655948100b6396439e481361d690",
+      "path": "skills/hallmark",
+      "include": [
+        "SKILL.md",
+        "references"
+      ],
+      "license": "MIT",
+      "tree_sha256": "419f6245abb75bef1a6067f777f8d6d66e574ea92c893ba0834805e537c9b6ae"
+    },
+    {
+      "name": "unslop-ui",
+      "repo": "https://github.com/JCarterJohnson/vibecoded-design-tells.git",
+      "source_page": "https://github.com/Carter/vibecoded-design-tells",
+      "commit": "f7c4aefc2c797a66e55b49354a93917ab60d33ac",
+      "path": "skill",
+      "include": [
+        "SKILL.md",
+        "README.md",
+        "references",
+        "scripts"
+      ],
+      "license": "MIT",
+      "tree_sha256": "4aff2017278fcf6d431f5d74fbb72b37a675836d375161935bf3c10e9b33fd26",
+      "note": "The supplied Carter URL returns 404; GitHub search resolves the maintained source to JCarterJohnson."
+    },
+    {
+      "name": "avoid-ai-design",
+      "repo": "https://github.com/funboy322/avoid-ai-design.git",
+      "commit": "8337060636a8cf12e32e883eb367becd702aa526",
+      "path": ".",
+      "include": [
+        "SKILL.md",
+        "LICENSE",
+        "references"
+      ],
+      "license": "MIT",
+      "tree_sha256": "964c2c238a696cd1b24af42322b272f16271bfdd72139245eebf4dfd3a24a179"
+    },
+    {
+      "name": "cheap-delegate",
+      "kind": "claudemaxxing-workflow",
+      "repo": "local://claudemaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "plugins/claudemaxxing/skills/cheap-delegate",
+      "include": [
+        "SKILL.md"
+      ],
+      "targets": [
+        "OpenCode",
+        "Hermes"
+      ],
+      "license": "MIT",
+      "tree_sha256": "8990c8e0c0d350a838cc6fb5c9a4dcadc448711a06a21102b54e0f3e753ca31d"
+    },
+    {
+      "name": "fanout",
+      "kind": "claudemaxxing-workflow",
+      "repo": "local://claudemaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "plugins/claudemaxxing/skills/fanout",
+      "include": [
+        "SKILL.md",
+        "agents"
+      ],
+      "targets": [
+        "OpenCode",
+        "Hermes"
+      ],
+      "license": "MIT",
+      "tree_sha256": "a1db0362aa3b41ef581aa88560f50239decec5dd5dda9589c88733f2a055db22"
+    },
+    {
+      "name": "gauntlet",
+      "kind": "claudemaxxing-workflow",
+      "repo": "local://claudemaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "plugins/claudemaxxing/skills/gauntlet",
+      "include": [
+        "SKILL.md",
+        "agents"
+      ],
+      "targets": [
+        "OpenCode",
+        "Hermes"
+      ],
+      "license": "MIT",
+      "tree_sha256": "55c70cd6951781c7d1f3e13658641092572cead005aa41b6baf7e68c2a38cee5"
+    },
+    {
+      "name": "i-have-adhd",
+      "kind": "claudemaxxing-workflow",
+      "repo": "local://claudemaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "plugins/claudemaxxing/skills/i-have-adhd",
+      "include": [
+        "SKILL.md",
+        "references"
+      ],
+      "targets": [
+        "OpenCode",
+        "Hermes"
+      ],
+      "license": "MIT",
+      "tree_sha256": "4c4b51bd398b159945c88f11d9befa8ff78eb64670ee9d008d8b799319bcfb5f"
+    },
+    {
+      "name": "graduate",
+      "kind": "claudemaxxing-workflow",
+      "repo": "local://claudemaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "plugins/claudemaxxing/skills/graduate",
+      "include": [
+        "SKILL.md",
+        "agents"
+      ],
+      "targets": [
+        "OpenCode",
+        "Hermes"
+      ],
+      "license": "MIT",
+      "tree_sha256": "dbde9feeff90cc4062880611207eb51494b9bc71f088c9f27020139ae1325026"
+    },
+    {
+      "name": "ideas",
+      "kind": "claudemaxxing-workflow",
+      "repo": "local://claudemaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "plugins/claudemaxxing/skills/ideas",
+      "include": [
+        "SKILL.md",
+        "agents"
+      ],
+      "targets": [
+        "OpenCode",
+        "Hermes"
+      ],
+      "license": "MIT",
+      "tree_sha256": "71aa872e39096c8d71a0a11566ac93fb358ce0da0ba9927012dbe66a8809cfac"
+    },
+    {
+      "name": "memory",
+      "kind": "claudemaxxing-workflow",
+      "repo": "local://claudemaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "plugins/claudemaxxing/skills/memory",
+      "include": [
+        "SKILL.md",
+        "agents"
+      ],
+      "targets": [
+        "OpenCode",
+        "Hermes"
+      ],
+      "license": "MIT",
+      "tree_sha256": "d0f3f9a3bc6de78cfdde7640dd25afbb95073901b1686d65ba8c102277923850"
+    },
+    {
+      "name": "self-improve",
+      "kind": "claudemaxxing-workflow",
+      "repo": "local://claudemaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "plugins/claudemaxxing/skills/self-improve",
+      "include": [
+        "SKILL.md",
+        "agents"
+      ],
+      "targets": [
+        "OpenCode",
+        "Hermes"
+      ],
+      "license": "MIT",
+      "tree_sha256": "fbc7678266210f3b139c7cba6d42e3ab77e737369463b8c5472d0d18d159f89e"
+    },
+    {
+      "name": "solplan",
+      "kind": "claudemaxxing-workflow",
+      "repo": "local://claudemaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "plugins/claudemaxxing/skills/solplan",
+      "include": [
+        "SKILL.md",
+        "agents",
+        "scripts/run_solplan.py"
+      ],
+      "targets": [
+        "OpenCode",
+        "Hermes"
+      ],
+      "license": "MIT",
+      "tree_sha256": "feb6b6251f9a9569226ebd2b8a760d8e3bac5757d8cceedd16789c704c44240a"
+    },
+    {
+      "name": "wrap-up",
+      "kind": "claudemaxxing-workflow",
+      "repo": "local://claudemaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "plugins/claudemaxxing/skills/wrap-up",
+      "include": [
+        "SKILL.md",
+        "agents"
+      ],
+      "targets": [
+        "OpenCode",
+        "Hermes"
+      ],
+      "license": "MIT",
+      "tree_sha256": "d6c6361aef39bce0ff548a8af774651405fe4a0b5887655ba6d8711b55a0fe52"
+    }
+  ]
+}

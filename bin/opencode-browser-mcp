@@ -1,0 +1,476 @@
+#!/usr/bin/env node
+/* opencode-browser-mcp — browser automation for OpenCode agents (kimi-coder / glm-coder).
+ *
+ * A minimal MCP stdio server that exposes Chrome DevTools Protocol (CDP) actions as
+ * MCP tools, so OpenCode agents on Ollama Cloud get the same browser capabilities
+ * Claude Code has — navigate, click, type, extract, screenshot, eval.
+ *
+ * Zero dependencies: needs Node >= 22 (built-in fetch + WebSocket). Speaks MCP over
+ * stdio (newline-delimited JSON-RPC 2.0); stdout is protocol-only, logs go to stderr.
+ *
+ * Config (env):
+ *   CDP_URL          Chrome DevTools endpoint. Default http://127.0.0.1:18800
+ *                    Remote (e.g. GPU box over Tailscale): https://<server>.<tailnet>.ts.net:18800
+ *   CDP_HOST_HEADER  Host header sent to Chrome. Default "localhost" — Chrome rejects
+ *                    DevTools requests whose Host is not an IP or localhost, so this
+ *                    override is what makes tunneled access work. Set it only if a
+ *                    fronting proxy routes by Host.
+ *   BROWSER_MCP_SHOT_DIR  Where screenshots are saved. Default ~/.cache/opencode-browser-mcp
+ *
+ * Chrome must run with:  google-chrome --remote-debugging-port=18800
+ * Docs: knowledge/opencode-browser-connector.md (in the claudemaxxing repo)
+ */
+'use strict';
+
+const http = require('node:http');
+const https = require('node:https');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+
+const CDP_URL = (process.env.CDP_URL || 'http://127.0.0.1:18800').replace(/\/+$/, '');
+const CDP_HOST_HEADER = process.env.CDP_HOST_HEADER || 'localhost';
+const SHOT_DIR = process.env.BROWSER_MCP_SHOT_DIR
+  || path.join(os.homedir(), '.cache', 'opencode-browser-mcp');
+const CDP_TIMEOUT_MS = 30_000;
+const LOAD_TIMEOUT_MS = 20_000;
+const MAX_EXTRACT_CHARS = 60_000;
+
+const log = (...a) => console.error('[browser-mcp]', ...a);
+
+/* ── CDP transport ──────────────────────────────────────────────────────── */
+
+// GET/PUT against Chrome's DevTools HTTP endpoints (/json/list, /json/new).
+// Uses node:http directly so we can force the Host header (fetch won't).
+function cdpJson(pathname, method = 'GET') {
+  return new Promise((resolve, reject) => {
+    const u = new URL(CDP_URL + pathname);
+    const mod = u.protocol === 'https:' ? https : http;
+    const req = mod.request(
+      {
+        hostname: u.hostname,
+        port: u.port || (u.protocol === 'https:' ? 443 : 80),
+        path: u.pathname + u.search,
+        method,
+        headers: { Host: CDP_HOST_HEADER, Accept: 'application/json' },
+      },
+      (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => (body += c));
+        res.on('end', () => {
+          if (res.statusCode !== 200) {
+            return reject(new Error(
+              `CDP HTTP ${method} ${pathname} → ${res.statusCode}: ${body.slice(0, 300)}`));
+          }
+          try { resolve(JSON.parse(body)); }
+          catch { reject(new Error(`CDP ${pathname} returned non-JSON: ${body.slice(0, 300)}`)); }
+        });
+      },
+    );
+    req.on('error', (e) => reject(new Error(
+      `cannot reach Chrome at ${CDP_URL} (${e.message}) — is it running with --remote-debugging-port?`)));
+    req.setTimeout(CDP_TIMEOUT_MS, () => req.destroy(new Error('CDP HTTP timeout')));
+    req.end();
+  });
+}
+
+// Chrome reports webSocketDebuggerUrl as ws://localhost:18800/... — when we reach it
+// through a tunnel, connect via the tunnel's host/port instead, same target path.
+function rewriteWsUrl(wsUrl) {
+  const u = new URL(wsUrl);
+  const base = new URL(CDP_URL);
+  u.protocol = base.protocol === 'https:' ? 'wss:' : 'ws:';
+  u.host = base.host;
+  return u.toString();
+}
+
+let ws = null;
+let nextId = 1;
+const pending = new Map(); // id → {resolve, reject, timer}
+const eventWaiters = [];   // {method, resolve, timer}
+
+function failAllPending(reason) {
+  for (const [, p] of pending) { clearTimeout(p.timer); p.reject(new Error(reason)); }
+  pending.clear();
+}
+
+function onWsMessage(data) {
+  let msg;
+  try { msg = JSON.parse(typeof data === 'string' ? data : data.toString()); }
+  catch { return; }
+  if (msg.id !== undefined && pending.has(msg.id)) {
+    const p = pending.get(msg.id);
+    pending.delete(msg.id);
+    clearTimeout(p.timer);
+    if (msg.error) p.reject(new Error(`CDP: ${msg.error.message || JSON.stringify(msg.error)}`));
+    else p.resolve(msg.result || {});
+  } else if (msg.method) {
+    for (let i = eventWaiters.length - 1; i >= 0; i--) {
+      if (eventWaiters[i].method === msg.method) {
+        const w = eventWaiters.splice(i, 1)[0];
+        clearTimeout(w.timer);
+        w.resolve(msg.params || {});
+      }
+    }
+  }
+}
+
+async function connect() {
+  if (ws && ws.readyState === WebSocket.OPEN) return;
+  const targets = await cdpJson('/json/list');
+  let page = Array.isArray(targets)
+    ? targets.find((t) => t.type === 'page' && !/^(devtools|chrome-extension):/.test(t.url || ''))
+    : null;
+  if (!page) page = await cdpJson('/json/new?about:blank', 'PUT'); // Chrome ≥ M111 wants PUT
+  if (!page || !page.webSocketDebuggerUrl) {
+    throw new Error('no debuggable page target found (and could not create one)');
+  }
+  const wsUrl = rewriteWsUrl(page.webSocketDebuggerUrl);
+  log(`attaching to ${page.url || 'about:blank'} via ${wsUrl}`);
+  await new Promise((resolve, reject) => {
+    // { headers } is an undici extension to the WebSocket ctor — same Host override
+    // rationale as cdpJson. Harmless when connecting to plain localhost.
+    let sock;
+    try { sock = new WebSocket(wsUrl, { headers: { host: CDP_HOST_HEADER } }); }
+    catch { sock = new WebSocket(wsUrl); }
+    const t = setTimeout(() => reject(new Error('CDP WebSocket connect timeout')), CDP_TIMEOUT_MS);
+    sock.addEventListener('open', () => { clearTimeout(t); ws = sock; resolve(); });
+    sock.addEventListener('error', () => { clearTimeout(t); reject(new Error(`CDP WebSocket failed (${wsUrl})`)); });
+    sock.addEventListener('close', () => {
+      if (ws === sock) ws = null;
+      failAllPending('CDP connection closed');
+    });
+    sock.addEventListener('message', (ev) => onWsMessage(ev.data));
+  });
+  await cmd('Page.enable');
+  await cmd('Runtime.enable');
+}
+
+function cmd(method, params = {}) {
+  return new Promise((resolve, reject) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return reject(new Error('CDP not connected'));
+    const id = nextId++;
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error(`CDP ${method} timed out after ${CDP_TIMEOUT_MS}ms`));
+    }, CDP_TIMEOUT_MS);
+    pending.set(id, { resolve, reject, timer });
+    ws.send(JSON.stringify({ id, method, params }));
+  });
+}
+
+function waitForEvent(method, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const i = eventWaiters.findIndex((w) => w.method === method && w.resolve === resolve);
+      if (i !== -1) eventWaiters.splice(i, 1);
+      reject(new Error(`timeout waiting for ${method}`));
+    }, timeoutMs);
+    eventWaiters.push({ method, resolve, timer });
+  });
+}
+
+function throwPageException(d) {
+  const desc = (d.exception && (d.exception.description || d.exception.value)) || d.text;
+  throw new Error(`page JS exception: ${String(desc).split('\n')[0]}`);
+}
+
+// Evaluate an expression in the page; returns the JSON value, throws on page exception.
+// Used by the internal tool scripts (self-contained IIFEs — no cross-call bindings).
+async function evalJs(expression) {
+  await connect();
+  const r = await cmd('Runtime.evaluate', {
+    expression, returnByValue: true, awaitPromise: true, userGesture: true,
+  });
+  if (r.exceptionDetails) throwPageException(r.exceptionDetails);
+  return r.result ? r.result.value : undefined;
+}
+
+// Evaluate USER code (browser_eval) with DevTools-console semantics. replMode fixes
+// the cross-call state leak: without it, a top-level `const`/`let` binds permanently
+// in the page's global lexical scope, so repeating a declaration in a later call
+// throws "Identifier has already been declared". replMode also enables top-level
+// `await`. Caveat: the REPL wrapper boxes the completion value, so `awaitPromise`
+// no longer unwraps a promise-valued result — we await/serialize explicitly below
+// to keep the tool's documented "promises are awaited" behavior.
+async function evalRepl(expression) {
+  await connect();
+  let r = await cmd('Runtime.evaluate', {
+    expression, replMode: true, awaitPromise: true, userGesture: true, returnByValue: false,
+  });
+  if (r.exceptionDetails) throwPageException(r.exceptionDetails);
+  const res = r.result || {};
+  if (res.subtype === 'promise' && res.objectId) {
+    r = await cmd('Runtime.awaitPromise', { promiseObjectId: res.objectId, returnByValue: true });
+    if (r.exceptionDetails) throwPageException(r.exceptionDetails);
+    return r.result ? r.result.value : undefined;
+  }
+  if (res.objectId) { // non-promise object → serialize by value
+    r = await cmd('Runtime.callFunctionOn', {
+      objectId: res.objectId, functionDeclaration: 'function () { return this; }', returnByValue: true,
+    });
+    if (r.exceptionDetails) throwPageException(r.exceptionDetails);
+    return r.result ? r.result.value : undefined;
+  }
+  return res.value;
+}
+
+/* ── Tools ──────────────────────────────────────────────────────────────── */
+
+const text = (s) => ({ content: [{ type: 'text', text: s }] });
+const sel = (s) => JSON.stringify(String(s)); // safely embed a selector in page JS
+
+// Truncate without splitting a surrogate pair — a bare .slice(0, n) can cut an
+// emoji in half, leaving a lone surrogate that decodes as U+FFFD downstream.
+const clip = (s, n) => {
+  if (s.length <= n) return s;
+  let end = n;
+  const c = s.charCodeAt(end - 1);
+  if (c >= 0xd800 && c <= 0xdbff) end--; // high surrogate at the cut → back off one
+  return s.slice(0, end) + '\n… (truncated)';
+};
+
+const TOOLS = [
+  {
+    name: 'browser_navigate',
+    description: 'Navigate the browser to a URL and wait for the page to load. Returns the final URL and page title.',
+    inputSchema: {
+      type: 'object',
+      properties: { url: { type: 'string', description: 'Absolute URL, e.g. https://example.com' } },
+      required: ['url'],
+    },
+    handler: async ({ url }) => {
+      if (!/^https?:\/\//i.test(String(url))) throw new Error('url must start with http:// or https://');
+      await connect();
+      const loaded = waitForEvent('Page.loadEventFired', LOAD_TIMEOUT_MS).catch(() => null);
+      const nav = await cmd('Page.navigate', { url });
+      if (nav.errorText) throw new Error(`navigation failed: ${nav.errorText}`);
+      const l = await loaded;
+      const info = await evalJs('({ url: location.href, title: document.title })');
+      return text(`Navigated to ${info.url} — title: ${JSON.stringify(info.title)}`
+        + (l ? '' : ' (load event not observed within timeout; page may still be loading)'));
+    },
+  },
+  {
+    name: 'browser_screenshot',
+    description: 'Capture a screenshot of the current page. Saves a PNG file and returns its path (default), or returns base64 with as_base64=true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Optional file path to save the PNG to. Default: a timestamped file under the screenshot cache dir.' },
+        as_base64: { type: 'boolean', description: 'Return the PNG as base64 image content instead of saving to a file. Default false.' },
+      },
+    },
+    handler: async (args = {}) => {
+      await connect();
+      const { data } = await cmd('Page.captureScreenshot', { format: 'png' });
+      if (args.as_base64) return { content: [{ type: 'image', data, mimeType: 'image/png' }] };
+      const p = args.path
+        || path.join(SHOT_DIR, `shot-${new Date().toISOString().replace(/[:.]/g, '-')}.png`);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      const buf = Buffer.from(data, 'base64');
+      fs.writeFileSync(p, buf);
+      return text(`Screenshot saved to ${p} (${buf.length} bytes)`);
+    },
+  },
+  {
+    name: 'browser_click',
+    description: 'Click the first element matching a CSS selector (scrolls it into view first).',
+    inputSchema: {
+      type: 'object',
+      properties: { selector: { type: 'string', description: 'CSS selector, e.g. "button.submit" or "#login"' } },
+      required: ['selector'],
+    },
+    handler: async ({ selector }) => {
+      const r = await evalJs(`(() => {
+        const el = document.querySelector(${sel(selector)});
+        if (!el) return { error: 'no element matches selector' };
+        el.scrollIntoView({ block: 'center', inline: 'center' });
+        el.click();
+        return { ok: true, tag: el.tagName.toLowerCase(), text: [...(el.innerText || '').trim()].slice(0, 120).join('') };
+      })()`);
+      if (r && r.error) throw new Error(`${r.error}: ${selector}`);
+      return text(`Clicked <${r.tag}>${r.text ? ` "${r.text}"` : ''} (${selector})`);
+    },
+  },
+  {
+    name: 'browser_type',
+    description: 'Type text into the first input/textarea/contenteditable matching a CSS selector (replaces its current value; fires input/change events so frameworks like React see it).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        selector: { type: 'string', description: 'CSS selector of the input element' },
+        text: { type: 'string', description: 'Text to set as the element value' },
+      },
+      required: ['selector', 'text'],
+    },
+    handler: async ({ selector, text: t }) => {
+      const r = await evalJs(`(() => {
+        const el = document.querySelector(${sel(selector)});
+        if (!el) return { error: 'no element matches selector' };
+        el.focus();
+        const value = ${JSON.stringify(String(t))};
+        const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype
+                    : el instanceof HTMLInputElement ? HTMLInputElement.prototype : null;
+        const setter = proto && Object.getOwnPropertyDescriptor(proto, 'value');
+        if (setter && setter.set) setter.set.call(el, value);
+        else if ('value' in el) el.value = value;
+        else el.textContent = value;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return { ok: true, value: 'value' in el ? el.value : el.textContent };
+      })()`);
+      if (r && r.error) throw new Error(`${r.error}: ${selector}`);
+      return text(`Typed into ${selector} — value is now ${JSON.stringify([...String(r.value)].slice(0, 200).join(''))}`);
+    },
+  },
+  {
+    name: 'browser_extract',
+    description: 'Extract visible text from all elements matching a CSS selector (default: the whole page body), including open shadow DOM and same-origin iframes. Returns up to 50 matches. For dynamically rendered content, use wait_for (CSS selector to wait for) and/or wait_ms (fixed delay).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        selector: { type: 'string', description: 'CSS selector. Default "body" (whole visible page text).' },
+        wait_for: { type: 'string', description: 'Wait until this CSS selector matches (up to 10s) before extracting — for content rendered after page load.' },
+        wait_ms: { type: 'number', description: 'Fixed delay in milliseconds before extracting (max 15000).' },
+      },
+    },
+    handler: async (args = {}) => {
+      const selector = args.selector || 'body';
+      const waitMs = Math.max(0, Math.min(Number(args.wait_ms) || 0, 15_000));
+      const r = await evalJs(`(async () => {
+        ${waitMs ? `await new Promise((r) => setTimeout(r, ${waitMs}));` : ''}
+        ${args.wait_for ? `{
+          const t0 = Date.now();
+          while (!document.querySelector(${sel(args.wait_for)})) {
+            if (Date.now() - t0 > 10000) return { error: 'timed out waiting for wait_for selector' };
+            await new Promise((r) => setTimeout(r, 100));
+          }
+        }` : ''}
+        // innerText alone misses open shadow DOM and same-origin iframes — recurse into both.
+        // (Closed shadow roots and cross-origin frames stay out of reach by design.)
+        const grab = (el, depth) => {
+          try {
+            if (el.contentDocument && el.contentDocument.body) return grab(el.contentDocument.body, depth + 1);
+          } catch {}
+          let t = (el.innerText ?? el.textContent ?? '');
+          if (depth > 8 || !el.querySelectorAll) return t;
+          const roots = el.shadowRoot ? [el.shadowRoot] : [];
+          for (const d of el.querySelectorAll('*')) if (d.shadowRoot) roots.push(d.shadowRoot);
+          for (const sr of roots) for (const c of sr.children) {
+            const s = grab(c, depth + 1);
+            if (s.trim()) t += (t.trim() ? '\\n' : '') + s;
+          }
+          for (const f of el.querySelectorAll('iframe, frame')) {
+            try {
+              const b = f.contentDocument && f.contentDocument.body;
+              if (b) { const s = grab(b, depth + 1); if (s.trim()) t += (t.trim() ? '\\n' : '') + s; }
+            } catch {}
+          }
+          return t;
+        };
+        const els = [...document.querySelectorAll(${sel(selector)})];
+        if (!els.length) return { error: 'no elements match selector' };
+        return { count: els.length, texts: els.slice(0, 50).map((e) => grab(e, 0).trim()) };
+      })()`);
+      if (r && r.error) throw new Error(`${r.error}: ${selector}`);
+      let out = r.count === 1 ? r.texts[0]
+        : r.texts.map((t, i) => `[${i + 1}] ${t}`).join('\n');
+      if (r.count > 50) out += `\n… (${r.count} matches total, showing first 50)`;
+      out = clip(out, MAX_EXTRACT_CHARS);
+      return text(out || '(matched elements have no visible text)');
+    },
+  },
+  {
+    name: 'browser_eval',
+    description: 'Execute a JavaScript expression in the page context and return its JSON-serialized result. Promises are awaited.',
+    inputSchema: {
+      type: 'object',
+      properties: { javascript: { type: 'string', description: 'JS expression, e.g. "document.querySelectorAll(\'a\').length"' } },
+      required: ['javascript'],
+    },
+    handler: async ({ javascript }) => {
+      const v = await evalRepl(String(javascript));
+      const out = v === undefined ? 'undefined' : JSON.stringify(v, null, 2);
+      return text(clip(out, MAX_EXTRACT_CHARS));
+    },
+  },
+  {
+    name: 'browser_get_url',
+    description: 'Return the current page URL.',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async () => text(String(await evalJs('location.href'))),
+  },
+  {
+    name: 'browser_get_title',
+    description: 'Return the current page title.',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async () => text(String(await evalJs('document.title'))),
+  },
+];
+
+/* ── MCP stdio server (JSON-RPC 2.0, newline-delimited) ─────────────────── */
+
+function send(msg) {
+  process.stdout.write(JSON.stringify(msg) + '\n');
+}
+
+async function handleRequest(req) {
+  const { id, method, params } = req;
+  const isNotification = id === undefined || id === null;
+  try {
+    let result;
+    if (method === 'initialize') {
+      result = {
+        protocolVersion: (params && params.protocolVersion) || '2025-06-18',
+        capabilities: { tools: {} },
+        serverInfo: { name: 'opencode-browser-mcp', version: '1.1.0' },
+      };
+    } else if (method === 'ping') {
+      result = {};
+    } else if (method === 'tools/list') {
+      result = { tools: TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) };
+    } else if (method === 'tools/call') {
+      const tool = TOOLS.find((t) => t.name === (params && params.name));
+      if (!tool) throw Object.assign(new Error(`unknown tool: ${params && params.name}`), { rpcCode: -32602 });
+      try {
+        result = await tool.handler((params && params.arguments) || {});
+      } catch (e) {
+        // Tool *execution* failures go back as tool results (isError), not protocol errors,
+        // so the model can read the message and adjust.
+        result = { content: [{ type: 'text', text: `Error: ${e.message}` }], isError: true };
+      }
+    } else if (isNotification || String(method).startsWith('notifications/')) {
+      return; // notifications need no response
+    } else {
+      throw Object.assign(new Error(`method not found: ${method}`), { rpcCode: -32601 });
+    }
+    if (!isNotification) send({ jsonrpc: '2.0', id, result });
+  } catch (e) {
+    if (!isNotification) {
+      send({ jsonrpc: '2.0', id, error: { code: e.rpcCode || -32603, message: e.message } });
+    }
+  }
+}
+
+let buf = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  buf += chunk;
+  let nl;
+  while ((nl = buf.indexOf('\n')) !== -1) {
+    const line = buf.slice(0, nl).trim();
+    buf = buf.slice(nl + 1);
+    if (!line) continue;
+    let msg;
+    try { msg = JSON.parse(line); }
+    catch { send({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'parse error' } }); continue; }
+    handleRequest(msg);
+  }
+});
+process.stdin.on('end', () => process.exit(0));
+process.on('SIGINT', () => process.exit(0));
+process.on('SIGTERM', () => process.exit(0));
+
+log(`ready — CDP endpoint ${CDP_URL} (Host: ${CDP_HOST_HEADER}), screenshots → ${SHOT_DIR}`);

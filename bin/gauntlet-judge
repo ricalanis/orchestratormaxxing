@@ -1,0 +1,387 @@
+#!/usr/bin/env python3
+"""
+gauntlet-judge — blind, baseline-anchored pairwise gate for the Gauntlet Loop.
+
+Compares a generated artifact (G) against a real-world reference (R) via a
+2-judge x 2-order blind panel of cross-family Ollama Cloud models, and applies
+a deterministic pass rule. The verdict PROMOTES ("shown better than the
+reference"), it never ACCEPTS — deterministic contracts (tests, bin/mut)
+remain the acceptance gate.
+
+Why a tool and not a prompt: label swaps, order-stability bookkeeping, and
+fail-closed rules are exactly the mechanical work LLMs fumble, and blinding is
+only structural if the orchestrator never composes the judge prompt.
+
+Protocol (research trail: knowledge/gauntlet-loop-design.md):
+  - rubric authored BEFORE the artifact exists (Tier-0); tool validates shape
+  - both artifacts blinded (no filenames/provenance/effort), coin-flip labels
+  - 2 judges, families disjoint from each other, the builder, and the
+    reference author (arXiv:2404.13076, 2502.01534) — refused pre-network
+  - each judge reads both A/B orders; only order-stable wins count
+    (arXiv:2305.17926); grades per rubric criterion first, verdict second
+    (arXiv:2507.17746); refutation-or-"cannot refute" required
+    (arXiv:2509.23055)
+  - pass iff all 4 readings valid, order-stable, G wins >=3/4 pairwise, and
+    G ties-or-wins every load-bearing criterion in all 4 grids; fail closed
+    on splits/flips (arXiv:2306.05685)
+  - --canary: R-vs-R must not produce a winner; null-vs-R must lose 4/4
+    (arXiv:2410.07137); atomic per invocation, no persistent state
+
+Exit codes ("measured worse" is not "couldn't measure"):
+  0  better (promotion) / canary pass
+  1  not-shown-better, fail-closed (valid readings) / canary fail
+  2  usage or policy refusal (bad args, family collision, oversize) — pre-network
+  3  gate unavailable (judge readings invalid after retry)
+
+Env: GAUNTLET_OLL overrides the `oll` executable (tests use an offline stub);
+OLL_MAX_ESTIMATED_INPUT_TOKENS bounds artifact size (same estimate as bin/oll).
+"""
+import argparse, json, math, os, re, subprocess, sys
+from random import SystemRandom
+
+FAMILIES = {
+    "glm": "zhipu", "kimi": "moonshot", "qwen": "alibaba",
+    "deepseek": "deepseek", "minimax": "minimax", "mistral": "mistral",
+    "gpt": "openai", "claude": "anthropic", "fable": "anthropic",
+    "opus": "anthropic", "sonnet": "anthropic", "haiku": "anthropic",
+    "llama": "meta", "gemini": "google", "gemma": "google",
+}
+# Order matters: preferred defaults first. Families must end up pairwise
+# distinct and disjoint from builder/reference-author.
+JUDGE_POOL = ("qwen3.5:397b", "mistral-large-3:675b", "deepseek-v4-pro",
+              "kimi-k3", "glm-5.3", "minimax-m3")
+NULL_ARTIFACT = "N/A"
+LENGTH_RATIO = 1.5
+
+JUDGE_SYSTEM = ("You are a ruthless blind evaluator. Another agent produced "
+                "both artifacts — try to refute each. Do not praise. Return "
+                "ONLY the requested JSON object, no markdown, no commentary.")
+
+
+def family_of(name):
+    n = (name or "").strip().lower()
+    for prefix, fam in FAMILIES.items():
+        if n.startswith(prefix):
+            return fam
+    return n if n in set(FAMILIES.values()) else None
+
+
+def estimate_input_tokens(text, divisor=3):
+    return math.ceil(len(text) / divisor)
+
+
+def input_limit():
+    try:
+        return int(os.environ.get("OLL_MAX_ESTIMATED_INPUT_TOKENS", "50000"))
+    except ValueError:
+        return 50000
+
+
+def refuse(msg):
+    sys.stderr.write(f"REFUSED: {msg}\n")
+    sys.exit(2)
+
+
+def load_rubric(path):
+    try:
+        rubric = json.load(open(path))
+    except Exception as e:
+        refuse(f"rubric {path}: unreadable JSON ({e})")
+    if not isinstance(rubric, list) or not 3 <= len(rubric) <= 10:
+        refuse("rubric must be a JSON array of 3-10 criteria")
+    ids = []
+    for c in rubric:
+        if not isinstance(c, dict) or not c.get("id") or not c.get("text") \
+                or not isinstance(c.get("load_bearing"), bool):
+            refuse("each criterion needs id, text, load_bearing (bool)")
+        ids.append(c["id"])
+    if len(set(ids)) != len(ids):
+        refuse("criterion ids must be unique")
+    if not any(c["load_bearing"] for c in rubric):
+        refuse("at least one criterion must be load_bearing")
+    return rubric
+
+
+def resolve_judges(args):
+    """Family policy, enforced before any network call."""
+    excluded = {}
+    fam_b = family_of(args.builder)
+    if fam_b is None:
+        refuse(f"builder {args.builder!r}: unknown model family "
+               f"(known prefixes: {', '.join(sorted(FAMILIES))})")
+    excluded[fam_b] = f"builder {args.builder}"
+    flags = []
+    ra = args.reference_author.strip().lower()
+    if ra == "unknown":
+        # Reference-side familiarity bias always favors R (harder for G to
+        # pass) — fail-safe direction, so run with a flag instead of refusing.
+        flags.append("reference_provenance_unknown")
+    elif ra != "human":
+        fam_r = family_of(ra)
+        if fam_r is None:
+            refuse(f"--reference-author {args.reference_author!r}: pass a known "
+                   "model/family, 'human', or 'unknown'")
+        excluded.setdefault(fam_r, f"reference author {args.reference_author}")
+
+    if args.judges:
+        judges = [j.strip() for j in args.judges.split(",") if j.strip()]
+        if len(judges) != 2:
+            refuse("--judges needs exactly two comma-separated models")
+        fams = []
+        for j in judges:
+            f = family_of(j)
+            if f is None:
+                refuse(f"judge {j!r}: unknown model family")
+            if f in excluded:
+                refuse(f"judge {j} shares family {f!r} with {excluded[f]}")
+            fams.append(f)
+        if fams[0] == fams[1]:
+            refuse(f"judges must be from different families (both {fams[0]!r})")
+        return judges, sorted(excluded), flags
+
+    judges, fams = [], set()
+    for j in JUDGE_POOL:
+        f = family_of(j)
+        if f in excluded or f in fams:
+            continue
+        judges.append(j)
+        fams.add(f)
+        if len(judges) == 2:
+            return judges, sorted(excluded), flags
+    refuse("could not pick two cross-family judges outside excluded families")
+
+
+def build_package(rubric, body1, body2):
+    public = [{"id": c["id"], "text": c["text"]} for c in rubric]
+    schema = {
+        "grades": {c["id"]: {"artifact1": "bool", "artifact2": "bool",
+                             "evidence": "line-ref or short quote"}
+                   for c in rubric},
+        "verdict": "\"1\" | \"2\" | \"tie\"",
+        "deciding_criterion": "criterion id (null only when verdict is tie)",
+        "refutations": {"artifact1": "concrete flaw, or exactly: cannot refute",
+                        "artifact2": "concrete flaw, or exactly: cannot refute"},
+    }
+    return (
+        "Judge two artifacts against the rubric below. Grade EVERY criterion "
+        "true/false for each artifact with evidence, then give a pairwise "
+        "verdict naming the deciding criterion id. For each artifact give one "
+        "concrete refutation of it, or the exact string \"cannot refute\".\n\n"
+        f"RUBRIC (JSON): {json.dumps(public)}\n"
+        "=== ARTIFACT 1 ===\n" + body1 + "\n"
+        "=== ARTIFACT 2 ===\n" + body2 + "\n"
+        "=== END ARTIFACTS ===\n"
+        "Respond with ONLY this JSON object (booleans, not strings):\n"
+        + json.dumps(schema)
+    )
+
+
+def call_judge(judge, package, max_tokens):
+    cmd = [os.environ.get("GAUNTLET_OLL", "oll"), "--model", judge,
+           "--system", JUDGE_SYSTEM, "--max-tokens", str(max_tokens),
+           "--temperature", "0"]
+    try:
+        r = subprocess.run(cmd, input=package, capture_output=True,
+                           text=True, timeout=360)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def parse_reading(raw, rubric):
+    if raw is None:
+        return None
+    text = raw.strip()
+    for candidate in (text,
+                      re.sub(r"^```[a-z]*\n?|\n?```$", "", text).strip(),
+                      text[text.find("{"): text.rfind("}") + 1]):
+        try:
+            obj = json.loads(candidate)
+            break
+        except Exception:
+            obj = None
+    if not isinstance(obj, dict):
+        return None
+    grades = obj.get("grades")
+    verdict = obj.get("verdict")
+    refut = obj.get("refutations")
+    ids = [c["id"] for c in rubric]
+    if verdict not in ("1", "2", "tie") or not isinstance(grades, dict) \
+            or not isinstance(refut, dict):
+        return None
+    for cid in ids:
+        g = grades.get(cid)
+        if not isinstance(g, dict) or not isinstance(g.get("artifact1"), bool) \
+                or not isinstance(g.get("artifact2"), bool):
+            return None
+    if verdict != "tie" and obj.get("deciding_criterion") not in ids:
+        return None
+    if not str(refut.get("artifact1", "")).strip() \
+            or not str(refut.get("artifact2", "")).strip():
+        return None
+    return obj
+
+
+def run_panel(g_body, r_body, rubric, judges, max_tokens):
+    """4 blind readings; returns list of dicts with unblinded winners."""
+    g_is_first = SystemRandom().random() < 0.5
+    readings = []
+    for judge in judges:
+        for swapped in (False, True):
+            first_is_g = g_is_first != swapped
+            body1, body2 = (g_body, r_body) if first_is_g else (r_body, g_body)
+            package = build_package(rubric, body1, body2)
+            parsed = parse_reading(call_judge(judge, package, max_tokens), rubric)
+            if parsed is None:  # one retry, then the reading is invalid
+                parsed = parse_reading(call_judge(judge, package, max_tokens), rubric)
+            if parsed is None:
+                readings.append({"judge": judge, "valid": False})
+                continue
+            g_key = "artifact1" if first_is_g else "artifact2"
+            r_key = "artifact2" if first_is_g else "artifact1"
+            winner = "tie" if parsed["verdict"] == "tie" else (
+                "G" if (parsed["verdict"] == "1") == first_is_g else "R")
+            readings.append({
+                "judge": judge, "valid": True, "winner": winner,
+                "deciding_criterion": parsed.get("deciding_criterion"),
+                "g_grades": {cid: parsed["grades"][cid][g_key]
+                             for cid in parsed["grades"]},
+                "r_grades": {cid: parsed["grades"][cid][r_key]
+                             for cid in parsed["grades"]},
+                "g_refutation": parsed["refutations"][g_key],
+            })
+    return readings
+
+
+def winner_counts(readings):
+    valid = [r for r in readings if r["valid"]]
+    return (sum(1 for r in valid if r["winner"] == "G"),
+            sum(1 for r in valid if r["winner"] == "R"),
+            sum(1 for r in valid if r["winner"] == "tie"), len(valid))
+
+
+def order_stable(readings, judges):
+    for judge in judges:
+        winners = [r["winner"] for r in readings
+                   if r["valid"] and r["judge"] == judge]
+        if len(set(winners)) > 1:
+            return False
+    return True
+
+
+def load_bearing_ok(readings, rubric):
+    lb = [c["id"] for c in rubric if c["load_bearing"]]
+    for r in readings:
+        if not r["valid"]:
+            continue
+        for cid in lb:
+            if r["r_grades"].get(cid) and not r["g_grades"].get(cid):
+                return False
+    return True
+
+
+def emit(result, as_json):
+    if as_json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"verdict: {result.get('verdict') or result.get('canary')}")
+        for k in ("pairwise", "order_stable", "load_bearing_ok", "flags"):
+            if k in result:
+                print(f"  {k}: {result[k]}")
+
+
+def main():
+    p = argparse.ArgumentParser(
+        description="Blind cross-family pairwise gate: generated artifact vs "
+                    "real-world reference. Promotes, never accepts.")
+    p.add_argument("--artifact", help="generated artifact file (G)")
+    p.add_argument("--reference", required=True, help="real-world reference file (R)")
+    p.add_argument("--rubric", required=True,
+                   help='JSON array of {"id","text","load_bearing"} authored before G existed')
+    p.add_argument("--builder", required=True,
+                   help="model that produced the artifact (family excluded from judging)")
+    p.add_argument("--reference-author", required=True,
+                   help="who produced the reference: model/family, 'human', or 'unknown'")
+    p.add_argument("--judges", help="exactly two models, comma-separated (default: auto-pick)")
+    p.add_argument("--max-tokens", type=int, default=8192)
+    p.add_argument("--json", action="store_true", help="full JSON verdict on stdout")
+    p.add_argument("--canary", action="store_true",
+                   help="gate self-test: R-vs-R must not find a winner; null-vs-R must lose 4/4")
+    args = p.parse_args()
+
+    rubric = load_rubric(args.rubric)
+    judges, excluded, flags = resolve_judges(args)
+
+    def read_body(path, what):
+        try:
+            body = open(path).read()
+        except OSError as e:
+            refuse(f"{what} {path}: {e}")
+        if not body.strip():
+            refuse(f"{what} {path} is empty")
+        return body
+
+    r_body = read_body(args.reference, "reference")
+
+    if args.canary:
+        for probe in (r_body, NULL_ARTIFACT):
+            package = build_package(rubric, probe, r_body)
+            if estimate_input_tokens(JUDGE_SYSTEM) + estimate_input_tokens(package) > input_limit():
+                refuse("canary package exceeds input limit")
+        rr = run_panel(r_body, r_body, rubric, judges, args.max_tokens)
+        nr = run_panel(NULL_ARTIFACT, r_body, rubric, judges, args.max_tokens)
+        rr_g, rr_r, rr_t, rr_valid = winner_counts(rr)
+        nr_g, nr_r, nr_t, nr_valid = winner_counts(nr)
+        if rr_valid < 4 or nr_valid < 4:
+            emit({"canary": "unavailable", "r_vs_r_valid": rr_valid,
+                  "null_vs_r_valid": nr_valid}, args.json)
+            return 3
+        # Identical bodies must not produce a >=3/4 winner; the null artifact
+        # must lose all four readings (arXiv:2410.07137).
+        rr_ok = max(rr_g, rr_r) < 3
+        nr_ok = nr_r == 4
+        emit({"canary": "pass" if (rr_ok and nr_ok) else "fail",
+              "r_vs_r": {"side_a": rr_g, "side_b": rr_r, "ties": rr_t, "ok": rr_ok},
+              "null_vs_r": {"null_wins": nr_g, "reference_wins": nr_r,
+                            "ties": nr_t, "ok": nr_ok},
+              "judges": judges}, args.json)
+        return 0 if (rr_ok and nr_ok) else 1
+
+    if not args.artifact:
+        refuse("--artifact is required (unless --canary)")
+    g_body = read_body(args.artifact, "artifact")
+    package = build_package(rubric, g_body, r_body)
+    est = estimate_input_tokens(JUDGE_SYSTEM) + estimate_input_tokens(package)
+    if est > input_limit():
+        refuse(f"estimated input {est} tok exceeds limit {input_limit()} tok — "
+               "artifact+reference too large for the gate (no chunking in v1)")
+
+    if len(g_body) > LENGTH_RATIO * len(r_body):
+        flags.append("length_flag")  # arXiv:2404.04475 — reported, never flips
+
+    readings = run_panel(g_body, r_body, rubric, judges, args.max_tokens)
+    g_wins, r_wins, ties, n_valid = winner_counts(readings)
+    if n_valid < 4:
+        emit({"verdict": "unavailable", "n_valid": n_valid,
+              "judges": judges, "flags": flags}, args.json)
+        return 3
+
+    stable = order_stable(readings, judges)
+    lb_ok = load_bearing_ok(readings, rubric)
+    better = stable and g_wins >= 3 and lb_ok
+    emit({
+        "verdict": "better" if better else "not-shown-better",
+        "pairwise": {"g_wins": g_wins, "r_wins": r_wins, "ties": ties},
+        "order_stable": stable, "load_bearing_ok": lb_ok, "n_valid": n_valid,
+        "judges": judges, "excluded_families": excluded, "flags": flags,
+        "deciding_criteria": sorted({r["deciding_criterion"] for r in readings
+                                     if r["valid"] and r["deciding_criterion"]}),
+        "refutations_of_artifact": [
+            {"judge": r["judge"], "refutation": r["g_refutation"]}
+            for r in readings if r["valid"]],
+    }, args.json)
+    return 0 if better else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

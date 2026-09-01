@@ -1,0 +1,4 @@
+interface:
+  display_name: "Orchestration Practices"
+  short_description: "Match work to governed prompt-to-graph practices."
+  default_prompt: "Classify this work with the orchestration practice vocabulary, run its deterministic preflights, declare all required brakes, and return the evidence receipt."

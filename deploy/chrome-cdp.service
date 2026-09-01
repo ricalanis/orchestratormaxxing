@@ -1,0 +1,33 @@
+[Unit]
+Description=Shared human + agent Chrome with CDP on loopback :18800
+Documentation=file://%h/dev/claudemaxxing/knowledge/opencode-browser-connector.md
+# Headed on purpose (2026-07-13): a real window on the desktop session, so the human's
+# physical keyboard/mouse work alongside the agents' CDP calls (headless Chrome can never
+# receive OS input — the DevTools screencast only re-encodes mouse well, keyboard badly).
+# Bound to the graphical session: starts on login, stops on logout — a headed Chrome
+# cannot outlive the display it renders to.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+# Loopback-only by design: Chrome binds the debug port to 127.0.0.1 (never add
+# --remote-debugging-address). The port being local IS the access boundary — only
+# processes on this box (Hermes-spawned OpenCode agents, the MCP bridge) can reach it.
+#
+# Ozone platform is session-dependent (2026-07-26): a hardcoded --ozone-platform=wayland
+# exit-1 crash-loops the service whenever the login session is X11 (this box switches —
+# today's session is X11, DISPLAY=:0, no wayland socket in /run/user/1000). The wayland
+# keyboard findings from 2026-07-13 still hold *on Wayland sessions*, and they are exactly
+# what %h/.local/bin/google-chrome (chrome-debug-wayland-shim) encodes: it injects
+# --ozone-platform=wayland on any --remote-debugging-port launch IFF a wayland socket is
+# present, and passes through untouched on X11. So: launch via the shim, never hardcode.
+# --remote-allow-origins: direct websocket CDP clients (python websocket-client in the
+# linkedin-bridge/sdr-workflow skills) are otherwise rejected with 403 (Chrome 111+).
+ExecStart=%h/.local/bin/google-chrome --remote-debugging-port=18800 --remote-allow-origins=http://localhost:18800,http://127.0.0.1:18800 --no-first-run --no-default-browser-check --user-data-dir=%h/.config/clawdbot/cdp-profile
+# always (not on-failure): closing the window exits 0, but agents depend on the endpoint —
+# the window reappearing in 5s beats agent tasks failing mysteriously. Stop via systemctl.
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

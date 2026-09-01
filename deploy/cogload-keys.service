@@ -1,0 +1,42 @@
+[Unit]
+Description=cogload — silent cognitive-load collector (key CLASSES only, never identity)
+Documentation=file://__HOME__/dev/claudemaxxing/knowledge/cognitive-load-harness-2026-08-11.md
+# Bind to the graphical session: capture is meaningless without a display, and
+# PartOf ensures the collector dies with the session instead of surviving as a
+# blind process writing degraded rows forever.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=__HOME__/.local/share/cogload/venv/bin/python3 __HOME__/.local/bin/cogload daemon
+Restart=on-failure
+RestartSec=10
+# The store holds behavioral data about a single human. Nothing else on the
+# box has any business reading it.
+UMask=0077
+# SIGTERM is handled in-process to flush the partial window before exit;
+# without this grace period systemd would kill mid-flush and drop the tail.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+NoNewPrivileges=true
+# The collector needs the X connection and its own store; nothing more.
+PrivateTmp=true
+
+# Enforced ceilings, not just a measured footprint. Steady state is ~26 MB RSS
+# (8.7 MB interpreter + ~10 MB pynput/python-xlib + ~3 MB data — essentially the
+# Python floor) and ~0.2-0.4% of one core. These caps give ~5x and ~25x headroom,
+# so they never bind in normal operation, but a leak or a runaway X loop gets
+# killed and restarted instead of quietly eating the machine. A background
+# observer must never become the thing you notice.
+MemoryAccounting=true
+MemoryHigh=96M
+MemoryMax=128M
+CPUQuota=10%
+# Lowest useful priority: this measures work, it must never compete with it.
+Nice=10
+IOSchedulingClass=idle
+CPUSchedulingPolicy=batch
+
+[Install]
+WantedBy=graphical-session.target

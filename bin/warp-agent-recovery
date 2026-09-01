@@ -1,0 +1,537 @@
+#!/usr/bin/env python3
+"""Exact, fail-closed recovery for Warp terminals backed by tmux agents."""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Iterator
+
+
+UUID_RE = re.compile(r"^[0-9a-f]{32}$")
+SAFE_SESSION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+AGENTS = {"claude", "codex", "opencode", "claude-ubuntu", "codex-ubuntu"}
+MAX_AGE_SECONDS = 90 * 24 * 60 * 60
+
+
+def state_dir() -> Path:
+    override = os.environ.get("WARP_RECOVERY_STATE_DIR")
+    if override:
+        return Path(override)
+    xdg = os.environ.get("XDG_STATE_HOME")
+    return Path(xdg) / "claudemaxxing" if xdg else Path.home() / ".local/state/claudemaxxing"
+
+
+def config_dir() -> Path:
+    override = os.environ.get("WARP_RECOVERY_CONFIG_DIR")
+    if override:
+        return Path(override)
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    return Path(xdg) / "claudemaxxing" if xdg else Path.home() / ".config/claudemaxxing"
+
+
+def ensure_state_dir() -> Path:
+    path = state_dir()
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+    return path
+
+
+@contextmanager
+def locked_registry() -> Iterator[tuple[Path, dict[str, Any]]]:
+    directory = ensure_state_dir()
+    lock_path = directory / "warp-agent-recovery.lock"
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        registry_path = directory / "warp-agent-recovery.json"
+        data: dict[str, Any] = {"version": 1, "terminals": {}}
+        try:
+            loaded = json.loads(registry_path.read_text(encoding="utf-8"))
+            if (
+                isinstance(loaded, dict)
+                and loaded.get("version") == 1
+                and isinstance(loaded.get("terminals"), dict)
+            ):
+                data = loaded
+        except (OSError, ValueError, TypeError):
+            pass
+        yield registry_path, data
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def save_registry(path: Path, data: dict[str, Any]) -> None:
+    payload = json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n"
+    fd, temporary = tempfile.mkstemp(prefix=".warp-agent-recovery.", dir=path.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        try:
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            pass
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def valid_uuid(value: str | None) -> bool:
+    return bool(value and UUID_RE.fullmatch(value))
+
+
+def local_warp_shell() -> bool:
+    return os.environ.get("WARP_IS_LOCAL_SHELL_SESSION", "").lower() in {"1", "true"}
+
+
+def test_generation() -> str | None:
+    if os.environ.get("WARP_RECOVERY_TESTING") != "1":
+        return None
+    value = os.environ.get("WARP_RECOVERY_TEST_GENERATION", "")
+    return value if value and len(value) <= 256 else None
+
+
+def linux_process(pid: int, uid: int) -> tuple[int, str, str, str] | None:
+    try:
+        proc = Path("/proc") / str(pid)
+        stat = (proc / "stat").read_text(encoding="utf-8")
+        after = stat[stat.rfind(")") + 2 :].split()
+        ppid = int(after[1])
+        start = after[19]
+        status = (proc / "status").read_text(encoding="utf-8")
+        uid_line = next(line for line in status.splitlines() if line.startswith("Uid:"))
+        proc_uid = int(uid_line.split()[1])
+        if proc_uid != uid:
+            return None
+        exe = os.readlink(proc / "exe")
+        cmd = (proc / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+        return ppid, start, exe, cmd
+    except (OSError, ValueError, StopIteration):
+        return None
+
+
+def linux_boot_id() -> str | None:
+    try:
+        value = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value if value and len(value) <= 128 else None
+
+
+def linux_warp_generation() -> str | None:
+    boot_id = linux_boot_id()
+    if not boot_id:
+        return None
+    uid = os.getuid()
+    chain: list[tuple[int, int, str, str, str]] = []
+    pid = os.getppid()
+    seen: set[int] = set()
+    while pid > 1 and pid not in seen and len(chain) < 64:
+        seen.add(pid)
+        row = linux_process(pid, uid)
+        if row is None:
+            # Crossing into an unreadable or different-UID ancestor is a normal
+            # process-tree boundary.  The already-collected same-UID chain may
+            # still contain the complete terminal-server -> Warp main pair.
+            break
+        ppid, start, exe, cmd = row
+        chain.append((pid, ppid, start, exe, cmd))
+        pid = ppid
+
+    # The shell must descend from Warp's terminal server. The owning app is the
+    # nearest same-executable parent of that server, never merely a process with
+    # "warp" somewhere in arbitrary arguments.
+    for index, (_, server_ppid, _, server_exe, server_cmd) in enumerate(chain):
+        words = server_cmd.split()
+        if not any(token in {"terminal-server", "terminal_server"} for token in words):
+            continue
+        for main_pid, _, main_start, main_exe, main_cmd in chain[index + 1 :]:
+            if main_pid != server_ppid or main_exe != server_exe:
+                continue
+            if "warp" not in Path(main_exe).name.lower() and "warp" not in main_exe.lower():
+                return None
+            if any(token in {"terminal-server", "terminal_server"} for token in main_cmd.split()):
+                return None
+            return f"linux:{boot_id}:{main_pid}:{main_start}"
+    return None
+
+
+def mac_process(pid: int, uid: int) -> tuple[int, str, str] | None:
+    ps = "/bin/ps" if Path("/bin/ps").exists() else "/usr/bin/ps"
+    try:
+        result = subprocess.run(
+            [ps, "-p", str(pid), "-o", "ppid=,uid=,lstart=,command="],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        ).stdout.strip()
+        match = re.match(r"\s*(\d+)\s+(\d+)\s+(.{24})\s+(.+)$", result)
+        if not match or int(match.group(2)) != uid:
+            return None
+        return int(match.group(1)), match.group(3).strip(), match.group(4)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def mac_warp_generation() -> str | None:
+    uid = os.getuid()
+    chain: list[tuple[int, int, str, str]] = []
+    pid = os.getppid()
+    seen: set[int] = set()
+    while pid > 1 and pid not in seen and len(chain) < 64:
+        seen.add(pid)
+        row = mac_process(pid, uid)
+        if row is None:
+            # As on Linux, evaluate the verified same-UID chain collected so
+            # far when the next ancestor is outside our readable boundary.
+            break
+        ppid, start, cmd = row
+        chain.append((pid, ppid, start, cmd))
+        pid = ppid
+    terminal_indexes = [
+        i for i, row in enumerate(chain)
+        if "Warp.app/Contents/MacOS" in row[3]
+        and any(token in row[3] for token in ("terminal-server", "terminal_server", "--server"))
+    ]
+    for index in terminal_indexes:
+        server_ppid = chain[index][1]
+        for main_pid, _, main_start, main_cmd in chain[index + 1 :]:
+            if main_pid == server_ppid and "Warp.app/Contents/MacOS" in main_cmd:
+                return f"macos:{main_pid}:{main_start}"
+    return None
+
+
+def generation() -> str | None:
+    testing = test_generation()
+    if os.environ.get("WARP_RECOVERY_TESTING") == "1":
+        return testing
+    if sys.platform.startswith("linux"):
+        return linux_warp_generation()
+    if sys.platform == "darwin":
+        return mac_warp_generation()
+    return None
+
+
+def tmux_run(args: list[str]) -> subprocess.CompletedProcess[str] | None:
+    try:
+        return subprocess.run(
+            ["tmux", *args],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def tmux_value(args: list[str]) -> str | None:
+    result = tmux_run(args)
+    if result is None or result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def has_tmux(name: str) -> bool:
+    result = tmux_run(["has-session", "-t", f"={name}"])
+    return result is not None and result.returncode == 0
+
+
+def tmux_session_scope(name: str) -> str:
+    """Exact session target for commands that otherwise resolve a pane."""
+    return f"={name}:"
+
+
+def valid_record(uuid: str, record: Any) -> bool:
+    if not isinstance(record, dict):
+        return False
+    if record.get("agent") not in AGENTS:
+        return False
+    if not SAFE_SESSION_RE.fullmatch(str(record.get("tmux_name", ""))):
+        return False
+    if not isinstance(record.get("cwd"), str) or not record["cwd"].startswith("/"):
+        return False
+    if not isinstance(record.get("generation"), str) or not record["generation"]:
+        return False
+    updated = record.get("updated_at")
+    return isinstance(updated, (int, float)) and time.time() - updated <= MAX_AGE_SECONDS and valid_uuid(uuid)
+
+
+def register_launch(agent: str, name: str, cwd: str) -> None:
+    uuid = os.environ.get("WARP_TERMINAL_SESSION_UUID", "")
+    current = generation()
+    if (
+        agent not in AGENTS
+        or not valid_uuid(uuid)
+        or not SAFE_SESSION_RE.fullmatch(name)
+        or not os.path.isabs(cwd)
+        or not local_warp_shell()
+        or os.environ.get("TMUX")
+        or not current
+    ):
+        return
+    now = time.time()
+    with locked_registry() as (path, data):
+        matching_ids: set[str] = set()
+        stale_owners: list[str] = []
+        for other_uuid, old in data["terminals"].items():
+            if not isinstance(old, dict) or old.get("agent") != agent or old.get("tmux_name") != name:
+                continue
+            old_id = old.get("session_id")
+            if isinstance(old_id, str) and old_id:
+                matching_ids.add(old_id)
+            if other_uuid != uuid:
+                stale_owners.append(other_uuid)
+        for other_uuid in stale_owners:
+            del data["terminals"][other_uuid]
+        record: dict[str, Any] = {
+            "agent": agent,
+            "tmux_name": name,
+            "cwd": cwd,
+            "generation": current,
+            "updated_at": now,
+        }
+        if len(matching_ids) == 1:
+            record["session_id"] = matching_ids.pop()
+        data["terminals"][uuid] = record
+        save_registry(path, data)
+
+
+def bind_tmux(agent: str, name: str) -> None:
+    uuid = os.environ.get("WARP_TERMINAL_SESSION_UUID", "")
+    current = generation()
+    if (
+        agent not in AGENTS
+        or not valid_uuid(uuid)
+        or not SAFE_SESSION_RE.fullmatch(name)
+        or not local_warp_shell()
+        or os.environ.get("TMUX")
+        or not current
+    ):
+        return
+    with locked_registry() as (_, data):
+        record = data["terminals"].get(uuid)
+        if (
+            not valid_record(uuid, record)
+            or record.get("agent") != agent
+            or record.get("tmux_name") != name
+            or record.get("generation") != current
+        ):
+            return
+        if not has_tmux(name):
+            return
+        tmux_run(["set-option", "-t", tmux_session_scope(name), "@warp_terminal_uuid", uuid])
+
+
+def register_agent(agent: str, hook: Any) -> None:
+    if agent not in AGENTS or not isinstance(hook, dict):
+        return
+    session_id = hook.get("session_id")
+    cwd = hook.get("cwd")
+    pane = os.environ.get("TMUX_PANE", "")
+    if (
+        not isinstance(session_id, str)
+        or not session_id
+        or len(session_id) > 512
+        or not isinstance(cwd, str)
+        or not os.path.isabs(cwd)
+        or not pane.startswith("%")
+        or not os.environ.get("TMUX")
+    ):
+        return
+
+    pane_session = tmux_value(["display-message", "-p", "-t", pane, "#{session_name}"])
+    env_uuid = os.environ.get("WARP_TERMINAL_SESSION_UUID", "")
+    now = time.time()
+    with locked_registry() as (path, data):
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        for uuid, record in data["terminals"].items():
+            if not valid_record(uuid, record) or record.get("agent") != agent:
+                continue
+            if valid_uuid(env_uuid) and uuid != env_uuid:
+                continue
+            if pane_session and record.get("tmux_name") != pane_session:
+                continue
+            if not pane_session and record.get("cwd") != cwd:
+                continue
+            candidates.append((uuid, record))
+        if len(candidates) != 1:
+            return
+        uuid, record = candidates[0]
+        record["session_id"] = session_id
+        record["cwd"] = cwd
+        record["updated_at"] = now
+        save_registry(path, data)
+        name = str(record["tmux_name"])
+    if has_tmux(name):
+        tmux_run(["set-option", "-t", tmux_session_scope(name), "@warp_terminal_uuid", uuid])
+
+
+def claim() -> str | None:
+    uuid = os.environ.get("WARP_TERMINAL_SESSION_UUID", "")
+    current = generation()
+    if (
+        not valid_uuid(uuid)
+        or not local_warp_shell()
+        or os.environ.get("TMUX")
+        or not current
+    ):
+        return None
+    with locked_registry() as (path, data):
+        record = data["terminals"].get(uuid)
+        if not valid_record(uuid, record) or record["generation"] == current:
+            return None
+        name = str(record["tmux_name"])
+        if record["agent"] in {"claude-ubuntu", "codex-ubuntu"}:
+            record["generation"] = current
+            record["updated_at"] = time.time()
+            save_registry(path, data)
+            mode = "c" if record["agent"] == "claude-ubuntu" else "g"
+            return f"attach-ubuntu\t{mode}\t{name}"
+        if has_tmux(name):
+            metadata = tmux_value(["show-options", "-v", "-t", tmux_session_scope(name), "@warp_terminal_uuid"])
+            # Exact UUID ownership is the authority. A crashed local terminal or
+            # SSH transport may remain counted as attached until its kernel
+            # timeout fires. tmux supports co-attached read/write clients, so do
+            # not let that stale status block recovery and never detach anyone.
+            if metadata != uuid:
+                return None
+        else:
+            session_id = record.get("session_id")
+            if not isinstance(session_id, str) or not session_id or len(session_id) > 512:
+                return None
+            cwd = str(record["cwd"])
+            # A long-lived tmux server has its own global environment, which may
+            # still contain another Warp terminal's identity.  Always carry the
+            # restored terminal's current identity in the process argv instead
+            # of relying on whatever the server happens to inject.
+            command = [
+                "env",
+                f"WARP_TERMINAL_SESSION_UUID={uuid}",
+                f"WARP_IS_LOCAL_SHELL_SESSION={os.environ['WARP_IS_LOCAL_SHELL_SESSION']}",
+            ]
+            for key in (
+                "WARP_CLIENT_VERSION",
+                "WARP_FOCUS_URL",
+                "WARP_DISABLE_AUTO_TITLE",
+                "PATH",
+                "CODEX_HOME",
+                "OPENCODE_CONFIG",
+            ):
+                value = os.environ.get(key)
+                if value is not None:
+                    command.append(f"{key}={value}")
+            # Resume through the same c/g launcher the user normally invokes.
+            # The new tmux session supplies TMUX, so the sourced function takes
+            # its nested path and starts the agent without creating another
+            # tmux session. Positional argv keeps IDs and paths out of shell
+            # interpolation.
+            if record["agent"] == "claude":
+                wrapper = config_dir() / "claude-c.sh"
+                shell_command = '. "$1"; shift; c "$@"'
+                resume_args = [name, "--resume", session_id]
+            elif record["agent"] == "opencode":
+                wrapper = config_dir() / "opencode-o.sh"
+                shell_command = '. "$1"; shift; o "$@"'
+                resume_args = [name, "--", "-s", session_id]
+            else:
+                wrapper = config_dir() / "codex-g.sh"
+                shell_command = '. "$1"; shift; g "$@"'
+                resume_args = [name, "--", "-C", cwd, "resume", session_id]
+            if not wrapper.is_file() or not Path("/bin/bash").is_file():
+                return None
+            command.extend([
+                "/bin/bash", "--noprofile", "--norc", "-c", shell_command,
+                "warp-recovery", str(wrapper), *resume_args,
+            ])
+            created = tmux_run(["new-session", "-d", "-s", name, "-c", cwd, *command])
+            if created is None or created.returncode != 0:
+                return None
+            set_result = tmux_run(["set-option", "-t", tmux_session_scope(name), "@warp_terminal_uuid", uuid])
+            if set_result is None or set_result.returncode != 0:
+                tmux_run(["kill-session", "-t", f"={name}"])
+                return None
+        record["generation"] = current
+        record["updated_at"] = time.time()
+        save_registry(path, data)
+        return f"attach\t{name}"
+
+
+def status_json() -> None:
+    try:
+        with locked_registry() as (_, data):
+            safe: dict[str, Any] = {"version": 1, "terminals": {}}
+            for uuid, record in data["terminals"].items():
+                if valid_record(uuid, record):
+                    safe["terminals"][uuid] = {
+                        key: record[key]
+                        for key in ("agent", "tmux_name", "cwd", "generation", "session_id", "updated_at")
+                        if key in record
+                    }
+            print(json.dumps(safe, sort_keys=True, separators=(",", ":")))
+    except Exception:
+        print('{"terminals":{},"version":1}')
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if args == ["status", "--json"]:
+        status_json()
+        return 0
+    if os.environ.get("SOLPLAN_CHILD"):
+        if args[:1] == ["register-agent"]:
+            print("{}")
+        return 0
+    try:
+        if len(args) == 4 and args[0] == "register-launch":
+            register_launch(args[1], args[2], args[3])
+        elif len(args) == 3 and args[0] == "bind-tmux":
+            bind_tmux(args[1], args[2])
+        elif len(args) == 2 and args[0] == "register-agent":
+            try:
+                hook = json.load(sys.stdin)
+            except (ValueError, OSError):
+                hook = None
+            register_agent(args[1], hook)
+            print("{}")
+        elif args == ["claim"]:
+            result = claim()
+            if result:
+                print(result)
+        else:
+            return 2
+    except Exception:
+        # Startup and hook integration must never break the user's shell.
+        if args[:1] == ["register-agent"]:
+            print("{}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

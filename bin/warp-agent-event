@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Emit one privacy-minimal Warp CLI-agent lifecycle event through tmux.
+
+The c/g launchers run inside tmux. Hook processes are not guaranteed to own a
+controlling TTY, so /dev/tty is not a reliable transport. Resolve the exact
+pane from TMUX_PANE, verify that it belongs to the matching claude-*/codex-*
+session, then write a tmux DCS-wrapped OSC 777 frame to that pane's TTY.
+
+Every production failure is a silent no-op: a notification must never block or
+corrupt an agent turn.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+
+SENTINEL = "warp://cli-agent"
+VALID_AGENTS = {"claude", "codex", "opencode"}
+VALID_EVENTS = {
+    "session_start",
+    "prompt_submit",
+    "stop",
+    "permission_request",
+    "permission_replied",
+    "question_asked",
+}
+EVENT_SUMMARIES = {
+    "permission_request": "Permission required.",
+    "question_asked": "Waiting for your answer.",
+}
+PANE_RE = re.compile(r"^%[0-9]+$")
+
+
+def build_payload(agent: str, event: str) -> bytes:
+    if agent not in VALID_AGENTS or event not in VALID_EVENTS:
+        raise ValueError("unsupported Warp agent event")
+    payload: dict[str, object] = {"v": 1, "agent": agent, "event": event}
+    if event in EVENT_SUMMARIES:
+        payload["summary"] = EVENT_SUMMARIES[event]
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+
+
+def osc777_frame(payload: bytes) -> bytes:
+    return b"\x1b]777;notify;" + SENTINEL.encode("ascii") + b";" + payload + b"\x07"
+
+
+def tmux_frame(frame: bytes) -> bytes:
+    return b"\x1bPtmux;" + frame.replace(b"\x1b", b"\x1b\x1b") + b"\x1b\\"
+
+
+def _tmux_binary() -> str | None:
+    found = shutil.which("tmux")
+    if found:
+        return found
+    for candidate in ("/opt/homebrew/bin/tmux", "/usr/local/bin/tmux"):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _tmux_value(tmux: str, pane: str, template: str) -> str | None:
+    try:
+        result = subprocess.run(
+            [tmux, "display-message", "-p", "-t", pane, template],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = result.stdout.strip()
+    return value if result.returncode == 0 and value else None
+
+
+def _target_tty(agent: str) -> str | None:
+    if os.environ.get("SOLPLAN_CHILD") == "1":
+        return None
+    if os.environ.get("WARP_IS_LOCAL_SHELL_SESSION") != "1":
+        return None
+    try:
+        if int(os.environ.get("WARP_CLI_AGENT_PROTOCOL_VERSION", "0")) < 1:
+            return None
+    except ValueError:
+        return None
+    if not os.environ.get("TMUX"):
+        return None
+    pane = os.environ.get("TMUX_PANE", "")
+    if not PANE_RE.fullmatch(pane):
+        return None
+    tmux = _tmux_binary()
+    if not tmux:
+        return None
+    session = _tmux_value(tmux, pane, "#{session_name}")
+    if not session or not session.startswith(f"{agent}-"):
+        return None
+    tty = _tmux_value(tmux, pane, "#{pane_tty}")
+    if not tty:
+        return None
+    try:
+        resolved = str(Path(tty).resolve(strict=True))
+        mode = os.stat(resolved).st_mode
+    except OSError:
+        return None
+    if not stat.S_ISCHR(mode):
+        return None
+    if not (resolved.startswith("/dev/pts/") or resolved.startswith("/dev/tty")):
+        return None
+    return resolved
+
+
+def _write_all(path: str, data: bytes) -> None:
+    flags = os.O_WRONLY | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                break
+            view = view[written:]
+    finally:
+        os.close(fd)
+
+
+def main(argv: list[str]) -> int:
+    # Invalid/missing hook arguments also fail open. The deterministic contract
+    # catches programmer mistakes; production agent turns remain uninterrupted.
+    if len(argv) != 3:
+        return 0
+    agent, event = argv[1:]
+    try:
+        tty = _target_tty(agent)
+        if not tty:
+            return 0
+        payload = build_payload(agent, event)
+        _write_all(tty, tmux_frame(osc777_frame(payload)))
+    except Exception:
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

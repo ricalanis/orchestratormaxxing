@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""model-bench — compare candidate workers on stability, intelligence and speed.
+
+Built because the previous comparison in this harness could not support its own
+conclusion. It ran over raw HTTP with reasoning unbounded, so the only task that
+separated the models separated them on *verbosity against a token cap*, not on
+capability: GLM-5.2 scored 0/3 by spending its whole budget thinking, then
+passed the same prompt at 187 tokens once effort was pinned (2026-08-26).
+
+Three rules follow from that, and they are the whole design:
+
+  1. **Effort is pinned.** An unpinned run measures the cap, not the model.
+  2. **Stability is a first-class metric, not a footnote.** A model whose decode
+     rate spans 8x is not "fast on median" — it is unschedulable. We report the
+     spread beside the median and never collapse them.
+  3. **Contracts are deterministic and authored here**, never by the model under
+     test, and a budget-exhausted empty answer is recorded as `empty` — a
+     CONFIG outcome, distinct from a wrong answer.
+
+Usage
+  model-bench run --models a,b,c [--effort low] [--reps 3] [--out FILE]
+  model-bench report [--in FILE]
+
+Exit codes: 0 ok · 1 error · 2 no usable results
+"""
+import argparse
+import json
+import math
+import os
+import re
+import ssl
+import statistics
+import sys
+import time
+import urllib.error
+import urllib.request
+
+AUTH_JSON = os.path.expanduser("~/.local/share/opencode/auth.json")
+URL = "https://ollama.com/v1/chat/completions"
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_OUT = os.path.join(REPO, "knowledge", "model-bench.jsonl")
+
+SYSTEM = "You are a focused worker. Do exactly the task and return only the result."
+
+DOC = """The self-improve loop separates WATCH from ACT. A SessionStart watcher runs harness-verify and
+mem-audit continuously and enqueues any red into loop-queue.jsonl. A round fires only when the queue is
+actionable, because a fixed clock against a sparse flaw signal mostly fires dry rounds. Watch results are
+stamped in .results/watch-stamp.json and reused for 1800 seconds, and a non-blocking flock makes N
+simultaneous session starts produce exactly one watch. A missing or corrupt stamp always watches, because a
+wiped stamp must never read as all clear. The verifier budget is 300 seconds and a timeout is reported as a
+timeout, never as an unreadable-observer flaw: that misreport once fabricated a queued flaw 611 times in one
+day. Only three consecutive timeouts enqueue one honest observability flaw. Unattended rounds stop at SELECT
+for doctrine and install.sh changes, queueing a PROPOSED diff for human sign-off."""
+
+CODE = '''def apply_discount(items, pct):
+    total = 0
+    for it in items:
+        total += it["price"] * it["qty"]
+    total = total - (total * pct)
+    if total < 0:
+        total = 0
+    return round(total, 2)
+
+def bucket(users, key):
+    out = {}
+    for u in users:
+        out.setdefault(u[key], []).append(u)
+    return out
+
+def retry(fn, attempts=3):
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception:
+            pass
+    return None
+'''
+
+
+def c_digest(t):
+    lines = [l.strip() for l in t.strip().splitlines() if l.strip()]
+    return len(lines) == 5 and all(re.match(r"^([-*•]|\d+[.)])\s+", l) for l in lines)
+
+
+def c_review(t):
+    if len([l for l in t.splitlines() if l.strip().upper().startswith("LINE ")]) < 2:
+        return False
+    low = t.lower()
+    return ("except" in low or "exception" in low) and any(
+        w in low for w in ("swallow", "silent", "pass", "suppress", "hides", "hidden", "masks"))
+
+
+def c_reason(t):
+    m = re.findall(r"ORDER:\s*([a-zA-Z,\s]+)", t)
+    if not m:
+        return False
+    return [x.strip().lower() for x in m[-1].split(",") if x.strip()] == \
+        ["auth", "gateway", "cache", "ledger", "worker"]
+
+
+def c_extract(t):
+    s = re.sub(r"^```(?:json)?|```$", "", t.strip(), flags=re.M).strip()
+    try:
+        d = json.loads(s)
+    except Exception:
+        return False
+    return (d.get("watch_stamp_ttl_seconds") == 1800
+            and d.get("verify_timeout_seconds") == 300
+            and d.get("consecutive_timeouts_to_enqueue") == 3
+            and d.get("fabricated_flaw_count") == 611)
+
+
+TASKS = [
+    {"id": "digest", "max_tokens": 4000, "contract": c_digest,
+     "prompt": "Summarize the note below in exactly 5 bullets, one sentence each. "
+               "No preamble, no closing line.\n\n" + DOC},
+    {"id": "review", "max_tokens": 4000, "contract": c_review,
+     "prompt": "Review this Python for real defects. For each defect output one line: "
+               "`LINE <n> | <defect> | <fix>`. No prose outside those lines.\n\n"
+               "```python\n" + CODE + "```"},
+    {"id": "reason", "max_tokens": 6000, "contract": c_reason,
+     "prompt": "Five services deploy in a fixed order:\n"
+               "1. gateway is not first and not last.\n2. auth is before ledger.\n"
+               "3. cache is immediately after gateway.\n4. worker is last.\n"
+               "5. ledger is not second.\nGive the unique order. Reason briefly, then end "
+               "with a final line exactly: ORDER: a,b,c,d,e"},
+    {"id": "extract", "max_tokens": 4000, "contract": c_extract,
+     "prompt": 'Extract from the note into JSON only. No fence, no commentary. Schema: '
+               '{"watch_stamp_ttl_seconds": int, "verify_timeout_seconds": int, '
+               '"consecutive_timeouts_to_enqueue": int, "fabricated_flaw_count": int}\n\n' + DOC},
+]
+
+
+def ssl_ctx():
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
+def load_key():
+    try:
+        entry = json.load(open(AUTH_JSON)).get("ollama-cloud") or {}
+    except Exception as ex:
+        sys.exit(f"ERROR reading {AUTH_JSON}: {ex}")
+    key = entry.get("key") or entry.get("apiKey")
+    if not key:
+        sys.exit("ERROR: no 'ollama-cloud' key in OpenCode auth store")
+    return key
+
+
+def call(model, prompt, max_tokens, effort, key):
+    """One streamed completion. Returns timings, usage and text.
+
+    TTFT is measured separately from decode because the provider's account queue
+    injects a ~20s stall that lands on EVERY model at the same magnitude; folding
+    it into tokens/second would score whichever model happened to queue.
+    """
+    body = {"model": model,
+            "messages": [{"role": "system", "content": SYSTEM},
+                         {"role": "user", "content": prompt}],
+            "max_tokens": max_tokens, "temperature": 0, "stream": True,
+            "stream_options": {"include_usage": True}}
+    if effort:
+        body["reasoning_effort"] = effort
+    req = urllib.request.Request(URL, data=json.dumps(body).encode(),
+                                 headers={"Authorization": f"Bearer {key}",
+                                          "Content-Type": "application/json"})
+    t0 = time.monotonic()
+    ttft, text, usage = None, [], None
+    with urllib.request.urlopen(req, context=ssl_ctx(), timeout=600) as r:
+        for raw in r:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            chunk = line[5:].strip()
+            if chunk == "[DONE]":
+                break
+            try:
+                ev = json.loads(chunk)
+            except Exception:
+                continue
+            if ev.get("usage"):
+                usage = ev["usage"]
+            for ch in ev.get("choices", []):
+                d = ch.get("delta") or {}
+                if d.get("reasoning_content") or d.get("reasoning") or d.get("content"):
+                    if ttft is None:
+                        ttft = time.monotonic() - t0
+                if d.get("content"):
+                    text.append(d["content"])
+    return {"ttft_s": ttft, "wall_s": time.monotonic() - t0,
+            "usage": usage or {}, "text": "".join(text)}
+
+
+def cmd_run(args):
+    key = load_key()
+    models = [m.strip() for m in args.models.split(",") if m.strip()]
+    rows = []
+    with open(args.out, "a") as fh:
+        for task in TASKS:
+            for model in models:
+                for rep in range(args.reps):
+                    rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                           "model": model, "task": task["id"], "rep": rep,
+                           "effort": args.effort, "lane": "provider-http"}
+                    try:
+                        r = call(model, task["prompt"], task["max_tokens"], args.effort, key)
+                        ct = r["usage"].get("completion_tokens")
+                        capped = bool(ct and ct >= task["max_tokens"])
+                        # An empty answer is a BUDGET outcome, not a wrong answer.
+                        # Collapsing the two is what made the previous eval
+                        # unable to tell configuration from capability.
+                        outcome = ("empty" if not r["text"].strip()
+                                   else "pass" if task["contract"](r["text"]) else "fail")
+                        gen = (r["wall_s"] - r["ttft_s"]) if r["ttft_s"] else None
+                        rec.update({
+                            "ok": True, "outcome": outcome, "capped": capped,
+                            "ttft_s": round(r["ttft_s"], 3) if r["ttft_s"] else None,
+                            "wall_s": round(r["wall_s"], 3),
+                            "completion_tokens": ct,
+                            "decode_tps": round(ct / gen, 2) if ct and gen and gen > 0 else None,
+                        })
+                    except Exception as ex:
+                        rec.update({"ok": False, "outcome": "infra",
+                                    "error": f"{type(ex).__name__}: {ex}"[:200]})
+                    fh.write(json.dumps(rec) + "\n")
+                    fh.flush()
+                    rows.append(rec)
+                    print(f'  {rec["task"]:8s} {rec["model"]:24s} rep{rep} '
+                          f'{rec["outcome"]:6s} tok={rec.get("completion_tokens")} '
+                          f'tps={rec.get("decode_tps")}', flush=True)
+    return report(rows)
+
+
+def report(rows):
+    ok = [r for r in rows if r.get("ok")]
+    if not ok:
+        sys.stderr.write("no usable results\n")
+        return 2
+    models = sorted({r["model"] for r in ok})
+    print(f"\n{'model':26s}{'intel':>8s}{'empty':>7s}{'stable':>9s}"
+          f"{'tps p50':>9s}{'s/task':>8s}{'tok/task':>9s}")
+    print("-" * 76)
+    ranked = []
+    for m in models:
+        g = [r for r in ok if r["model"] == m]
+        tps = [r["decode_tps"] for r in g if r.get("decode_tps")]
+        passes = sum(1 for r in g if r["outcome"] == "pass")
+        empties = sum(1 for r in g if r["outcome"] == "empty")
+        # Stability = decode spread. 1.0 is perfectly steady; higher is worse.
+        # Reported as a ratio because "8x spread" is the schedulable fact, and a
+        # median alone hides it completely.
+        spread = (max(tps) / min(tps)) if len(tps) > 1 and min(tps) > 0 else float("nan")
+        intel = passes / len(g)
+        row = {"model": m, "intel": intel, "empty": empties, "spread": spread,
+               "tps": statistics.median(tps) if tps else float("nan"),
+               "secs": statistics.median([r["wall_s"] for r in g]),
+               "toks": statistics.median([r["completion_tokens"] for r in g
+                                          if r.get("completion_tokens")] or [0])}
+        ranked.append(row)
+        print(f"{m:26s}{intel:>7.0%}{empties:>7d}{spread:>8.1f}x"
+              f"{row['tps']:>9.1f}{row['secs']:>8.1f}{row['toks']:>9.0f}")
+    print("\nintel = deterministic contract pass rate · empty = budget-exhausted, "
+          "no answer\nstable = decode max/min (1.0x steady) · tps excludes the "
+          "provider queue stall")
+    return 0
+
+
+def cmd_report(args):
+    try:
+        rows = [json.loads(l) for l in open(args.infile)]
+    except FileNotFoundError:
+        sys.stderr.write(f"no results at {args.infile}\n")
+        return 2
+    return report(rows)
+
+
+def main():
+    p = argparse.ArgumentParser(description="Stability / intelligence / speed bench")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    r = sub.add_parser("run")
+    r.add_argument("--models", required=True)
+    r.add_argument("--effort", default="low")
+    r.add_argument("--reps", type=int, default=3)
+    r.add_argument("--out", default=DEFAULT_OUT)
+    q = sub.add_parser("report")
+    q.add_argument("--in", dest="infile", default=DEFAULT_OUT)
+    args = p.parse_args()
+    return cmd_run(args) if args.cmd == "run" else cmd_report(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

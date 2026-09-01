@@ -1,0 +1,26 @@
+{
+  "name": "claudemaxxing",
+  "version": "0.1.0+codex.20260825032004",
+  "description": "Codex workflows and lifecycle gates for the claudemaxxing orchestration harness.",
+  "author": {
+    "name": "Ricardo Alanis"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Claudemaxxing",
+    "shortDescription": "Sol-first planning and governed Codex delegation.",
+    "longDescription": "Plans nontrivial Codex work with GPT-5.6 Sol Ultra before optional fan-out, while preserving diverse-ideas, session persistence, and verifier-gated self-improvement workflows over the deterministic core.",
+    "developerName": "Ricardo Alanis",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "For a broad or multi-deliverable request, use $claudemaxxing:gauntlet first to divide it into incremental parts; each part then follows normal routing.",
+      "Use $claudemaxxing:solplan first for nontrivial unplanned work.",
+      "After root review, use $claudemaxxing:fanout only for independent implementation chunks.",
+      "Use $claudemaxxing:ideas for diverse approaches."
+    ]
+  }
+}

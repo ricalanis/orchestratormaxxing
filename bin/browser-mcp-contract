@@ -1,0 +1,259 @@
+#!/usr/bin/env node
+/* browser-mcp-contract — THE one command to verify the browser MCP stack.
+ *
+ * Two phases, both deterministic:
+ *   A. Install checks (read-only): bridge deployed, opencode.json registered,
+ *      Hermes registered, chrome-cdp.service active, weekly cron job present.
+ *      Checks that don't apply on this machine (no Hermes, no systemd) are SKIPped.
+ *   B. Live protocol contract: spawns the MCP server on stdio and drives the full
+ *      MCP handshake + all 8 browser tools (incl. error paths and PNG magic bytes)
+ *      against the real Chrome CDP endpoint, using a self-served local test page —
+ *      zero external network dependencies.
+ *
+ * Exit 0 = everything green → safe to build/update browser-using skills on top.
+ * Exit 1 = something red (each FAIL line says what).
+ *
+ * Usage: browser-mcp-contract [path-to-mcp-server]   (default: sibling opencode-browser-mcp)
+ * Env:   CDP_URL (passed through to the server; default http://127.0.0.1:18800)
+ */
+'use strict';
+
+const { spawn, execFileSync } = require('node:child_process');
+const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+
+const SERVER = process.argv[2] || path.join(__dirname, 'opencode-browser-mcp');
+
+let failures = 0;
+const report = (ok, name, detail) => {
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${ok || !detail ? '' : '  — ' + detail}`);
+  if (!ok) failures++;
+};
+const skip = (name, why) => console.log(`SKIP  ${name}  — ${why}`);
+
+/* ── Phase A: install checks ────────────────────────────────────────────── */
+
+function installChecks() {
+  console.log('── install checks');
+  const home = os.homedir();
+
+  const bridge = path.join(home, '.local', 'bin', 'opencode-browser-mcp');
+  let st = null;
+  try { st = fs.statSync(bridge); } catch {}
+  report(!!st && !!(st.mode & 0o100), 'bridge deployed + executable', `${bridge} missing or not chmod +x`);
+
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(home, '.config', 'opencode', 'opencode.json'), 'utf8'));
+    const b = (cfg.mcp || {}).browser;
+    report(!!b && b.enabled !== false, 'opencode.json has mcp.browser enabled', 'entry missing or disabled — run install.sh');
+  } catch (e) {
+    report(false, 'opencode.json has mcp.browser enabled', `cannot read config: ${e.message}`);
+  }
+
+  const hermesCfg = path.join(home, '.hermes', 'config.yaml');
+  if (fs.existsSync(hermesCfg)) {
+    // read-only text check — we never write Hermes config from here
+    const y = fs.readFileSync(hermesCfg, 'utf8');
+    const block = y.split(/^mcp_servers:/m)[1] || '';
+    report(/^\s{1,4}browser:/m.test(block), 'hermes mcp_servers has browser',
+      'not registered — run: hermes mcp add browser --command node --args ~/.local/bin/opencode-browser-mcp');
+
+    const jobsP = path.join(home, '.hermes', 'cron', 'jobs.json');
+    try {
+      const jobs = JSON.parse(fs.readFileSync(jobsP, 'utf8')).jobs || [];
+      const job = jobs.find((j) => (j.script || '').includes('browser-mcp-update'));
+      report(!!job && job.enabled !== false, 'weekly update cron job present + enabled',
+        'missing — see knowledge/opencode-browser-connector.md for the hermes cron create line');
+    } catch (e) {
+      report(false, 'weekly update cron job present + enabled', `cannot read ${jobsP}: ${e.message}`);
+    }
+  } else {
+    skip('hermes registration + cron', 'no ~/.hermes on this machine');
+  }
+
+  try {
+    const out = execFileSync('systemctl', ['--user', 'is-active', 'chrome-cdp.service'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    report(out === 'active', 'chrome-cdp.service active', `state: ${out} — systemctl --user enable --now chrome-cdp.service`);
+  } catch (e) {
+    const out = (e.stdout || '').trim();
+    if (out) report(false, 'chrome-cdp.service active', `state: ${out} — systemctl --user enable --now chrome-cdp.service`);
+    else skip('chrome-cdp.service active', 'systemctl not available');
+  }
+}
+
+/* ── Phase B: live MCP protocol contract ────────────────────────────────── */
+
+// meta charset is load-bearing: without a charset declaration Chrome decodes the page
+// as windows-1252 and every non-ASCII assertion below would mojibake.
+const TEST_PAGE = `<!doctype html>
+<html><head><meta charset="utf-8"><title>Test Page Title</title></head><body>
+  <h1>Hello Heading</h1>
+  <p id="uni">café — ñandú 🦤 中文</p>
+  <div id="shadow-host"></div>
+  <iframe srcdoc="<p>iframe-inner-text</p>"></iframe>
+  <input id="name" type="text">
+  <button id="btn">Go</button>
+  <div id="out"></div>
+  <script>
+    document.getElementById('shadow-host').attachShadow({ mode: 'open' })
+      .innerHTML = '<span>shadow-secret</span>';
+    setTimeout(() => {
+      const late = document.createElement('div');
+      late.id = 'late'; late.textContent = 'late-render';
+      document.body.appendChild(late);
+    }, 300);
+    document.getElementById('btn').addEventListener('click', () => {
+      document.getElementById('out').textContent =
+        'clicked:' + document.getElementById('name').value;
+    });
+  </script>
+</body></html>`;
+
+function serveTestPage() {
+  return new Promise((resolve) => {
+    const srv = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(TEST_PAGE);
+    });
+    srv.listen(0, '127.0.0.1', () => resolve(srv));
+  });
+}
+
+async function liveContract() {
+  console.log('── live MCP contract');
+  if (!fs.existsSync(SERVER)) {
+    report(false, 'MCP server present', `${SERVER} not found`);
+    return;
+  }
+  const pageSrv = await serveTestPage();
+  const TEST_URL = `http://127.0.0.1:${pageSrv.address().port}/test.html`;
+
+  const srv = spawn('node', [SERVER], { stdio: ['pipe', 'pipe', 'ignore'] });
+  let buf = '';
+  const waiters = new Map();
+  let nextId = 1;
+  srv.stdout.setEncoding('utf8');
+  srv.stdout.on('data', (c) => {
+    buf += c;
+    let i;
+    while ((i = buf.indexOf('\n')) !== -1) {
+      const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+      if (!line) continue;
+      let msg; try { msg = JSON.parse(line); } catch { continue; }
+      if (msg.id !== undefined && waiters.has(msg.id)) { waiters.get(msg.id)(msg); waiters.delete(msg.id); }
+    }
+  });
+
+  const rpc = (method, params) => {
+    const id = nextId++;
+    return new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error(`timeout on ${method}`)), 40_000);
+      waiters.set(id, (m) => { clearTimeout(t); resolve(m); });
+      srv.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+    });
+  };
+  const call = async (name, args) => {
+    const m = await rpc('tools/call', { name, arguments: args });
+    if (m.error) throw new Error(`${name} protocol error: ${m.error.message}`);
+    return m.result;
+  };
+  const toolText = (r) => (r.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('');
+
+  try {
+    const init = await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'contract', version: '0' } });
+    report(!!init.result && init.result.serverInfo.name === 'opencode-browser-mcp', 'initialize', JSON.stringify(init).slice(0, 200));
+    srv.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
+
+    const list = await rpc('tools/list', {});
+    const names = (list.result.tools || []).map((t) => t.name).sort();
+    const expected = ['browser_click', 'browser_eval', 'browser_extract', 'browser_get_title',
+      'browser_get_url', 'browser_navigate', 'browser_screenshot', 'browser_type'].sort();
+    report(JSON.stringify(names) === JSON.stringify(expected), 'tools/list has all 8 tools', JSON.stringify(names));
+
+    let r = await call('browser_navigate', { url: TEST_URL });
+    report(!r.isError && toolText(r).includes('Test Page Title'), 'browser_navigate', toolText(r));
+    // #late is created 300ms AFTER load — this only passes if wait_for actually waits.
+    r = await call('browser_extract', { selector: '#late', wait_for: '#late' });
+    report(!r.isError && toolText(r) === 'late-render', 'browser_extract wait_for dynamic content', toolText(r));
+    r = await call('browser_get_title', {});
+    report(toolText(r) === 'Test Page Title', 'browser_get_title', toolText(r));
+    r = await call('browser_get_url', {});
+    report(toolText(r) === TEST_URL, 'browser_get_url', toolText(r));
+
+    r = await call('browser_extract', { selector: 'h1' });
+    report(toolText(r) === 'Hello Heading', 'browser_extract h1', toolText(r));
+    r = await call('browser_extract', {});
+    report(toolText(r).includes('Hello Heading'), 'browser_extract body default', toolText(r).slice(0, 120));
+    r = await call('browser_extract', { selector: '#nope' });
+    report(r.isError === true, 'browser_extract no-match errors', JSON.stringify(r).slice(0, 120));
+
+    r = await call('browser_extract', { selector: '#uni' });
+    report(toolText(r) === 'café — ñandú 🦤 中文', 'browser_extract unicode intact (accents/emoji/CJK)', JSON.stringify(toolText(r)));
+    r = await call('browser_extract', { selector: '#shadow-host' });
+    report(toolText(r) === 'shadow-secret', 'browser_extract pierces open shadow DOM', toolText(r));
+    r = await call('browser_extract', {});
+    report(toolText(r).includes('iframe-inner-text') && toolText(r).includes('shadow-secret'),
+      'browser_extract body includes iframe + shadow text', toolText(r).slice(0, 200));
+
+    r = await call('browser_type', { selector: '#name', text: 'ricardo' });
+    report(!r.isError && toolText(r).includes('ricardo'), 'browser_type', toolText(r));
+    r = await call('browser_click', { selector: '#btn' });
+    report(!r.isError, 'browser_click', toolText(r));
+    r = await call('browser_eval', { javascript: 'document.querySelector("#out").textContent' });
+    report(toolText(r) === '"clicked:ricardo"', 'click+type observed by page', toolText(r));
+
+    r = await call('browser_eval', { javascript: '6*7' });
+    report(toolText(r) === '42', 'browser_eval value', toolText(r));
+    r = await call('browser_eval', { javascript: 'Promise.resolve("async-ok")' });
+    report(toolText(r) === '"async-ok"', 'browser_eval awaits promises', toolText(r));
+    r = await call('browser_eval', { javascript: 'throw new Error("boom")' });
+    report(r.isError === true && toolText(r).includes('boom'), 'browser_eval surfaces page exception', toolText(r));
+
+    // const/let must not leak between calls (replMode) — this used to throw
+    // "Identifier 'contractProbe' has already been declared" on the second call.
+    r = await call('browser_eval', { javascript: 'const contractProbe = 1; contractProbe' });
+    const r2 = await call('browser_eval', { javascript: 'const contractProbe = 2; contractProbe' });
+    report(!r.isError && !r2.isError && toolText(r2) === '2',
+      'browser_eval const redeclare across calls', `1st: ${toolText(r)} 2nd: ${toolText(r2)}`);
+
+    // truncation at the 60k cap must not split a surrogate pair (emoji cut in half)
+    r = await call('browser_eval', { javascript: '"🦤".repeat(40000)' });
+    const trunc = toolText(r);
+    const beforeSuffix = trunc.replace(/\n… \(truncated\)$/, '');
+    report(trunc.endsWith('… (truncated)') && !/[\uD800-\uDBFF]$/.test(beforeSuffix),
+      'truncation preserves surrogate pairs', `tail: ${JSON.stringify(trunc.slice(-16))}`);
+
+    const shotPath = path.join(os.tmpdir(), `browser-mcp-contract-${process.pid}.png`);
+    r = await call('browser_screenshot', { path: shotPath });
+    let png = false;
+    try { png = fs.readFileSync(shotPath).subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47])); } catch {}
+    report(!r.isError && png, 'browser_screenshot writes PNG', toolText(r));
+    try { fs.unlinkSync(shotPath); } catch {}
+
+    r = await call('browser_click', { selector: '#definitely-not-there' });
+    report(r.isError === true, 'browser_click no-match errors', JSON.stringify(r).slice(0, 120));
+
+    const bad = await rpc('tools/call', { name: 'browser_nope', arguments: {} });
+    report(!!bad.error && bad.error.code === -32602, 'unknown tool → -32602', JSON.stringify(bad).slice(0, 120));
+
+    // courtesy: leave the shared browser on a blank page, not our test page
+    await call('browser_eval', { javascript: 'location.href = "about:blank", "reset"' }).catch(() => {});
+  } catch (e) {
+    report(false, 'live contract aborted', `${e.message} — is Chrome up on the CDP endpoint? (systemctl --user status chrome-cdp)`);
+  } finally {
+    srv.kill();
+    pageSrv.close();
+  }
+}
+
+(async () => {
+  installChecks();
+  await liveContract();
+  console.log(failures === 0
+    ? '\nALL GREEN — browser MCP installed, connected, and scheduled. Safe to build browser-using skills on it.'
+    : `\n${failures} FAILURE(S) — fix the FAIL lines above before relying on the browser stack.`);
+  process.exit(failures === 0 ? 0 : 1);
+})();

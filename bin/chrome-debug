@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# chrome-debug — ONE entry point for the account-integrated CDP Chrome (port 18800).
+#
+# Canonical profile: ~/.config/clawdbot/cdp-profile, overridable via CHROME_DEBUG_PROFILE
+# (signed in as the operator's Google account).
+# Canonical runner:  systemd user unit chrome-cdp.service (headed, auto-restarts, display-
+# aware via the wayland shim at ~/.local/bin/google-chrome). This script just makes sure
+# the service is up; it only launches Chrome by hand if the unit is missing.
+#
+# Used by: hermes skills (linkedin-bridge, sdr-workflow), gstack chrome-cdp (Linux branch),
+# opencode-browser-mcp (CDP_URL http://127.0.0.1:18800), codex, warp shells, Claude Code.
+# Chrome 136+ ignores --remote-debugging-port on the default user-data-dir, hence the
+# separate profile directory.
+#
+# SECURITY: this profile carries the operator's live Google session. The debug port must stay
+# bound to 127.0.0.1 — never add --remote-debugging-address, never tailscale-serve 18800.
+set -u
+set -o pipefail
+
+PORT=18800
+PROFILE="${CHROME_DEBUG_PROFILE:-$HOME/.config/clawdbot/cdp-profile}"
+
+# Already listening? Nothing to do.
+if curl -sf --max-time 2 "http://127.0.0.1:$PORT/json/version" >/dev/null; then
+  echo "chrome-debug: CDP already up on 127.0.0.1:$PORT"
+  exit 0
+fi
+
+# Preferred path: the systemd user service.
+if systemctl --user cat chrome-cdp.service >/dev/null 2>&1; then
+  systemctl --user restart chrome-cdp.service
+  for _ in $(seq 1 20); do
+    curl -sf --max-time 2 "http://127.0.0.1:$PORT/json/version" >/dev/null && {
+      echo "chrome-debug: chrome-cdp.service up on 127.0.0.1:$PORT"; exit 0; }
+    sleep 1
+  done
+  echo "chrome-debug: chrome-cdp.service failed to expose :$PORT — check: systemctl --user status chrome-cdp" >&2
+  exit 1
+fi
+
+# Fallback: manual launch (same flags as the unit). Clean a stale SingletonLock first.
+LOCK="$PROFILE/SingletonLock"
+if [ -L "$LOCK" ]; then
+  pid="$(readlink "$LOCK" | sed 's/.*-//')"
+  if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$PROFILE"/Singleton{Lock,Cookie,Socket}
+    echo "chrome-debug: removed stale SingletonLock (dead pid $pid)"
+  fi
+fi
+[ -n "${DISPLAY:-}" ] || export DISPLAY=:0
+exec "$HOME/.local/bin/google-chrome" \
+  --remote-debugging-port=$PORT \
+  --remote-allow-origins=http://localhost:$PORT,http://127.0.0.1:$PORT \
+  --no-first-run --no-default-browser-check \
+  --user-data-dir="$PROFILE" "$@"

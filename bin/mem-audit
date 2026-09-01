@@ -1,0 +1,393 @@
+#!/usr/bin/env python3
+"""mem-audit — deterministic health check for shared Claude/Codex project memory.
+
+Principle (from the AST-graph finding): staleness and index drift are GROUND TRUTH —
+compute them from dates and the filesystem, never ask an LLM to "figure out" what's stale.
+This script is the enforcement arm of the memory governance protocol
+(see knowledge/memory-protocol-upgrade.md). It reads only; it never edits memory.
+
+Exit code 0 = clean, 1 = issues found (so it can gate a hook or CI).
+
+Usage:
+  bin/mem-audit                 # audit this project's resolved shared memory dir
+  bin/mem-audit --dir <path>    # audit an explicit memory dir
+  bin/mem-audit --json          # machine-readable
+"""
+import argparse, hashlib, json, math, os, re, subprocess, sys
+from datetime import date, datetime
+
+# Re-verify horizon (days) by memory type. Past this, an *active* fact is flagged
+# STALE (not deleted) — trust it only after re-verification. Tunable.
+TTL_DAYS = {"reference": 30, "project": 14, "feedback": 180, "user": 365}
+DEFAULT_TTL = 60
+
+# Bitemporal contradiction-resolution operators (TOKI, arXiv:2606.06240). When a
+# fact is superseded, the protocol names WHICH operator resolved the conflict so the
+# decision is auditable. await-confirm ≈ our ollama-worker critic gate.
+RESOLUTION_RULES = {"last-writer-wins", "evidence-merge", "await-confirm", "per-rule"}
+CONSOLIDATION_REVIEW_FILE = ".consolidation-review.json"
+CONSOLIDATION_REVIEW_SCHEMA = 1
+CONSOLIDATION_DECISIONS = {"no-safe-merge"}
+SEMANTIC_FIELDS = (
+    "name", "description", "type", "source", "sensitivity",
+    "valid_from", "valid_to", "supersedes",
+)
+
+# Least-disclosure (arXiv:2606.06055): memory-augmented agents over-surface sensitive memory
+# (+51-83%). The AUTHORITATIVE control is the write-time doctrine rule "never store credentials";
+# this scanner is a deterministic BEST-EFFORT BACKSTOP — pattern + entropy, NOT exhaustive (no
+# scanner is). It catches the common cases so they don't silently persist; it does not replace the
+# rule. Two governance classes, by what can be enforced:
+#  SECRET_RE / high-entropy — hard credentials. A label can't make a stored key safe; the fix is
+#    REMOVAL → mem-audit ERRORS on known formats (no `sensitivity` bypass), WARNS on high-entropy
+#    blobs (lower precision) so unpatterned tokens (JWT/OAuth/proprietary) still get a look.
+#  PII_RE — personal context that legitimately persists (can't just delete the user's email). Soft
+#    control: `sensitivity: sensitive` marker + least-disclosure doctrine (stay silent unless
+#    needed) → mem-audit WARNS if unmarked. Honest: a generation-time control, NOT a guarantee.
+# Nothing ever echoes the match (the audit tool must not leak what it flags).
+SECRET_RE = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----"                       # private keys
+    r"|\b(?:sk|rk)-[A-Za-z0-9]{16,}"                            # OpenAI-style secret keys
+    r"|\bghp_[A-Za-z0-9]{20,}"                                  # GitHub PAT
+    r"|\bxox[baprs]-[A-Za-z0-9-]{10,}"                          # Slack tokens
+    r"|\bAKIA[0-9A-Z]{16}\b"                                    # AWS access key id
+    r"|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"            # JWT (eyJ… header.payload)
+    r"|(?:password|api[_-]?key|secret|access[_-]?token)\s*[:=]\s*\S{6,}",  # secret assignment
+    re.IGNORECASE,
+)
+PII_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")  # email (extend as needed)
+
+
+def _has_high_entropy_token(text):
+    """Backstop for unpatterned secrets: a long token with high Shannon entropy. WARN-grade
+    (lower precision than SECRET_RE) — catches opaque tokens the patterns miss. Scans only
+    contiguous ALPHANUMERIC runs: real hex/base64 secrets have long unbroken runs, while file
+    paths / kebab-ids / URLs are split by '-', '/', '.', '_' and so won't false-positive."""
+    for tok in re.findall(r"[A-Za-z0-9]{32,}", text):
+        counts = {}
+        for c in tok:
+            counts[c] = counts.get(c, 0) + 1
+        ent = -sum((n / len(tok)) * math.log2(n / len(tok)) for n in counts.values())
+        if ent >= 4.0:  # random tokens ~5-6 bits/char; English prose ~<4
+            return True
+    return False
+
+
+def project_memory_dir():
+    """Resolve through memoryctl; retain legacy Claude fallback during migration."""
+    bridge = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memoryctl")
+    if os.path.isfile(bridge) and os.access(bridge, os.X_OK):
+        try:
+            r = subprocess.run([bridge, "path"], capture_output=True, text=True, timeout=10)
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    cwd = os.getcwd()
+    slug = cwd.replace("/", "-")
+    return os.path.expanduser(f"~/.claude/projects/{slug}/memory")
+
+
+def parse_frontmatter(text):
+    """Minimal YAML-ish frontmatter reader for the flat fields we use. No deps."""
+    if not text.startswith("---"):
+        return {}, text
+    end = text.find("\n---", 3)
+    if end == -1:
+        return {}, text
+    block, body = text[3:end], text[end + 4:]
+    fm, indent_ctx = {}, None
+    for line in block.splitlines():
+        if not line.strip() or line.strip().startswith("#"):
+            continue
+        m = re.match(r"^(\s*)([\w_]+):\s*(.*)$", line)
+        if not m:
+            continue
+        indent, key, val = len(m.group(1)), m.group(2), m.group(3).strip()
+        if ((val.startswith('"') and val.endswith('"'))
+                or (val.startswith("[") and val.endswith("]"))):
+            try:
+                val = json.loads(val)
+            except ValueError:
+                val = val.strip('"')
+        else:
+            val = val.strip("'")
+        if indent == 0:
+            indent_ctx = key
+            if val:
+                fm[key] = val
+        else:  # nested one level (e.g. under metadata:)
+            fm[f"{indent_ctx}.{key}" if indent_ctx else key] = val
+            fm[key] = val  # also expose bare key for convenience
+    return fm, body
+
+
+def parse_date(s):
+    if not s:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s.strip(), fmt).date()
+        except ValueError:
+            pass
+    return None
+
+
+def normalize_supersedes(value):
+    """Return a closed list for legacy scalar or JSON-array supersedes."""
+    if value in (None, ""):
+        return []
+    values = value if isinstance(value, list) else [value]
+    if not values or any(not isinstance(item, str) or not item for item in values):
+        raise ValueError("supersedes must be a non-empty string or string array")
+    if any(not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", item) for item in values):
+        raise ValueError("supersedes contains an invalid memory name")
+    if len(values) != len(set(values)):
+        raise ValueError("supersedes contains duplicate memory names")
+    return values
+
+
+def active_semantic_digest(records):
+    """Independently recompute memoryctl's active-meaning snapshot."""
+    canonical = []
+    for filename, fm, body in records:
+        record = {"file": filename}
+        for field in SEMANTIC_FIELDS:
+            record[field] = fm.get(field) or ""
+        record["body"] = body.strip("\n")
+        canonical.append(record)
+    payload = json.dumps(canonical, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def consolidation_review_is_current(mem_dir, active_records):
+    path = os.path.join(mem_dir, CONSOLIDATION_REVIEW_FILE)
+    try:
+        with open(path) as fh:
+            receipt = json.load(fh)
+    except (OSError, ValueError, TypeError):
+        return False
+    expected_keys = {"schema", "decision", "active_count", "active_set_sha256", "reviewed_at"}
+    return (
+        isinstance(receipt, dict)
+        and set(receipt) == expected_keys
+        and receipt.get("schema") == CONSOLIDATION_REVIEW_SCHEMA
+        and receipt.get("decision") in CONSOLIDATION_DECISIONS
+        and receipt.get("active_count") == len(active_records)
+        and receipt.get("active_set_sha256") == active_semantic_digest(active_records)
+        and isinstance(receipt.get("reviewed_at"), str)
+        and bool(receipt["reviewed_at"])
+    )
+
+
+def audit(mem_dir):
+    issues = []  # (severity, file, message)
+    if not os.path.isdir(mem_dir):
+        # no auto-memory for this project — nothing to audit (not an error;
+        # 'info' severity keeps the SessionStart hook silent, which greps ⚠/✗)
+        return [("info", mem_dir, "no auto-memory dir — nothing to audit")], {}
+    today = date.today()
+    files = [f for f in os.listdir(mem_dir) if f.endswith(".md") and f != "MEMORY.md"]
+    index_path = os.path.join(mem_dir, "MEMORY.md")
+    index_text = ""
+    if os.path.isfile(index_path):
+        with open(index_path) as fh:
+            index_text = fh.read()
+    else:
+        issues.append(("error", "MEMORY.md", "index file missing"))
+
+    summary = {"files": len(files), "stale": 0, "superseded_indexed": 0,
+               "missing_dates": 0, "orphan_index": 0, "unindexed": 0,
+               "active_count": 0, "indexed_active_count": 0,
+               "duplicate_index_targets": 0, "broken_link": 0}
+
+    # Index linkage is decided by EXACT markdown link targets, never by substring.
+    # A raw `name in index_text` made a supersede whose successor extends the old
+    # name (platform-vision -> platform-vision-crm-build) read as still-indexed
+    # forever — an error-severity false positive with no way out but renaming the
+    # new fact — and let a neighbouring slug mask a genuinely missing pointer
+    # (lq-edd3cada).
+    #
+    # Match the link TARGET exactly, but normalise a trailing #anchor away first.
+    # Exactness must not cost coverage: a hand-edited `- [x](x.md#history)` pointing
+    # at a SUPERSEDED fact was caught by the old substring check, and a target-only
+    # regex anchored to `.md)` would silently stop catching it — trading a false
+    # positive for a false negative in the one direction that matters for a gate.
+    # memoryctl (the sole writer) emits `- [name](file.md) — hook`; anchors are
+    # empirically absent from all 30 stores on this machine, so this is coverage
+    # kept for hand edits, not a format the harness produces.
+    index_target_list = [
+        t.split("#", 1)[0].strip()
+        for t in re.findall(r"\]\(([^)]+)\)", index_text)
+    ]
+    index_targets = set(index_target_list)
+    summary["duplicate_index_targets"] = len(index_target_list) - len(index_targets)
+    if summary["duplicate_index_targets"]:
+        issues.append(("error", "MEMORY.md", "duplicate memory index targets"))
+
+    active_names = []
+    active_records = []
+    for f in sorted(files):
+        path = os.path.join(mem_dir, f)
+        with open(path) as fh:
+            fm, body = parse_frontmatter(fh.read())
+        name = fm.get("name", f[:-3])
+        mtype = (fm.get("type") or "").lower()
+        status = (fm.get("status") or "active").lower()
+        linked = f in index_targets
+
+        # 1. verification date present?
+        lv = parse_date(fm.get("last_verified") or fm.get("created"))
+        # Verification dates govern beliefs that recall can still trust. A
+        # superseded legacy row is preserved only as provenance and is already
+        # excluded from the live index/staleness gate, so missing dates there
+        # must not keep the vault permanently yellow after a governed bridge.
+        if status == "active" and mtype in ("reference", "project") and not lv:
+            issues.append(("warn", f, "no created/last_verified date (can't compute staleness)"))
+            summary["missing_dates"] += 1
+
+        # 1b. no-stored-secrets + least-disclosure (2606.06055). Never echo the match.
+        if SECRET_RE.search(body):  # known credential format — error, no marker bypass; remove it
+            issues.append(("error", f, "credential/secret stored in memory — REMOVE it (a label can't make a stored secret safe)"))
+            summary["stored_secret"] = summary.get("stored_secret", 0) + 1
+        elif _has_high_entropy_token(body):  # backstop: possible unpatterned secret (JWT/OAuth/…)
+            issues.append(("warn", f, "high-entropy token in memory — verify it's not a credential; if it is, REMOVE it (scanner is best-effort, not exhaustive)"))
+            summary["high_entropy"] = summary.get("high_entropy", 0) + 1
+        if (fm.get("sensitivity") or "").lower() != "sensitive" and PII_RE.search(body):
+            issues.append(("warn", f, "PII-looking content not marked sensitive — add `sensitivity: sensitive` (least-disclosure) or remove"))
+            summary["unmarked_pii"] = summary.get("unmarked_pii", 0) + 1
+
+        # 2. staleness (active facts only) — bitemporal: valid-time OR transaction-time, whichever bites.
+        if status == "active":
+            # 2a. valid-time expiry (TOKI valid_to) — stale regardless of recording age
+            vt = parse_date(fm.get("valid_to"))
+            if vt and vt < today:
+                issues.append(("warn", f, f"EXPIRED: past valid_to {vt} — fact no longer true in the world, re-verify"))
+                summary["stale"] += 1
+            # 2b. transaction-time TTL (last_verified/created age)
+            elif lv:
+                ttl = TTL_DAYS.get(mtype, DEFAULT_TTL)
+                age = (today - lv).days
+                if age > ttl:
+                    issues.append(("warn", f, f"STALE: {mtype or 'untyped'} {age}d old > {ttl}d TTL — re-verify before trusting"))
+                    summary["stale"] += 1
+
+        # 3. superseded facts must NOT be in the live index
+        if status == "superseded":
+            sb = fm.get("superseded_by")
+            if not sb:
+                issues.append(("warn", f, "status=superseded but no superseded_by pointer"))
+            rr = (fm.get("resolution_rule") or "").lower()
+            if not rr:
+                issues.append(("warn", f, "superseded without resolution_rule — name the TOKI operator (last-writer-wins|evidence-merge|await-confirm|per-rule)"))
+                summary["missing_rule"] = summary.get("missing_rule", 0) + 1
+            elif rr not in RESOLUTION_RULES:
+                issues.append(("warn", f, f"unknown resolution_rule '{rr}' — use one of {sorted(RESOLUTION_RULES)}"))
+                summary["bad_rule"] = summary.get("bad_rule", 0) + 1
+            if linked:
+                issues.append(("error", f, "superseded fact is still in MEMORY.md index — remove the pointer"))
+                summary["superseded_indexed"] += 1
+        elif status == "active":
+            active_names.append((f, name))
+            active_records.append((f, fm, body))
+            if linked:
+                summary["indexed_active_count"] += 1
+            if not linked:
+                issues.append(("warn", f, "active fact has no MEMORY.md index pointer"))
+                summary["unindexed"] += 1
+
+    summary["active_count"] = len(active_names)
+
+    # 4. orphan index lines -> link target file that doesn't exist
+    for m in re.finditer(r"\]\(([^)]+\.md)\)", index_text):
+        target = m.group(1)
+        if not os.path.isfile(os.path.join(mem_dir, target)):
+            issues.append(("error", "MEMORY.md", f"index points to missing file: {target}"))
+            summary["orphan_index"] += 1
+
+    # 5. bidirectional supersede-link integrity (TOKI dual-row provenance) —
+    # the losing fact is preserved and linked both ways, so the audit trail is intact.
+    link_issues = []
+    by_name = {}
+    for f in sorted(files):
+        with open(os.path.join(mem_dir, f)) as fh:
+            fm, _ = parse_frontmatter(fh.read())
+        parsed_name = fm.get("name", f[:-3])
+        if parsed_name in by_name:
+            link_issues.append(("error", f, f"duplicate memory name '{parsed_name}'"))
+            continue
+        by_name[parsed_name] = (f, fm)
+    for name, (f, fm) in by_name.items():
+        sb = fm.get("superseded_by")
+        if sb:
+            tgt = by_name.get(sb)
+            if not tgt:
+                link_issues.append(("error", f, f"superseded_by points to unknown memory '{sb}'"))
+            else:
+                try:
+                    target_sources = normalize_supersedes(tgt[1].get("supersedes"))
+                except ValueError as ex:
+                    link_issues.append(("error", tgt[0], str(ex)))
+                    target_sources = []
+                if ((tgt[1].get("status") or "active").lower() != "active"
+                        and not tgt[1].get("superseded_by")):
+                    link_issues.append(("error", f, f"superseded_by target '{sb}' is not active"))
+                if name not in target_sources:
+                    link_issues.append(("error", f, f"back-link missing: '{sb}' should supersede {name}"))
+        raw_sup = fm.get("supersedes")
+        if raw_sup:
+            try:
+                supersedes = normalize_supersedes(raw_sup)
+            except ValueError as ex:
+                link_issues.append(("error", f, str(ex)))
+                supersedes = []
+            for old_name in supersedes:
+                if old_name == name:
+                    link_issues.append(("error", f, "memory cannot supersede itself"))
+                    continue
+                old = by_name.get(old_name)
+                if not old:
+                    link_issues.append(("error", f, f"supersedes points to unknown memory '{old_name}'"))
+                elif (old[1].get("status") or "active").lower() != "superseded":
+                    link_issues.append(("error", f, f"supersedes '{old_name}' but that file is not superseded"))
+                elif old[1].get("superseded_by") != name:
+                    link_issues.append(("error", f, f"source '{old_name}' does not point back to {name}"))
+    issues.extend(link_issues)
+    summary["broken_link"] = len(link_issues)
+
+    # 6. soft cap — index getting long => time to consolidate
+    if len(active_names) > 25:
+        if consolidation_review_is_current(mem_dir, active_records):
+            summary["consolidation_review"] = "current"
+        else:
+            summary["consolidation_review"] = "needed"
+            issues.append(("warn", "MEMORY.md", f"{len(active_names)} active memories — consider a consolidation pass"))
+
+    return issues, summary
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dir")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+    mem_dir = args.dir or project_memory_dir()
+    issues, summary = audit(mem_dir)
+
+    if args.json:
+        print(json.dumps({"dir": mem_dir, "summary": summary,
+                          "issues": [{"severity": s, "file": f, "message": m} for s, f, m in issues]}, indent=2))
+    else:
+        print(f"# mem-audit: {mem_dir}")
+        print(f"# {summary}")
+        if not issues:
+            print("OK — no issues.")
+        for sev, f, msg in issues:
+            mark = {"error": "✗", "warn": "⚠", "info": "·"}.get(sev, "·")
+            print(f"{mark} [{sev}] {f}: {msg}")
+    sys.exit(1 if any(s == "error" for s, _, _ in issues) else 0)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# provider-ask — one uniform interface over every AI provider Ricardo can reach.
+#
+# The orchestrator's cross-provider worker primitive: send ONE prompt to ONE
+# provider and get plain text back on stdout. multi-council and cross-review
+# both fan out over this (DRY) — this is the only place that knows how each
+# backend is actually invoked or where its key lives.
+#
+#   provider-ask <provider> "prompt text"          # arg prompt
+#   echo "context" | provider-ask <provider> "ask" # stdin appended as context
+#   provider-ask <provider> < file                 # stdin is the whole prompt
+#   provider-ask --check <provider>                 # health probe (exit 0 = up)
+#   provider-ask --list                             # probe all, print a table
+#
+# Providers (one representative model each — cross-provider DIVERSITY is the point):
+#   ollama    -> bin/oll            (Ollama Cloud, V4 Pro)       key: opencode auth.json
+#   openai    -> codex exec         (ChatGPT Plus, gpt-5.5)      auth: ~/.codex/auth.json
+#   anthropic -> claude -p          (Claude Pro/Max, sonnet)     auth: claude CLI login
+#   xai       -> vibe-tools ask     (Grok 4)                     key: ~/.config/claudemaxxing/.env
+#
+# anthropic rides Anthropic's OWN CLI on purpose: Claude Pro/Max OAuth inside
+# third-party harnesses is prohibited (OpenCode removed it in 1.3.0), so any
+# tool that wants an Opus/Sonnet answer shells out here — exactly the codex
+# exec pattern. `--model opus` upgrades the lane for high-stakes asks.
+#
+# Flags: --model M  --system S  --max-tokens N  --timeout SECS
+# Exit: 0 + answer on stdout | 1 + reason on stderr (unavailable / error).
+set -uo pipefail
+export CLAUDEMAXXING_HARNESS_CHILD=1
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OLL="$REPO/bin/oll"
+CLAUDEMAXXING_ENV="$HOME/.config/claudemaxxing/.env"
+CODEX_AUTH="$HOME/.codex/auth.json"
+OPENCODE_AUTH="$HOME/.local/share/opencode/auth.json"
+
+TIMEOUT=300
+SYSTEM=""
+MAXTOK=8192
+# Preserve an inherited MODEL env var — `MODEL=opus provider-ask anthropic` is a
+# documented calling convention (OpenCode /opus /sonnet commands, playbook). A
+# bare MODEL="" here silently clobbered it and every env-selected model fell
+# back to the provider default (caught by Codex cross-review 2026-08-12).
+MODEL="${MODEL:-}"
+
+# macOS has no /usr/bin/timeout (it's a coreutils install), and minimal-PATH
+# environments (launchd loop-cron, sandboxed sessions) don't see /opt/homebrew/bin
+# — resolve a bounded runner once and degrade to unbounded instead of 127-ing
+# every backend. Same fallback idiom as bin/harness-agent-run.
+TIMEOUT_BIN=""
+for c in timeout gtimeout /opt/homebrew/bin/timeout /opt/homebrew/bin/gtimeout \
+         /usr/local/bin/timeout /usr/local/bin/gtimeout; do
+  if command -v "$c" >/dev/null 2>&1; then TIMEOUT_BIN="$(command -v "$c")"; break; fi
+done
+[ -n "$TIMEOUT_BIN" ] || echo "provider-ask: no timeout binary found; requests run unbounded" >&2
+with_timeout() {
+  if [ -n "$TIMEOUT_BIN" ]; then "$TIMEOUT_BIN" "$TIMEOUT" "$@"; else "$@"; fi
+}
+
+default_model() {
+  case "$1" in
+    ollama) echo "deepseek-v4-flash:0731" ;;
+    openai) echo "gpt-5.5" ;;
+    anthropic) echo "sonnet" ;;
+    xai) echo "grok-4-latest" ;;
+    *) return 1 ;;
+  esac
+}
+
+die() { echo "provider-ask: $*" >&2; exit 1; }
+
+# Pull a KEY=value out of a dotenv file without polluting our own env.
+readenv() { [ -f "$1" ] && sed -n "s/^$2=//p" "$1" | head -1 | tr -d '\r'; }
+
+usage() {
+  sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  exit "${1:-0}"
+}
+
+# ---- backends -------------------------------------------------------------
+# Each takes the full prompt on stdin, prints the answer to stdout, exits 0/1.
+
+ask_ollama() {
+  local model="$MODEL"
+  set -- "$OLL" --max-tokens "$MAXTOK"
+  [ -n "$model" ] && set -- "$@" --model "$model"
+  [ -n "$SYSTEM" ] && set -- "$@" --system "$SYSTEM"
+  # Propagate the oversize override ONLY to the Ollama backend (it's the only
+  # one with a stateless context boundary in bin/oll). Other providers manage
+  # their own limits; setting OLL_ALLOW_OVERSIZE for them would be a no-op but
+  # also a misleading attribution.
+  [ "${OLL_ALLOW_OVERSIZE:-0}" = "1" ] && set -- "$@" --allow-oversize
+  with_timeout "$@"
+}
+
+ask_openai() {
+  # ChatGPT Plus via the codex CLI. read-only sandbox = pure Q&A, no file writes.
+  # -o captures ONLY the final assistant message (codex otherwise streams events).
+  local model="${MODEL:-$(default_model openai)}"
+  local prompt; prompt="$(cat)"
+  [ -n "$SYSTEM" ] && prompt="$SYSTEM"$'\n\n'"$prompt"
+  local out; out="$(mktemp)"
+  if with_timeout codex exec -m "$model" -s read-only \
+        --skip-git-repo-check --ephemeral -o "$out" "$prompt" >/dev/null 2>&1; then
+    cat "$out"; rm -f "$out"; return 0
+  fi
+  rm -f "$out"; echo "codex exec failed (auth/timeout)" >&2; return 1
+}
+
+vibe_ask() { # $1=provider $2=default-model
+  local provider="$1" model="${MODEL:-$2}"
+  local prompt; prompt="$(cat)"
+  [ -n "$SYSTEM" ] && prompt="$SYSTEM"$'\n\n'"$prompt"
+  # The xAI key lives in the claudemaxxing env, so export it explicitly for Grok.
+  local xai; xai="$(readenv "$CLAUDEMAXXING_ENV" XAI_API_KEY)"
+  local err; err="$(mktemp)"
+  local ans
+  ans="$(export XAI_API_KEY="${xai:-${XAI_API_KEY:-}}"; with_timeout \
+          vibe-tools ask "$prompt" --provider "$provider" --model "$model" 2>"$err")"
+  local rc=$?
+  # vibe-tools prints dotenv banners + a "Generating response..." line to stdout;
+  # strip the noise, keep the answer.
+  ans="$(printf '%s\n' "$ans" | grep -vE '^\[dotenv@|^\{|Generating response|^\s*$' )"
+  if [ $rc -ne 0 ] || [ -z "$ans" ]; then
+    echo "$(grep -oE 'Error:.*' "$err" | head -1 || echo 'no response')" >&2
+    rm -f "$err"; return 1
+  fi
+  rm -f "$err"; printf '%s\n' "$ans"
+}
+
+ask_xai()    { vibe_ask xai    "$(default_model xai)"; }
+
+ask_anthropic() {
+  # Claude subscription via Anthropic's own CLI (no API key; claude.ai login).
+  # Pure Q&A: no tools, no session persistence, plain text out — the same
+  # read-only shape as ask_openai's codex exec.
+  local model="${MODEL:-$(default_model anthropic)}"
+  local prompt; prompt="$(cat)"
+  [ -n "$SYSTEM" ] && prompt="$SYSTEM"$'\n\n'"$prompt"
+  command -v claude >/dev/null 2>&1 || { echo "claude CLI not installed" >&2; return 1; }
+  local ans
+  if ans="$(printf '%s' "$prompt" | with_timeout claude -p --model "$model" \
+        --tools "" --no-session-persistence --output-format text 2>/dev/null)" \
+     && [ -n "$ans" ]; then
+    printf '%s\n' "$ans"; return 0
+  fi
+  echo "claude -p failed (auth/timeout)" >&2; return 1
+}
+
+route() { # $1=provider ; prompt on stdin
+  case "$1" in
+    ollama)    ask_ollama ;;
+    openai)    ask_openai ;;
+    anthropic) ask_anthropic ;;
+    xai)       ask_xai ;;
+    *) die "unknown provider '$1' (want: ollama|openai|anthropic|xai)";;
+  esac
+}
+
+# ---- health probe ---------------------------------------------------------
+check() { # $1=provider -> prints "up"/"down: reason", returns 0/1
+  local p="$1" r rc
+  # cheap probe: short timeout, no system prompt, tiny budget (globals feed route)
+  local _t=$TIMEOUT _s=$SYSTEM _m=$MODEL _x=$MAXTOK
+  TIMEOUT=45 SYSTEM="" MODEL="" MAXTOK=64
+  r="$(printf 'Reply with the single word OK.' | route "$p" 2>&1)"; rc=$?
+  TIMEOUT=$_t SYSTEM=$_s MODEL=$_m MAXTOK=$_x
+  if [ $rc -eq 0 ] && printf '%s' "$r" | grep -qi 'ok'; then
+    echo "up"; return 0
+  fi
+  echo "down: $(printf '%s' "$r" | tr '\n' ' ' | head -c 100)"; return 1
+}
+
+# ---- arg parse ------------------------------------------------------------
+[ $# -eq 0 ] && usage 0
+PROVIDER=""; PROMPT=""; DO_CHECK=0; DO_LIST=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage 0;;
+    --list) DO_LIST=1; shift;;
+    --check) DO_CHECK=1; shift;;
+    --model) MODEL="$2"; shift 2;;
+    --system) SYSTEM="$2"; shift 2;;
+    --max-tokens) MAXTOK="$2"; shift 2;;
+    --timeout) TIMEOUT="$2"; shift 2;;
+    -*) die "unknown flag $1";;
+    *) if [ -z "$PROVIDER" ]; then PROVIDER="$1"; else PROMPT="$1"; fi; shift;;
+  esac
+done
+
+if [ "$DO_LIST" = 1 ]; then
+  printf '%-9s %s\n' PROVIDER STATUS
+  for p in ollama openai anthropic xai; do printf '%-9s %s\n' "$p" "$(check "$p")"; done
+  exit 0
+fi
+[ -z "$PROVIDER" ] && die "no provider given"
+if [ "$DO_CHECK" = 1 ]; then s="$(check "$PROVIDER")"; echo "$s"; [ "$s" = up ]; exit; fi
+
+# Build the prompt: arg + stdin (context) — same convention as bin/oll.
+STDIN=""; [ ! -t 0 ] && STDIN="$(cat)"
+if [ -n "$PROMPT" ] && [ -n "$STDIN" ]; then FULL="$PROMPT"$'\n\n--- CONTEXT ---\n'"$STDIN"
+elif [ -n "$PROMPT" ]; then FULL="$PROMPT"
+elif [ -n "$STDIN" ]; then FULL="$STDIN"
+else die "no prompt (pass an argument and/or pipe stdin)"; fi
+
+printf '%s' "$FULL" | route "$PROVIDER"

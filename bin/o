@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Machine-facing bridge for the sourced `o` launcher. Claude/Codex command
+# shells do not load interactive rc files, so they need a real PATH executable.
+set -euo pipefail
+
+source_file="${CLAUDEMAXXING_O_SHELL:-$HOME/.config/claudemaxxing/opencode-o.sh}"
+if [[ ! -r "$source_file" ]]; then
+  printf 'o: launcher source unavailable: %s\n' "$source_file" >&2
+  exit 127
+fi
+# shellcheck source=/dev/null
+source "$source_file"
+_o_machine_main "$@"

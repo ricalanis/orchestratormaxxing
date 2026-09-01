@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""
+oll-sync — keep OpenCode's `ollama-cloud` provider models in sync with the live
+Ollama Cloud catalog (https://ollama.com/v1/models).
+
+- Reads the API key from OpenCode's auth store (~/.local/share/opencode/auth.json,
+  provider "ollama-cloud") — no secret in this script or in opencode.json.
+- Adds models that are newly available, prunes ones that disappeared, and
+  PRESERVES any curated display names / context limits you already set.
+- Backs up opencode.json before writing.
+
+Usage:
+    bin/oll-sync           # sync + write
+    bin/oll-sync --dry-run # show what would change, write nothing
+"""
+import json, os, ssl, sys, urllib.request, urllib.error, shutil
+
+OPENCODE_JSON = os.path.expanduser("~/.config/opencode/opencode.json")
+AUTH_JSON     = os.path.expanduser("~/.local/share/opencode/auth.json")
+PROVIDER      = "ollama-cloud"
+MODELS_URL    = "https://ollama.com/v1/models"
+
+# No live catalog model is excluded. Ollama now applies included Pro/Max limits
+# before drawing from extra balance; Kimi K3's published token prices are
+# overage rates, not an extra-only gate (verified 2026-08-20).
+EXCLUDE = set()
+
+# nice display names for known families (fallback = the raw id)
+PRETTY = {
+    "glm-5.3": "GLM-5.3", "glm-5.3-flash": "GLM-5.3 Flash",
+    "glm-5.2": "GLM-5.2", "glm-5.1": "GLM-5.1", "glm-5": "GLM-5",
+    "deepseek-v4-pro": "DeepSeek V4 Pro", "deepseek-v4-flash": "DeepSeek V4 Flash",
+    "deepseek-v3.2": "DeepSeek V3.2", "deepseek-v3.1:671b": "DeepSeek V3.1 671B",
+    "kimi-k3": "Kimi K3", "kimi-k2.7-code": "Kimi K2.7 Code", "kimi-k2.6": "Kimi K2.6", "kimi-k2-thinking": "Kimi K2 Thinking", "kimi-k2.5": "Kimi K2.5",
+    "qwen3-next:80b": "Qwen3 Next 80B",
+    "minimax-m3": "MiniMax M3", "minimax-m2.7": "MiniMax M2.7",
+    "gpt-oss:120b": "GPT-OSS 120B", "gpt-oss:20b": "GPT-OSS 20B",
+    "nemotron-3-super": "Nemotron-3 Super", "devstral-2:123b": "Devstral 2 123B",
+}
+
+
+# Output caps are not published on the provider's model rows, so this stays a
+# documented policy floor rather than a measurement. Context is NOT a floor: it
+# comes from bin/model-catalog, which reads what the provider publishes.
+DEFAULT_OUTPUT = 32768
+
+
+def load_catalog(path=None):
+    """Read bin/model-catalog's cache. Missing/unreadable -> None, never a guess."""
+    path = path or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "knowledge", "model-catalog.json")
+    try:
+        return json.load(open(path))
+    except Exception:
+        return None
+
+
+def catalog_limits(mid, catalog):
+    """(context, output) from the published catalog, or None when unknown.
+
+    None means UNKNOWN. Returning a family-shaped guess here is exactly the bug
+    this replaced (lq-17b20b52): deepseek-v4-pro:0813 is a 1M model registered
+    at 200K for weeks, because a `deepseek` prefix mapped to a plausible-looking
+    constant nobody had checked against the provider.
+    """
+    facts = (catalog or {}).get("models", {}).get(mid)
+    if not facts or not facts.get("context"):
+        return None
+    return (facts["context"], facts.get("output") or DEFAULT_OUTPUT)
+
+
+def reconcile_entry(mid, entry, catalog):
+    """Correct a CURATED entry's context against the published catalog.
+
+    'Preserve curated entries as-is' is why the 200K values never healed: the
+    sync only ever filled gaps, so a wrong number, once written, was permanent.
+    Only `limit.context` is touched — names and every other curated field
+    survive byte-for-byte. Returns (new_entry, old_context) or (entry, None).
+    """
+    limits = catalog_limits(mid, catalog)
+    if limits is None:
+        return entry, None
+    published = limits[0]
+    have = (entry.get("limit") or {}).get("context")
+    if have == published:
+        return entry, None
+    fixed = dict(entry)
+    fixed["limit"] = dict(entry.get("limit") or {})
+    fixed["limit"]["context"] = published
+    fixed["limit"].setdefault("output", DEFAULT_OUTPUT)
+    return fixed, have
+
+
+def ctx_for(mid):
+    """LEGACY family guess. Retained only as the last-resort fallback for a model
+    the published catalog does not cover, and every use is announced on stderr —
+    a guess that cannot be seen is how the 200K regression survived for weeks."""
+    if mid.split("/")[-1].split(":")[0] == "kimi-k3": return (1_000_000, 32768)
+    if "gemini-3-flash" in mid:            return (1_000_000, 65536)
+    if "minimax-m3" in mid:                return (1_000_000, 131072)   # frontier code, 1M ctx, multimodal
+    if "deepseek-v4-flash" in mid:         return (1_000_000, 32768)   # 1M ctx per library page (2026-08-11)
+    if "kimi" in mid or "qwen3-vl" in mid or "qwen3-coder" in mid: return (256_000, 32768)
+    if mid.startswith(("glm-", "deepseek", "minimax", "qwen3", "nemotron", "devstral", "mistral", "cogito")):
+        return (200_000, 32768)
+    if "gpt-oss" in mid:                   return (131_072, 32768)
+    return (131_072, 32768)
+
+
+def ssl_ctx():
+    try:
+        import certifi; return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
+def load_key():
+    d = json.load(open(AUTH_JSON))
+    entry = d.get(PROVIDER) or {}
+    key = entry.get("key") or entry.get("apiKey")
+    if not key:
+        sys.exit(f"ERROR: no '{PROVIDER}' key in {AUTH_JSON} (run `opencode auth login`)")
+    return key
+
+
+def live_models(key):
+    req = urllib.request.Request(MODELS_URL, headers={"Authorization": f"Bearer {key}"})
+    try:
+        with urllib.request.urlopen(req, timeout=30, context=ssl_ctx()) as r:
+            # Compare the final model-name component so any future policy
+            # exclusion also applies to namespaced/versioned catalog IDs.
+            return sorted(m["id"] for m in json.loads(r.read())["data"]
+                          if m["id"].split("/")[-1].split(":")[0] not in EXCLUDE)
+    except urllib.error.HTTPError as e:
+        sys.exit(f"HTTP {e.code}: {e.read().decode()[:200]}")
+
+
+def main():
+    dry = "--dry-run" in sys.argv
+    cfg = json.load(open(OPENCODE_JSON))
+    prov = cfg.setdefault("provider", {}).get(PROVIDER)
+    if not prov:
+        sys.exit(f"ERROR: provider '{PROVIDER}' not found in {OPENCODE_JSON}")
+    current = prov.get("models", {})
+    live = live_models(load_key())
+
+    catalog = load_catalog()
+    if catalog is None:
+        sys.stderr.write(
+            "  ! knowledge/model-catalog.json missing — every window below is a "
+            "family GUESS. Run `model-catalog refresh` first.\n")
+
+    new_models = {}
+    corrected = []
+    for mid in live:
+        if mid in current:                       # curated entry: keep, but reconcile
+            entry, was = reconcile_entry(mid, current[mid], catalog)
+            new_models[mid] = entry
+            if was is not None:
+                corrected.append((mid, was, entry["limit"]["context"]))
+        else:
+            limits = catalog_limits(mid, catalog)
+            if limits is None:
+                ctx, out = ctx_for(mid)
+                sys.stderr.write(
+                    f"  ? {mid}: not in the published catalog — falling back to a "
+                    f"family GUESS ({ctx} ctx)\n")
+            else:
+                ctx, out = limits
+            new_models[mid] = {"name": PRETTY.get(mid, mid),
+                               "limit": {"context": ctx, "output": out}}
+
+    added   = [m for m in live if m not in current]
+    removed = [m for m in current if m not in live]
+    kept    = [m for m in live if m in current]
+
+    print(f"live models: {len(live)} | kept: {len(kept)} | added: {len(added)} | "
+          f"removed: {len(removed)} | corrected: {len(corrected)}")
+    for mid, was, now in corrected:
+        print(f"  ~ {mid}: context {was} -> {now} (published)")
+    if added:   print("  + " + ", ".join(added))
+    if removed: print("  - " + ", ".join(removed))
+
+    if dry:
+        print("(dry-run: no changes written)")
+        return
+    if not added and not removed and not corrected:
+        print("already in sync — nothing to write.")
+        return
+
+    shutil.copy(OPENCODE_JSON, OPENCODE_JSON + ".bak")
+    prov["models"] = new_models
+    json.dump(cfg, open(OPENCODE_JSON, "w"), indent=2)
+    print(f"updated {OPENCODE_JSON} (backup: opencode.json.bak)")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,391 @@
+#!/usr/bin/env python3
+"""Install the pinned external skill stack into Claude, Codex, OpenCode, and Hermes."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+TARGET_LABELS = {"Claude", "Codex", "OpenCode", "Hermes"}
+DOCTRINE_BEGIN = "<!-- claudemaxxing:anti-slop-design:begin -->"
+DOCTRINE_END = "<!-- claudemaxxing:anti-slop-design:end -->"
+DOCTRINE_BLOCK = f"""{DOCTRINE_BEGIN}
+## Automatic anti-slop UI generation
+
+For every new or materially restyled UI, automatically load and follow the
+`anti-slop-design` skill before writing code. It routes `hallmark`, `unslop-ui`,
+and `avoid-ai-design` and requires its generation gate before delivery. The user
+does not need to request a separate anti-slop revision.
+{DOCTRINE_END}
+"""
+
+
+class SyncError(RuntimeError):
+    pass
+
+
+def run_git(args: list[str], *, cwd: Path | None = None) -> str:
+    proc = subprocess.run(
+        ["git", *args], cwd=cwd, text=True, capture_output=True, timeout=120
+    )
+    if proc.returncode:
+        detail = (proc.stderr or proc.stdout).strip().splitlines()
+        raise SyncError(detail[-1] if detail else f"git {' '.join(args)} failed")
+    return proc.stdout.strip()
+
+
+def selected_files(root: Path, includes: list[str]) -> list[Path]:
+    files: set[Path] = set()
+    resolved_root = root.resolve()
+    for relative in includes:
+        candidate = root / relative
+        try:
+            candidate.resolve().relative_to(resolved_root)
+        except (OSError, ValueError) as exc:
+            raise SyncError(f"include escapes skill root: {relative}") from exc
+        if candidate.is_symlink():
+            raise SyncError(f"symlinked include refused: {relative}")
+        if candidate.is_file():
+            files.add(candidate)
+        elif candidate.is_dir():
+            for item in candidate.rglob("*"):
+                if item.is_symlink():
+                    raise SyncError(f"symlinked payload refused: {item.relative_to(root)}")
+                if item.is_file():
+                    files.add(item)
+        else:
+            raise SyncError(f"missing include: {relative}")
+    return sorted(files, key=lambda p: p.relative_to(root).as_posix())
+
+
+def tree_digest(root: Path, includes: list[str]) -> tuple[str, list[Path]]:
+    files = selected_files(root, includes)
+    digest = hashlib.sha256()
+    for path in files:
+        relative = path.relative_to(root).as_posix()
+        file_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+        digest.update(relative.encode())
+        digest.update(b"\0")
+        digest.update(file_hash.encode())
+        digest.update(b"\n")
+    return digest.hexdigest(), files
+
+
+def checkout_source(repo: str, commit: str, cache_dir: Path, offline: bool) -> Path:
+    key = hashlib.sha256(f"{repo}\0{commit}".encode()).hexdigest()[:20]
+    destination = cache_dir / key
+    if destination.is_dir():
+        try:
+            if run_git(["rev-parse", "HEAD"], cwd=destination) == commit:
+                return destination
+        except SyncError:
+            pass
+        if offline:
+            raise SyncError(f"invalid cached checkout for {repo}@{commit}")
+        shutil.rmtree(destination)
+    if offline:
+        raise SyncError(f"source not cached for offline install: {repo}@{commit}")
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=f".{key}.", dir=cache_dir))
+    try:
+        run_git(["init", "-q"], cwd=stage)
+        run_git(["remote", "add", "origin", repo], cwd=stage)
+        run_git(["fetch", "--depth", "1", "origin", commit], cwd=stage)
+        run_git(["checkout", "-q", "--detach", "FETCH_HEAD"], cwd=stage)
+        if run_git(["rev-parse", "HEAD"], cwd=stage) != commit:
+            raise SyncError(f"checkout did not resolve requested commit: {repo}@{commit}")
+        try:
+            stage.replace(destination)
+        except FileExistsError:
+            shutil.rmtree(stage)
+        return destination
+    except Exception:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+
+
+def validate_payload(skill: dict, source: Path) -> tuple[Path, list[Path]]:
+    name = skill["name"]
+    source_root = (source / skill["path"]).resolve()
+    try:
+        source_root.relative_to(source.resolve())
+    except ValueError as exc:
+        raise SyncError(f"source path escapes checkout for {name}: {skill['path']}") from exc
+    if not source_root.is_dir():
+        raise SyncError(f"missing source path for {name}: {skill['path']}")
+    digest, files = tree_digest(source_root, skill["include"])
+    if digest != skill["tree_sha256"]:
+        raise SyncError(
+            f"payload hash mismatch for {name}: expected {skill['tree_sha256']}, got {digest}"
+        )
+    return source_root, files
+
+
+def managed_destination_ok(destination: Path, name: str) -> bool:
+    if not destination.exists() and not destination.is_symlink():
+        return True
+    if not destination.is_dir() or destination.is_symlink():
+        return False
+    marker = destination / ".claudemaxxing-source.json"
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (
+        data.get("managed_by") == "claudemaxxing/bin/sync-agent-skills"
+        and data.get("name") == name
+    )
+
+
+def copy_skill(
+    skill: dict,
+    source_root: Path,
+    files: list[Path],
+    destination_root: Path,
+    dry_run: bool,
+) -> None:
+    name = skill["name"]
+    destination = destination_root / name
+    if dry_run:
+        print(f"would install {name} -> {destination} ({len(files)} files)")
+        return
+
+    destination_root.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=f".{name}.", dir=destination_root))
+    try:
+        for source_file in files:
+            relative = source_file.relative_to(source_root)
+            target = stage / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_file, target)
+        provenance = {
+            "managed_by": "claudemaxxing/bin/sync-agent-skills",
+            "name": name,
+            "repo": skill["repo"],
+            "commit": skill["commit"],
+            "path": skill["path"],
+            "license": skill["license"],
+            "tree_sha256": skill["tree_sha256"],
+        }
+        (stage / ".claudemaxxing-source.json").write_text(
+            json.dumps(provenance, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        backup = destination_root / f".{name}.previous"
+        if backup.exists() or backup.is_symlink():
+            if backup.is_dir() and not backup.is_symlink():
+                shutil.rmtree(backup)
+            else:
+                backup.unlink()
+        if destination.exists() or destination.is_symlink():
+            destination.replace(backup)
+        try:
+            stage.replace(destination)
+        except Exception:
+            if backup.exists() or backup.is_symlink():
+                backup.replace(destination)
+            raise
+        if backup.exists() or backup.is_symlink():
+            if backup.is_dir() and not backup.is_symlink():
+                shutil.rmtree(backup)
+            else:
+                backup.unlink()
+        print(f"installed {name} -> {destination} ({len(files)} files)")
+    except Exception:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+
+
+def load_manifest(path: Path) -> dict:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("schema_version") != 1 or not isinstance(data.get("skills"), list):
+        raise SyncError("unsupported external skill manifest")
+    seen: set[str] = set()
+    for skill in data["skills"]:
+        required = {"name", "repo", "commit", "path", "include", "license", "tree_sha256"}
+        missing = sorted(required - set(skill))
+        if missing:
+            raise SyncError(f"manifest entry missing {', '.join(missing)}")
+        name = skill["name"]
+        if not NAME_RE.fullmatch(name) or name in seen:
+            raise SyncError(f"invalid or duplicate skill name: {name}")
+        if not COMMIT_RE.fullmatch(skill["commit"]):
+            raise SyncError(f"commit must be a full SHA for {name}")
+        if not re.fullmatch(r"[0-9a-f]{64}", skill["tree_sha256"]):
+            raise SyncError(f"invalid tree hash for {name}")
+        if not skill["include"] or not all(isinstance(x, str) for x in skill["include"]):
+            raise SyncError(f"invalid include list for {name}")
+        selected_targets = skill.get("targets")
+        if selected_targets is not None:
+            if (not isinstance(selected_targets, list) or not selected_targets
+                    or not all(isinstance(x, str) for x in selected_targets)
+                    or len(set(selected_targets)) != len(selected_targets)
+                    or not set(selected_targets) <= TARGET_LABELS):
+                raise SyncError(f"invalid targets for {name}")
+        seen.add(name)
+    return data
+
+
+def validated_doctrine_text(path: Path) -> str:
+    if path.exists() and (not path.is_file() or path.is_symlink()):
+        raise SyncError(f"refusing non-regular global instructions file: {path}")
+    current = path.read_text(encoding="utf-8") if path.exists() else ""
+    begin = current.find(DOCTRINE_BEGIN)
+    end = current.find(DOCTRINE_END)
+    if (begin == -1) != (end == -1) or (begin != -1 and end < begin):
+        raise SyncError(f"malformed anti-slop doctrine block: {path}")
+    return current
+
+
+def sync_doctrine(path: Path, dry_run: bool) -> None:
+    current = validated_doctrine_text(path)
+    begin = current.find(DOCTRINE_BEGIN)
+    end = current.find(DOCTRINE_END)
+    if begin != -1:
+        before = current[:begin].rstrip()
+        after = current[end + len(DOCTRINE_END):].lstrip()
+        current = "\n\n".join(part for part in (before, after) if part)
+    updated = "\n\n".join(part for part in (current.rstrip(), DOCTRINE_BLOCK.rstrip()) if part) + "\n"
+    if dry_run:
+        print(f"would wire automatic anti-slop generation -> {path}")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stage = path.with_name(f".{path.name}.anti-slop.tmp")
+    try:
+        stage.write_text(updated, encoding="utf-8")
+        stage.replace(path)
+    finally:
+        stage.unlink(missing_ok=True)
+    print(f"wired automatic anti-slop generation -> {path}")
+
+
+def main() -> int:
+    repo_root = Path(__file__).resolve().parents[1]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--manifest", type=Path, default=repo_root / "skills/external-stack.json")
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=Path(os.environ.get("CLAUDEMAXXING_SKILL_CACHE", Path.home() / ".cache/claudemaxxing/skill-sources")),
+    )
+    parser.add_argument("--offline", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--source",
+        action="append",
+        default=[],
+        metavar="REPO=PATH",
+        help="use an already checked-out source (repeatable; intended for deterministic tests)",
+    )
+    parser.add_argument("--no-hermes", action="store_true")
+    args = parser.parse_args()
+
+    overrides: dict[str, Path] = {}
+    for value in args.source:
+        repo, separator, path = value.partition("=")
+        if not separator or not repo or not path:
+            raise SyncError(f"invalid --source value: {value}")
+        overrides[repo] = Path(path).resolve()
+
+    manifest = load_manifest(args.manifest)
+    manifest_source_root = args.manifest.expanduser().resolve().parents[1]
+    executable_source_root = Path(__file__).resolve().parents[1]
+    local_source_root = next(
+        (candidate for candidate in (executable_source_root, manifest_source_root)
+         if (candidate / "skills").is_dir()),
+        manifest_source_root,
+    )
+    home = Path.home()
+    codex_home = Path(os.environ.get("CODEX_HOME", home / ".codex")).expanduser()
+    targets = [
+        ("Claude", home / ".claude/skills"),
+        ("Codex", codex_home / "skills"),
+        ("OpenCode", home / ".config/opencode/skills"),
+    ]
+    hermes_live = (home / ".hermes/kanban.db").is_file()
+    if hermes_live and not args.no_hermes:
+        targets.append(("Hermes", home / ".hermes/skills"))
+
+    def destinations(skill: dict) -> list[tuple[str, Path]]:
+        selected = set(skill.get("targets", TARGET_LABELS))
+        return [(label, path) for label, path in targets if label in selected]
+
+    sources: dict[tuple[str, str], Path] = {}
+    payloads: dict[str, tuple[Path, list[Path]]] = {}
+    for skill in manifest["skills"]:
+        key = (skill["repo"], skill["commit"])
+        if key not in sources:
+            override = overrides.get(skill["repo"])
+            if skill["repo"] == "local://claudemaxxing":
+                # The globally installed command lives under ~/.local/bin, so
+                # __file__ cannot identify the repository.  install.sh passes
+                # its resolved REPO_DIR explicitly; tests may instead locate
+                # the local source from the manifest checkout.
+                sources[key] = override or local_source_root
+            else:
+                if override is not None:
+                    head = run_git(["rev-parse", "HEAD"], cwd=override)
+                    if head != skill["commit"]:
+                        raise SyncError(
+                            f"source override has wrong commit for {skill['repo']}: {head}"
+                        )
+                    sources[key] = override
+                else:
+                    sources[key] = checkout_source(
+                        skill["repo"], skill["commit"], args.cache_dir.expanduser(), args.offline
+                    )
+        payloads[skill["name"]] = validate_payload(skill, sources[key])
+
+    # Validate every source and every destination before the first write. A
+    # missing repo, hash drift, or same-name user skill must not leave a half
+    # installed stack behind.
+    for skill in manifest["skills"]:
+        for label, target in destinations(skill):
+            destination = target / skill["name"]
+            if not managed_destination_ok(destination, skill["name"]):
+                raise SyncError(
+                    f"refusing to replace unmanaged {label} skill: {destination}"
+                )
+
+    doctrine_targets = [
+        home / ".claude/CLAUDE.md",
+        codex_home / "AGENTS.md",
+        home / ".config/opencode/AGENTS.md",
+    ]
+    if hermes_live and not args.no_hermes:
+        doctrine_targets.append(home / ".hermes/AGENTS.md")
+    for target in doctrine_targets:
+        validated_doctrine_text(target)
+
+    for skill in manifest["skills"]:
+        source_root, files = payloads[skill["name"]]
+        selected_destinations = destinations(skill)
+        for label, target in selected_destinations:
+            copy_skill(skill, source_root, files, target, args.dry_run)
+        print(f"verified {skill['name']} for {', '.join(label for label, _ in selected_destinations)}")
+
+    for target in doctrine_targets:
+        sync_doctrine(target, args.dry_run)
+
+    if not hermes_live and not args.no_hermes:
+        print("Hermes skipped: ~/.hermes/kanban.db is absent (unrelated ~/.hermes installs stay untouched)")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, SyncError, json.JSONDecodeError) as exc:
+        print(f"sync-agent-skills: {exc}", file=sys.stderr)
+        raise SystemExit(1)

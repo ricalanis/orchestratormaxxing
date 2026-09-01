@@ -1,0 +1,902 @@
+#!/usr/bin/env python3
+"""loop-tick — one tick of the self-improvement loop's OUTER shell (watch + intake + gate).
+
+The design we settled on: **continuous watching, event-driven acting.** A fixed-clock loop
+against a sparse, usage-generated flaw signal mostly fires dry rounds — and a round that must
+justify itself starts *manufacturing* marginal flaws (the reward-hacking failure Amplitude's
+Ralph-loop writeup warns about). So the clock is NOT the trigger; the QUEUE is. This tool is
+the deterministic outer shell that:
+
+  1. WATCH  — run the deterministic guards (harness-verify, mem-audit) and enqueue every
+              red/drift as a flaw. Free (no model), idempotent (loop-queue dedupes).
+  2. INTAKE — optionally pull fresh external research (harness-scan; --x adds X/web) and enqueue
+              pillar-gap *leads* (leads, not facts — the round's verifier+critic still gate them).
+  3. ACT    — when the queue is actionable, fire exactly one governed round and stop.
+
+The scheduler stays a dumb clock; this tool turns "every hour" into "act only on real signal".
+The normal operator interface fires at most one round:
+
+    loop-tick --intake
+
+`--dry-run` only reads the queue and reports what would happen. `--gate` preserves the shell-gate
+interface used by the cross-machine scheduler: exit 0 when actionable and 1 when idle, without
+invoking an agent. `--kick` is the SessionStart spelling: it detaches that same gate/watch path
+and returns immediately, so a cold verifier never becomes interactive startup latency. `--act`
+remains as a backwards-compatible spelling of the default behavior.
+Rounds run through `harness-agent-run` (default host Claude; set `HARNESS_HOST=codex` for Codex).
+
+The deterministic watch/gate phases only append to the queue + tick log; a fired round may edit
+the repository under the self-improve workflow's own governance. Exit codes:
+  default/dry-run: 0 = success (including an empty queue)
+  --gate: 0 = actionable, 1 = idle
+  any mode: 2 = watcher/queue/runner error
+"""
+import argparse, fcntl, json, os, re, signal, socket, subprocess, sys, tempfile, time
+from datetime import datetime, timezone
+
+
+def repo_root():
+    try:
+        out = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return os.getcwd()
+
+
+ROOT = repo_root()
+
+WATCH_TTL_SECONDS = int(os.environ.get("HARNESS_WATCH_TTL_SECONDS", "1800"))
+HARNESS_VERIFY_TIMEOUT_SECONDS = int(
+    os.environ.get("HARNESS_VERIFY_TIMEOUT_SECONDS", "300")
+)
+
+
+def tool(name):
+    """Prefer the in-repo bin/ tool (source of truth); fall back to PATH (global install)."""
+    local = os.path.join(ROOT, "bin", name)
+    return local if os.path.isfile(local) else name
+
+
+def run(cmd, timeout=120):
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,
+        )
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+    except subprocess.TimeoutExpired:
+        if proc is not None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=0.5)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
+        return subprocess.CompletedProcess(cmd, 99, "", f"timed out after {timeout}s")
+    except Exception as ex:
+        return subprocess.CompletedProcess(cmd, 99, "", str(ex))
+
+
+DIAG_LIMIT = int(os.environ.get("HARNESS_DIAG_LIMIT", "400"))
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_CONTROL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
+_CREDENTIAL_RES = (
+    re.compile(r"sk-[A-Za-z0-9_-]{8,}"),
+    re.compile(r"ghp_[A-Za-z0-9]{8,}"),
+    re.compile(r"AKIA[A-Z0-9]{12,}"),
+    re.compile(r"xox[a-z]-[A-Za-z0-9-]{8,}"),
+    re.compile(r"Bearer\s+[A-Za-z0-9._-]{8,}"),
+    re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}"),  # JWT
+    re.compile(r"(?i)\b(api[_-]?key|token|secret|password)\b\s*[=:]\s*\S{6,}"),
+)
+
+
+def _diag_clean(text, limit):
+    """Bounded, sanitized fragment safe to commit to the queue JSONL.
+
+    Keeps the TAIL: a traceback's cause is its last line, and a truncated head
+    would attribute nothing. Same redaction posture as agent-done-notify —
+    known credential formats, never a claim of exhaustiveness.
+    """
+    text = _ANSI_RE.sub("", text or "")
+    text = _CONTROL_RE.sub(" ", text)
+    for pattern in _CREDENTIAL_RES:
+        text = pattern.sub("[redacted]", text)
+    text = " ".join(text.split())
+    # NOT text[-limit:] — at limit=0 that is text[0:], i.e. the WHOLE string, so a
+    # zero budget would return everything it was asked to suppress.
+    limit = max(0, limit)
+    return text if len(text) <= limit else text[len(text) - limit:]
+
+
+def _observer_diagnostic(r):
+    """Why the observer was unreadable — the payload an unreadable-observer flaw was missing.
+
+    An unreadable observer is not evidence about its target (signal-vs-artifact), but the
+    flaw it queues must still be ATTRIBUTABLE: without an exit code and a stderr tail, a
+    later round — often on the OTHER machine, where .results/ is gitignored and unreachable
+    — cannot tell a crashed verifier from a hung one from a truncated pipe. Measured
+    2026-08-17: ~20 `unparseable-twice` rows on the Mac, every one carrying only
+    {"attempts": 2}, and the resulting lq-0fafcc65 arrived here with nothing to diagnose.
+    """
+    out = r.stdout or ""
+    return (f"rc={r.returncode} stdout={len(out)}B "
+            f"stdout_head=<{_diag_clean(out[:200], 200)}> "
+            f"stderr_tail=<{_diag_clean(r.stderr, DIAG_LIMIT)}>")
+
+
+def enqueue(layer, source, flaw, repro=None, diag=None):
+    cmd = [tool("loop-queue"), "add", "--layer", layer, "--source", source, flaw]
+    if diag:
+        # attribution payload; bounded + sanitized above and NOT part of the
+        # content hash, so the same flaw text stays one idempotent item no matter
+        # how its diagnostics differ run to run.
+        cmd += ["--diag", diag]
+    if repro:
+        # provenance only: the exact command the watcher ran, so a round can
+        # re-exercise the specific failing input before resolving (Ollie's
+        # rerun step). Recorded by loop-queue, never executed by it.
+        cmd += ["--repro", repro]
+    run(cmd, timeout=30)
+
+
+def now_iso():
+    return os.environ.get("LOOP_QUEUE_TS") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _harness_verify_errors():
+    """Run harness-verify once; return (data, {stable-key: issue}, outcome, diag).
+
+    The third value distinguishes a timeout from genuinely unparseable output; the
+    fourth is the bounded attribution payload for the non-ok cases (empty on ok)."""
+    r = run([sys.executable, tool("harness-verify"), "--json"],
+            timeout=HARNESS_VERIFY_TIMEOUT_SECONDS)
+    if r.returncode == 99 and "timed out after" in r.stderr.lower():
+        return None, {}, "timeout", _observer_diagnostic(r)
+    try:
+        data = json.loads(r.stdout)
+    except ValueError:
+        return None, {}, "unparseable", _observer_diagnostic(r)
+    errs = {(iss.get("key") or f"issue:{iss.get('where')}:{iss.get('message')}"): iss
+            for iss in data.get("issues", []) if iss.get("severity") == "error"}
+    return data, errs, "ok", ""
+
+
+def _record_observation(result):
+    """Atomically retain bounded local diagnostics; the queue remains durable state."""
+    results_dir = os.environ.get("HARNESS_RESULTS_DIR") or os.path.join(ROOT, ".results")
+    path = os.path.join(results_dir, "harness-observations.jsonl")
+    try:
+        os.makedirs(results_dir, exist_ok=True)
+        rows = []
+        try:
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(row, dict):
+                        rows.append(row)
+        except OSError:
+            pass
+        rows.append({"ts": now_iso(), "result": result})
+        rows = rows[-32:]
+        encoded = [json.dumps(row, sort_keys=True) + "\n" for row in rows]
+        while encoded and sum(len(line.encode("utf-8")) for line in encoded) > 256 * 1024:
+            encoded.pop(0)
+        fd, tmp = tempfile.mkstemp(prefix=".harness-observations-", dir=results_dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.writelines(encoded)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+    except OSError:
+        pass  # diagnostics are advisory and must never break the watcher
+
+
+def _contract_observations(data):
+    return [r for r in data.get("contract_results", [])
+            if isinstance(r, dict) and r.get("outcome") in {"recovered", "inconclusive"}]
+
+
+RED_FLAW_PREFIX = "harness-verify red @ "
+
+
+def _red_flaw_text(iss):
+    """The one place the machine-enqueued red's flaw string is rendered.
+
+    Both halves of the watcher (enqueue and release) call this, so the text they
+    match on cannot drift apart — a releaser keyed on a stale format would silently
+    release nothing and read as "queue is clean".
+    """
+    return f"{RED_FLAW_PREFIX}{iss.get('where')}: {iss.get('message')}"
+
+
+def _releasable_reds():
+    """OPEN, machine-enqueued, this-host harness-verify reds — the only items a watcher may release.
+
+    Four filters, each closing a way an automated releaser could destroy real signal:
+      source=harness-verify — never a human/research flaw, whose resolution is a judgement
+      the machine-rendered prefix — never a hand-written flaw that merely mentions a red
+      status=open — a CLAIMED item belongs to a round in flight; releasing it under that
+                    round would make its ratchet unresolvable
+      host==this host — a red can be host-specific (bin/memory-bridge-hermes.sh's contract
+                    fails on macOS BSD sed and passes on Linux). A green run here is not
+                    evidence about there. An UNSTAMPED legacy item is likewise not this
+                    host's to refute, so it stays open for a human.
+    """
+    r = run([tool("loop-queue"), "list", "--json", "--status", "open"], timeout=30)
+    try:
+        data = json.loads(r.stdout)
+    except ValueError:
+        return []  # cannot read the queue → release nothing (unreadable ≠ empty)
+    items = data if isinstance(data, list) else data.get("items", [])
+    host = os.environ.get("LOOP_QUEUE_HOST") or socket.gethostname()
+    return [it for it in items
+            if isinstance(it, dict)
+            and it.get("status") == "open"
+            and it.get("source") == "harness-verify"
+            and (it.get("flaw") or "").startswith(RED_FLAW_PREFIX)
+            and it.get("host") == host]
+
+
+def _release_fixed_reds(red_now, confirm):
+    """Symmetric half of the watcher: a machine-enqueued red that is GONE must leave the queue.
+
+    WHY (observed 2026-08-14). The watcher only ever ADDED. Reds fixed by ordinary work
+    stayed open forever: 5 of 51 open items claimed reds that harness-verify no longer
+    reported (cogload-ask.* deleted, cogload-weekly.* wired at install.sh:990,
+    tests/capacity/run.sh present). That is not cosmetic — `loop-queue status --gate`
+    counts open items, so a queue that can only grow makes "loop-until-dry, then back off"
+    unreachable and points every round's "pick the highest-leverage open item" at phantoms.
+
+    A transient GREEN is exactly as misleading as a transient RED, so release uses the SAME
+    2-sample gate as enqueue: the flaw must be absent from two consecutive PARSEABLE runs.
+    The confirming run is paid only when there is something to release — once the queue is
+    clean this costs nothing. If the confirming run cannot be read, we release nothing:
+    "I could not measure it" is not "it is fixed" (knowledge/signal-vs-artifact-2026-07-19.md).
+    """
+    cands = [it for it in _releasable_reds() if (it.get("flaw") or "") not in red_now]
+    if not cands:
+        return 0
+    red_confirm = confirm()
+    if red_confirm is None:
+        return 0
+    cands = [it for it in cands if (it.get("flaw") or "") not in red_confirm]
+    host = os.environ.get("LOOP_QUEUE_HOST") or socket.gethostname()
+    released = 0
+    for it in cands:
+        r = run([tool("loop-queue"), "resolve", it.get("id", ""),
+                 "--note", f"auto-released by loop-tick: this red was absent from 2 consecutive "
+                           f"harness-verify runs on {host} at {now_iso()}"], timeout=30)
+        if r.returncode == 0:
+            released += 1
+    return released
+
+
+def _reconcile_candidates():
+    """OPEN, machine-enqueued harness-verify reds this host may NOT auto-release:
+    stamped to another host, or unstamped (legacy). The human-gated complement of
+    _releasable_reds (lq-2f448edc): auto-release refuses these by design, so a red
+    whose observing host is decommissioned/renamed — or predates the host stamp —
+    would otherwise sit open forever. Returns None when the queue is unreadable
+    (unreadable ≠ empty)."""
+    r = run([tool("loop-queue"), "list", "--json", "--status", "open"], timeout=30)
+    try:
+        data = json.loads(r.stdout)
+    except ValueError:
+        return None
+    items = data if isinstance(data, list) else data.get("items", [])
+    host = os.environ.get("LOOP_QUEUE_HOST") or socket.gethostname()
+    return [it for it in items
+            if isinstance(it, dict)
+            and it.get("status") == "open"
+            and it.get("source") == "harness-verify"
+            and (it.get("flaw") or "").startswith(RED_FLAW_PREFIX)
+            and it.get("host") != host]
+
+
+def cmd_reconcile(confirm_id):
+    """Human-gated reconcile of foreign/unstamped machine reds (lq-2f448edc).
+
+    PROPOSE (no --confirm): list candidates whose flaw is absent from two
+    consecutive local harness-verify runs. CONFIRM (--confirm <id>): resolve
+    exactly that candidate, recording the human gate + origin host in the note.
+    The resolution stays a human judgement — "absent here" is weaker evidence for
+    a foreign red than for our own (a green run HERE is not evidence about THERE),
+    which is exactly why this path requires an explicit operator confirmation
+    instead of widening the automatic releaser. Structural gate: main() refuses
+    --reconcile under CLAUDEMAXXING_HARNESS_CHILD, so a harness-spawned agent
+    (including an unattended /self-improve round) cannot confirm on a human's
+    behalf. Exit: 0 ok · 2 refused/unmeasurable.
+    """
+    cands = _reconcile_candidates()
+    if cands is None:
+        print("reconcile: queue unreadable — proposing nothing", file=sys.stderr)
+        return 2
+    if not cands:
+        if confirm_id:
+            # an explicit confirm that would resolve nothing is a refusal, never a
+            # silent success — the id may be this host's own red (auto-release owns
+            # those), already resolved, or simply not a machine red.
+            print(f"reconcile: {confirm_id} is not a reconcile candidate — refusing",
+                  file=sys.stderr)
+            return 2
+        print("reconcile: no foreign/unstamped machine-enqueued reds in the queue")
+        return 0
+    # Same 2-sample absence gate as auto-release; an unmeasurable observer
+    # refutes nothing (knowledge/signal-vs-artifact-2026-07-19.md).
+    _, errs1, out1, diag1 = _harness_verify_errors()
+    if out1 != "ok":
+        print(f"reconcile: local harness-verify {out1} — refusing "
+              f"('could not measure' is not 'absent') [{diag1}]", file=sys.stderr)
+        return 2
+    _, errs2, out2, diag2 = _harness_verify_errors()
+    if out2 != "ok":
+        print(f"reconcile: confirming harness-verify run {out2} — refusing [{diag2}]",
+              file=sys.stderr)
+        return 2
+    red_now = ({_red_flaw_text(i) for i in errs1.values()}
+               | {_red_flaw_text(i) for i in errs2.values()})
+    host = os.environ.get("LOOP_QUEUE_HOST") or socket.gethostname()
+    proposable = []
+    for it in cands:
+        present = (it.get("flaw") or "") in red_now
+        if not present:
+            proposable.append(it)
+        if not confirm_id:
+            tag = "LOCALLY RED — not proposable" if present else "absent locally — proposable"
+            print(f"{it.get('id')}  host={it.get('host') or 'UNSTAMPED'}  [{tag}]  {it.get('flaw','')}")
+    if not confirm_id:
+        if proposable:
+            print(f"\n{len(proposable)} candidate(s). After confirming the origin host is truly "
+                  "gone/renamed (not merely asleep), resolve ONE with: "
+                  "loop-tick --reconcile --confirm <id>")
+        return 0
+    match = [it for it in proposable if it.get("id") == confirm_id]
+    if not match:
+        print(f"reconcile: {confirm_id} is not a proposable candidate (must be an OPEN "
+              "foreign/unstamped machine-enqueued red absent from both local runs) — refusing",
+              file=sys.stderr)
+        return 2
+    it = match[0]
+    # TOCTOU guard (cross-family critic finding, 2026-08-14): the candidate list is a
+    # snapshot from BEFORE the two measurement runs, and loop-queue resolve overwrites
+    # round/note unconditionally. Re-check the item is STILL an open candidate so a
+    # concurrent claim/resolve during the window is refused, never clobbered.
+    fresh = _reconcile_candidates()
+    if fresh is None or not any(f.get("id") == it.get("id") for f in fresh):
+        print(f"reconcile: {it.get('id')} changed status during measurement "
+              "(claimed/resolved by a concurrent actor) — refusing", file=sys.stderr)
+        return 2
+    r = run([tool("loop-queue"), "resolve", it.get("id", ""),
+             "--note", "reconciled by human confirmation (loop-tick --reconcile): "
+                       f"foreign/unstamped red (host={it.get('host') or 'unstamped'}) absent from "
+                       f"2 consecutive harness-verify runs on {host} at {now_iso()}"], timeout=30)
+    if r.returncode != 0:
+        print(f"reconcile: resolve failed: {(r.stderr or '').strip()}", file=sys.stderr)
+        return 2
+    print(f"✓ {it.get('id')} reconciled (human-confirmed; origin host "
+          f"{it.get('host') or 'unstamped'})")
+    return 0
+
+
+def watch_harness_verify():
+    """Every PERSISTENT harness-verify ERROR → a Verification/Lifecycle flaw in the queue.
+
+    Persistence-gate: a red is only queued if it survives an immediate re-check. A single
+    transient red — a tool momentarily mid-edit during the wrapper's pre-round rebase, a file
+    caught between writes, a flaky external call — clears on re-run and MUST NOT pollute the
+    forward queue: a false-transient flaw manufactures a dry investigative round (the reward-hack
+    the loop is engineered to avoid — a queued flaw is supposed to mean real, actionable signal).
+    We enqueue only the intersection of two consecutive runs' error keys.
+
+    Accepted trade-off (a 2-sample debounce): a genuinely *intermittent* real red that happens to
+    clear on the immediate re-check is not queued THIS tick. It is not lost — the watcher fires
+    every session, so it is caught on any tick where both runs red; and each cleared red is
+    reported in the tick line below (logged by log_tick), leaving a visible cross-tick trail. A
+    verifier assertion that flaps deterministically is itself a defect to fix at its source, not
+    something to surface via the watcher.
+    """
+    data, first, first_outcome, first_diag = _harness_verify_errors()
+    if first_outcome == "timeout":
+        return ("timeout", 0,
+                f"harness-verify TIMED OUT after {HARNESS_VERIFY_TIMEOUT_SECONDS}s")
+    if data is None:
+        # Inability to read the observer is not evidence about its target. Corroborate once,
+        # then enqueue observer health—not a fabricated harness regression.
+        data, first, second_outcome, second_diag = _harness_verify_errors()
+        if second_outcome == "timeout":
+            return ("timeout", 0,
+                    f"harness-verify TIMED OUT after {HARNESS_VERIFY_TIMEOUT_SECONDS}s")
+        if data is None:
+            diag = f"attempt1: {first_diag} || attempt2: {second_diag}"
+            result = {"id": "harness-verify", "outcome": "inconclusive",
+                      "key": "observer:harness-verify:unparseable-twice",
+                      "attempts": 2, "diag": [first_diag, second_diag]}
+            _record_observation(result)
+            # The flaw TEXT is fixed (it is the item's identity); the attribution rides
+            # the non-hash diag field, so recurrence detection keeps working while the
+            # round that drains this finally has something to attribute it with.
+            enqueue("O", "harness-verify",
+                    "harness observer unavailable: harness-verify emitted no parseable JSON on 2 attempts",
+                    repro="harness-verify --json", diag=diag)
+            return ("error", 1,
+                    f"harness-verify unreadable on 2 attempts; observer-health flaw queued [{second_diag}]")
+
+    queued_observation_keys = set()
+
+    def retain_observations(report):
+        observations = _contract_observations(report)
+        added = 0
+        for result in observations:
+            _record_observation(result)
+            key = result.get("key")
+            if result.get("outcome") == "inconclusive" and key not in queued_observation_keys:
+                enqueue("O", "harness-verify",
+                        f"harness observation inconclusive @ {result.get('id')}: "
+                        "unable to observe contract on 2 targeted attempts")
+                queued_observation_keys.add(key)
+                added += 1
+        return observations, added
+
+    observations, new = retain_observations(data)
+    if not first:
+        recovered = sum(1 for r in observations if r.get("outcome") == "recovered")
+
+        def confirm_green():
+            """Second sample for the release gate — run ONLY when something is releasable."""
+            data2, errs2, outcome2, _ = _harness_verify_errors()
+            if outcome2 != "ok" or data2 is None:
+                return None  # unreadable/timed-out observer refutes nothing
+            return {_red_flaw_text(i) for i in errs2.values()}
+
+        released = _release_fixed_reds(set(), confirm_green)
+        note = (f"{data.get('errors',0)} err / {data.get('warnings',0)} warn / "
+                f"{data.get('inconclusive',0)} inconclusive / {recovered} recovered")
+        if released:
+            note += f" ({released} fixed red(s) released from the queue)"
+        return ("ok", new, note)
+    # Red on the first pass — re-check once; only errors present in BOTH runs are real flaws.
+    data2, second, second_outcome, second_diag = _harness_verify_errors()
+    if second_outcome == "timeout":
+        return ("timeout", new,
+                f"harness-verify TIMED OUT on persistence re-check after "
+                f"{HARNESS_VERIFY_TIMEOUT_SECONDS}s")
+    if data2 is None:
+        return ("error", 0, f"harness-verify did not emit JSON on re-check [{second_diag}]")
+    _, second_observation_adds = retain_observations(data2)
+    new += second_observation_adds
+    verified = 0
+    for key, iss in first.items():
+        if key in second:
+            enqueue("V", "harness-verify", _red_flaw_text(iss), repro="harness-verify --json")
+            verified += 1
+    # Release is scoped to reds absent from BOTH runs. A red seen in either run — even a
+    # transient one not persistent enough to enqueue — is not evidence that a queued red is
+    # fixed, so the union is the conservative set. Both samples are already in hand here.
+    red_now = ({_red_flaw_text(i) for i in first.values()}
+               | {_red_flaw_text(i) for i in second.values()})
+    released = _release_fixed_reds(red_now, lambda: red_now)
+    n = new + verified
+    transient = len(first) - verified
+    note = f"{data2.get('errors',0)} err / {data2.get('warnings',0)} warn"
+    if transient:
+        note += f" ({transient} transient red(s) cleared on re-check, not queued)"
+    if released:
+        note += f" ({released} fixed red(s) released from the queue)"
+    # A persistent verifier RED is a stop signal, not an actionable round. The
+    # flaw is queued for diagnosis, but running the self-improver while its
+    # deterministic guard is red lets an unverified round mutate the guard it
+    # depends on.
+    return ("red" if verified else "ok", n, note)
+
+
+def watch_mem_audit():
+    """mem-audit errors → Governance flaws (memory drift the loop should fix)."""
+    p = tool("mem-audit")
+    r = run([sys.executable, p, "--json"] if "python" in open(p).readline() else [p, "--json"], timeout=30) \
+        if os.path.isfile(p) or p == "mem-audit" else None
+    if r is None:
+        return ("skip", 0, "mem-audit absent")
+    try:
+        data = json.loads(r.stdout)
+    except ValueError:
+        return ("skip", 0, "mem-audit no JSON")
+    n = 0
+    # mem-audit schema varies; treat any error-severity / flagged entry as drift.
+    issues = data.get("issues") or data.get("flags") or []
+    for iss in issues if isinstance(issues, list) else []:
+        sev = (iss.get("severity") if isinstance(iss, dict) else "") or ""
+        if sev == "error":
+            where = iss.get("where") if isinstance(iss, dict) else ""
+            msg = iss.get("message") if isinstance(iss, dict) else str(iss)
+            enqueue("G", "mem-audit", f"memory drift @ {where}: {msg}", repro="mem-audit --json")
+            n += 1
+    return ("ok", n, f"{n} drift error(s)")
+
+
+def _watch_paths():
+    results_dir = os.environ.get("HARNESS_RESULTS_DIR") or os.path.join(ROOT, ".results")
+    return (results_dir, os.path.join(results_dir, "watch-stamp.json"),
+            os.path.join(results_dir, "watch-stamp.lock"))
+
+
+def _read_watch_stamp(path):
+    """Return a validated completed-watch stamp; unreadable/corrupt means WATCH."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            stamp = json.load(fh)
+        if not isinstance(stamp, dict) or "timestamp" not in stamp or "outcome" not in stamp:
+            return None
+        timestamp = stamp["timestamp"]
+        if isinstance(timestamp, str):
+            timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp()
+        timestamp = float(timestamp)
+        if timestamp < 0 or timestamp > time.time() + 5:
+            return None
+        stamp["timestamp"] = timestamp
+        return stamp
+    except (OSError, ValueError, TypeError, OverflowError):
+        return None
+
+
+def _watch_is_fresh(stamp):
+    return stamp is not None and time.time() - stamp["timestamp"] < WATCH_TTL_SECONDS
+
+
+def _fresh_watch_results(stamp, note):
+    """Reuse watcher health as well as freshness so an unmeasured guard cannot dispatch."""
+    hv_outcome = stamp.get("harness_verify")
+    ma_outcome = stamp.get("mem_audit")
+    hv_status = hv_outcome if hv_outcome in {"timeout", "error", "red"} else "skip"
+    ma_status = ma_outcome if ma_outcome in {"error", "red"} else "skip"
+    if hv_status == "timeout":
+        note += "; last harness-verify TIMED OUT"
+    return ((hv_status, 0, note), (ma_status, 0, note))
+
+
+def _write_watch_stamp(path, stamp):
+    """Publish a completed watch atomically; absence after a write failure forces a re-watch."""
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".watch-stamp-", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(stamp, fh, sort_keys=True)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def run_watch_phase():
+    """Run a cadence-limited, single-flight watch and return both watcher results."""
+    results_dir, stamp_path, lock_path = _watch_paths()
+    stamp = _read_watch_stamp(stamp_path)
+    if _watch_is_fresh(stamp):
+        age = max(0, int(time.time() - stamp["timestamp"]))
+        note = f"fresh watch ({age}s old, ttl={WATCH_TTL_SECONDS}s)"
+        return _fresh_watch_results(stamp, note)
+
+    try:
+        os.makedirs(results_dir, exist_ok=True)
+        lock_fh = open(lock_path, "a+", encoding="utf-8")
+    except OSError:
+        # A missing/unusable local state directory must never masquerade as a fresh watch.
+        lock_fh = None
+
+    if lock_fh is not None:
+        try:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock_fh.close()
+            note = "watch already in progress; single-flight skip"
+            return (("skip", 0, note), ("skip", 0, note))
+        except OSError:
+            lock_fh.close()
+            lock_fh = None
+
+    try:
+        # A peer may have completed between the first freshness check and lock acquisition.
+        stamp = _read_watch_stamp(stamp_path)
+        if _watch_is_fresh(stamp):
+            age = max(0, int(time.time() - stamp["timestamp"]))
+            note = f"fresh watch ({age}s old, ttl={WATCH_TTL_SECONDS}s)"
+            return _fresh_watch_results(stamp, note)
+
+        hv = watch_harness_verify()
+        ma = watch_mem_audit()
+        prior_timeouts = int((stamp or {}).get("consecutive_harness_timeouts", 0) or 0)
+        consecutive_timeouts = prior_timeouts + 1 if hv[0] == "timeout" else 0
+        if consecutive_timeouts == 3:
+            enqueue(
+                "O", "harness-verify",
+                f"harness-verify TIMED OUT on 3 consecutive watches "
+                f"(budget {HARNESS_VERIFY_TIMEOUT_SECONDS}s)",
+                repro="harness-verify --json",
+            )
+            hv = (hv[0], hv[1] + 1, hv[2] + "; consecutive-timeout flaw queued")
+
+        outcome = "timeout" if hv[0] == "timeout" else (
+            "red" if hv[0] == "red" or ma[0] == "red" else (
+                "error" if hv[0] == "error" or ma[0] == "error" else "ok"
+            )
+        )
+        try:
+            _write_watch_stamp(stamp_path, {
+                "timestamp": time.time(),
+                "outcome": outcome,
+                "harness_verify": hv[0],
+                "mem_audit": ma[0],
+                "consecutive_harness_timeouts": consecutive_timeouts,
+            })
+        except OSError:
+            pass  # no stamp means the next tick watches again; never fail open to skipping
+        return hv, ma
+    finally:
+        if lock_fh is not None:
+            try:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_fh.close()
+
+
+# harness-scan tags hits by pillar name; map those to the ETCLOVG layer the queue/log use.
+# (A soft hint only — MINE re-attributes the layer properly when it picks the flaw up.)
+# Backpressure ceiling for research intake: rounds drain <=1 queue item/day while intake can
+# add 5/tick, so without a cap the forward queue grows without bound, pins the gate at ACT,
+# and drowns real watcher signal in unread leads (lq-00e46b74). ~2 ticks of headroom at 10.
+RESEARCH_OPEN_CAP = 10
+# Drain-side complement to that cap (lq-8962bc1c). The cap bounds INFLOW; without a bound on a
+# lead's RESIDENCE time the queue silently deadlocks: 20 untriaged leads (2026-06-19..2026-07-17)
+# held slots at 0 and research intake stopped for three weeks with harness-verify green
+# throughout. `loop-queue expire` owns the sweep (and refuses any non-research source).
+RESEARCH_LEAD_TTL_DAYS = 30
+
+PILLAR_TO_LAYER = {
+    "verification": "V", "memory": "G", "governance": "G", "self-improve": "G",
+    "tool": "T", "orchestration": "C", "context": "C",
+    "execution": "E", "lifecycle": "L", "observability": "O",
+}
+
+
+def intake_research(days, with_x):
+    """harness-scan leads → pillar-gap flaws (leads only; round's critic gates applicability)."""
+    # TTL sweep FIRST, so the cap is measured against leads that are still live. An untriaged
+    # lead older than RESEARCH_LEAD_TTL_DAYS auto-resolves; `expire` refuses every non-research
+    # source, so a real flaw can never be aged out here.
+    # The count goes into the tick line: a sweep that resolves queue items must be OBSERVABLE
+    # in knowledge/loop-tick.log, not a silent mutation of the forward state.
+    r_exp = run([tool("loop-queue"), "expire", "--source", "research",
+                 "--days", str(RESEARCH_LEAD_TTL_DAYS), "--json"], timeout=30)
+    try:
+        n_expired = int(json.loads(r_exp.stdout or "{}").get("count") or 0)
+    except (ValueError, TypeError, AttributeError):
+        n_expired = 0
+    # Backpressure: skip the fetch entirely (not just the enqueue) while the queue already
+    # holds >= RESEARCH_OPEN_CAP open research leads — drain before refetch.
+    qpath = os.path.join(ROOT, "knowledge", "loop-queue.jsonl")
+    n_open = 0
+    try:
+        with open(qpath, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                if row.get("status") == "open" and row.get("source") == "research":
+                    n_open += 1
+    except OSError:
+        n_open = 0  # unreadable/missing queue → fail open to a normal fetch
+    slots = max(0, RESEARCH_OPEN_CAP - n_open)  # hard cap: intake never pushes open leads past it
+    if slots == 0:
+        return ("skip", 0,
+                f"backpressure: {n_open} open research lead(s) >= cap {RESEARCH_OPEN_CAP} "
+                f"({n_expired} ttl-expired)")
+    cmd = [sys.executable, tool("harness-scan"), "--days", str(days), "--json"]
+    if with_x:
+        cmd.append("--x")
+    r = run(cmd, timeout=180)
+    try:
+        data = json.loads(r.stdout)
+    except ValueError:
+        return ("skip", 0, "harness-scan no JSON (network?)")
+    n = 0
+    # Enqueue only ranked/pillar-MATCHED hits as leads (skip the uncategorized discovery zone);
+    # cap so intake can't flood the queue. Schema: each hit has `pillars` (a list of names).
+    hits = data.get("ranked") or data.get("matched") or data.get("hits") or []
+    for h in (hits if isinstance(hits, list) else [])[:min(5, slots)]:
+        if not isinstance(h, dict):
+            continue
+        pillars = h.get("pillars") or ([h["pillar"]] if h.get("pillar") else [])
+        name = (pillars[0] if pillars else "general")
+        layer = PILLAR_TO_LAYER.get(str(name).lower(), "C")
+        title = h.get("title") or h.get("id") or "untitled"
+        enqueue(layer, "research",
+                f"research lead [{name}]: {title} — does our harness do this?")
+        n += 1
+    return ("ok", n, f"{n} lead(s) enqueued, {n_expired} ttl-expired")
+
+
+def log_tick(line):
+    path = os.path.join(ROOT, "knowledge", "loop-tick.log")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a") as fh:
+        fh.write(line + "\n")
+
+
+def queue_status():
+    """Return validated queue status, or None when the queue cannot be read."""
+    st = run([tool("loop-queue"), "status", "--json"], timeout=30)
+    if st.returncode != 0:
+        return None
+    try:
+        status = json.loads(st.stdout)
+    except ValueError:
+        return None
+    return status if isinstance(status, dict) and isinstance(status.get("actionable"), int) else None
+
+
+def kick_watch(quiet):
+    """Detach the normal gate path; return before its inherited hook can wait."""
+    env = os.environ.copy()
+    env.pop("CLAUDEMAXXING_HARNESS_CHILD", None)
+    try:
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "--gate", "--quiet"],
+            cwd=ROOT,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except OSError as ex:
+        if not quiet:
+            print(f"loop-tick: could not kick watcher: {_diag_clean(str(ex), DIAG_LIMIT)}",
+                  file=sys.stderr)
+        return 2
+    return 0
+
+
+def main():
+    if os.environ.get("CLAUDEMAXXING_HARNESS_CHILD") == "1":
+        # reconcile is human-gated by CONSTRUCTION: any agent spawned by the
+        # harness carries this marker, so the refusal is mechanism, not policy —
+        # an unattended round cannot confirm a reconcile on a human's behalf.
+        if "--reconcile" in sys.argv[1:]:
+            print("reconcile: refused under CLAUDEMAXXING_HARNESS_CHILD — this verb is "
+                  "human-gated; a harness-spawned agent cannot confirm it", file=sys.stderr)
+            sys.exit(2)
+        sys.exit(1 if "--gate" in sys.argv[1:] else 0)
+    ap = argparse.ArgumentParser(description="run at most one queue-gated self-improve round")
+    ap.add_argument("--intake", action="store_true", help="also pull external research (harness-scan)")
+    ap.add_argument("--x", action="store_true", help="research intake includes X/web (xsearch)")
+    ap.add_argument("--days", type=int, default=2, help="research lookback window (default 2)")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--act", action="store_true",
+                      help="invoke one warranted round (backwards-compatible; this is the default)")
+    mode.add_argument("--gate", action="store_true",
+                      help="watch and return 0 if actionable / 1 if idle; never invoke an agent")
+    mode.add_argument("--kick", action="store_true",
+                      help="detach the gate/watch path for a non-blocking SessionStart")
+    mode.add_argument("--dry-run", action="store_true",
+                      help="read the queue only; report whether one round would fire")
+    mode.add_argument("--reconcile", action="store_true",
+                      help="human-gated: propose foreign/unstamped machine reds absent "
+                           "locally; resolve one with --confirm <id>")
+    ap.add_argument("--confirm", metavar="ID",
+                    help="with --reconcile: resolve exactly this proposed item")
+    ap.add_argument("--quiet", action="store_true")
+    args = ap.parse_args()
+    if args.confirm and not args.reconcile:
+        ap.error("--confirm requires --reconcile")
+
+    # Scope guard: harness-verify is specific to THIS harness. As a global SessionStart hook
+    # loop-tick fires in every repo — so do nothing unless we're actually inside the
+    # claudemaxxing harness (its bin/harness-verify is present at the repo root). Silent IDLE
+    # everywhere else; no spurious reds against unrelated codebases.
+    if not os.path.isfile(os.path.join(ROOT, "bin", "harness-verify")):
+        if not args.quiet and args.gate:
+            print(f"{now_iso()} | IDLE | not in claudemaxxing harness (no bin/harness-verify) — skip")
+        sys.exit(1 if args.gate else 0)
+
+    if args.kick:
+        # Hook runners may wait for EOF on inherited descriptors even after the
+        # immediate child exits. Detach all streams and the process session;
+        # the existing gate path retains fail-closed stamps, TTL, single-flight
+        # and timeout accounting. The child marks every process it then spawns.
+        sys.exit(kick_watch(args.quiet))
+
+    os.environ["CLAUDEMAXXING_HARNESS_CHILD"] = "1"
+
+    if args.reconcile:
+        sys.exit(cmd_reconcile(args.confirm))
+
+    if args.dry_run:
+        status = queue_status()
+        if status is None:
+            if not args.quiet:
+                print("ERROR: loop queue status is unreadable", file=sys.stderr)
+            sys.exit(2)
+        actionable = status["actionable"]
+        if actionable > 0 and not args.quiet:
+            print(f"DRY-RUN | ACT | open={actionable} | would fire one self-improve round")
+        sys.exit(0)
+
+    parts = []
+    hv, ma = run_watch_phase()
+    parts.append(f"harness-verify[{hv[0]}:{hv[1]} new] {hv[2]}")
+    parts.append(f"mem-audit[{ma[0]}:{ma[1]} new] {ma[2]}")
+    if args.intake:
+        ri = intake_research(args.days, args.x); parts.append(f"research[{ri[0]}:{ri[1]} new]")
+
+    status = queue_status()
+    if status is None:
+        if not args.quiet:
+            print("ERROR: loop queue status is unreadable", file=sys.stderr)
+        sys.exit(2)
+    actionable = status.get("actionable", 0)
+    verb = "ACT" if actionable > 0 else "IDLE"
+
+    line = f"{now_iso()} | {verb} | open={actionable} | " + " · ".join(parts)
+    log_tick(line)
+    if not args.quiet and (actionable > 0 or args.gate or hv[0] == "timeout"):
+        print(line)
+
+    watcher_errored = any(p[0] in {"error", "red"} for p in (hv, ma))
+    verifier_timed_out = hv[0] == "timeout"
+
+    # Fail closed before dispatch. Previously this check happened after the
+    # runner, so an unreadable observer (and persistent verifier REDs mislabeled
+    # as "ok") could still fire a round before loop-tick returned 2.
+    if watcher_errored:
+        sys.exit(2)
+    if verifier_timed_out and not args.gate:
+        sys.exit(2)
+
+    runner_rc = 0
+    if actionable > 0 and not args.gate:
+        runner = tool("harness-agent-run")
+        if not args.quiet:
+            print(f"→ firing round: {runner} self-improve (host={os.environ.get('HARNESS_HOST', 'claude')})")
+        rr = run([runner, "self-improve"], timeout=int(os.environ.get("HARNESS_TIMEOUT_SECONDS", "3600")) + 60)
+        runner_rc = rr.returncode
+        if not args.quiet and rr.stdout:
+            print(rr.stdout)
+        if not args.quiet and rr.stderr:
+            print(rr.stderr, file=sys.stderr)
+
+    if runner_rc != 0:
+        sys.exit(2)
+    if args.gate:
+        sys.exit(0 if actionable > 0 else 1)
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+"""
+oll-council — ask the SAME prompt to several DIFFERENT Ollama Cloud models in
+parallel, to get diverse approaches/ideas. Claude (the orchestrator) then reads
+all answers and synthesizes the best one, grafting good ideas from each.
+
+Usage:
+    bin/oll-council "How should I design X? Give your best approach + tradeoffs."
+    bin/oll-council "approach for Y" --models glm-5.3,deepseek-v4-pro,kimi-k3
+    bin/oll-council "approach for Y" --effort low   # bound every member's thinking
+    cat spec.md | bin/oll-council "Propose an implementation approach."
+
+Reads the key from OpenCode's auth store (~/.local/share/opencode/auth.json).
+"""
+import argparse, json, math, os, runpy, ssl, sys, urllib.request, urllib.error
+from concurrent.futures import ThreadPoolExecutor
+
+AUTH_JSON = os.path.expanduser("~/.local/share/opencode/auth.json")
+URL = "https://ollama.com/v1/chat/completions"
+# diverse panel: HEAVY frontier models from different labs (max diversity, not speed)
+# Zhipu / DeepSeek / Moonshot / Alibaba / MiniMax / Mistral
+DEFAULT_MODELS = ["deepseek-v4-flash:0731", "glm-5.3", "kimi-k3", "qwen3.5:397b", "minimax-m3", "mistral-large-3:675b"]
+# Ollama Max allows 10 concurrent models. Default to 5 so Hermes, crons, and
+# interactive tmux sessions retain headroom; OLL_MAX_PARALLEL may lower/raise it.
+DEFAULT_MAX_PARALLEL = 5
+# Councils want spread, not determinism: a panel answering at 0.2 converges on
+# one house style and stops being diverse. Named so the shared payload builder
+# cannot quietly inherit bin/oll's worker default instead.
+TEMPERATURE = 0.7
+
+
+def worker_policy():
+    """bin/oll's module namespace: the ONE definition of the model policy,
+    the effort vocabulary, and the request body. Re-declaring any of them here
+    would give the harness two closed lists of "what the provider accepts",
+    and the drifted one fails OPEN — an effort this tool accepted but bin/oll
+    rejected would be silently ignored by the provider while the command line
+    claimed the budget was bounded."""
+    return runpy.run_path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "oll"))
+
+
+def estimate_input_tokens(text, divisor=3):
+    """Stateless char-based estimate: ceil(len(text)/divisor). Pure — no I/O."""
+    return math.ceil(len(text) / divisor)
+
+
+def input_limit():
+    """Max estimated input tokens before we reject. Env-tunable; default 50000."""
+    try:
+        return int(os.environ.get("OLL_MAX_ESTIMATED_INPUT_TOKENS", "50000"))
+    except ValueError:
+        return 50000
+
+
+def max_parallel():
+    """Validated process-wide council concurrency cap."""
+    raw = os.environ.get("OLL_MAX_PARALLEL", str(DEFAULT_MAX_PARALLEL))
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"OLL_MAX_PARALLEL must be a positive integer (got {raw!r})")
+    if value < 1:
+        raise ValueError(f"OLL_MAX_PARALLEL must be a positive integer (got {raw!r})")
+    return value
+
+
+def ssl_ctx():
+    try:
+        import certifi; return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
+def load_key():
+    try:
+        entry = json.load(open(AUTH_JSON)).get("ollama-cloud") or {}
+    except Exception as e:
+        sys.exit(f"ERROR reading {AUTH_JSON}: {e}")
+    key = entry.get("key") or entry.get("apiKey")
+    if not key:
+        sys.exit("ERROR: no 'ollama-cloud' key in OpenCode auth store")
+    return key
+
+
+def ask(model, system, user, max_tokens, key, build, effort=None):
+    """One council member. `build` is bin/oll's build_payload, passed in rather
+    than looked up here: the fan-out runs on a thread pool, so resolving it once
+    in main() keeps every member on the same builder and off a shared global."""
+    payload = build(model=model, system=system, user=user,
+                    max_tokens=max_tokens, temperature=TEMPERATURE, effort=effort)
+    req = urllib.request.Request(URL, data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json",
+                                          "Authorization": f"Bearer {key}"})
+    try:
+        with urllib.request.urlopen(req, timeout=300, context=ssl_ctx()) as r:
+            d = json.loads(r.read())
+        msg = (d["choices"][0]["message"]["content"] or "").strip()
+        u = d.get("usage", {})
+        return model, msg or "(empty)", f"{u.get('prompt_tokens','?')}/{u.get('completion_tokens','?')} tok"
+    except urllib.error.HTTPError as e:
+        return model, f"(error HTTP {e.code}: {e.read().decode()[:120]})", "-"
+    except Exception as e:
+        return model, f"(error: {type(e).__name__})", "-"
+
+
+def main():
+    policy = worker_policy()
+    p = argparse.ArgumentParser(description="Diverse multi-model idea council (parallel)")
+    p.add_argument("prompt", nargs="?", help="the question/problem (or pipe via stdin)")
+    p.add_argument("--models", default=",".join(DEFAULT_MODELS), help="comma list of ollama-cloud model ids")
+    p.add_argument("--max-tokens", type=int, default=8192,
+                   help="keep high — heavy reasoning models (kimi, deepseek, qwen3.5) burn budget on hidden reasoning and return empty if it's too low; --effort is the cheaper half of that fix")
+    p.add_argument("--effort", metavar="LEVEL",
+                   help="bound EVERY member's reasoning budget: "
+                        + "|".join(policy["REASONING_EFFORTS"])
+                        + ", or 'default' to force each provider default. Unset: "
+                          "each member's measured per-model policy "
+                          "(bin/oll MODEL_EFFORT_POLICY) where swept, else the "
+                          "provider's. A council pays the thinking tax once per "
+                          "model, so an unbounded panel measures verbosity "
+                          "against --max-tokens rather than capability. "
+                          "Env default: OLL_REASONING_EFFORT.")
+    p.add_argument("--system", default=(
+        "You are an expert proposing ONE concrete approach to the problem. "
+        "Be specific and opinionated. Give your approach, then 2-3 key tradeoffs/risks. "
+        "Keep it under ~250 words. Do not hedge or list every option — commit to one."))
+    p.add_argument("--allow-oversize", action="store_true",
+                   help="proceed even when the estimated input exceeds the limit (also OLL_ALLOW_OVERSIZE=1)")
+    p.add_argument("--allow-legacy-model", action="store_true",
+                   help="allow superseded models only for an intentional historical benchmark")
+    args = p.parse_args()
+
+    # Validate the REQUESTED reasoning budget FIRST: before the auth store is
+    # read, before the network, before the panel is even resolved. Same ordering
+    # invariant as bin/oll — a rejected value must cost nothing, and must never
+    # be confused with a missing key. The panel is not parsed yet, so this call
+    # validates the explicit/env layers only; each member's measured policy
+    # default (bin/oll's MODEL_EFFORT_POLICY) is applied per model below —
+    # a council forcing ONE level across a mixed panel has the same disease as
+    # a global env var (lq-956ab278: no single level is cheap for every model).
+    env_effort = os.environ.get("OLL_REASONING_EFFORT")
+    try:
+        policy["resolve_effort"](args.effort, env_effort)
+    except ValueError as ex:
+        sys.stderr.write(f"ERROR: {ex}\n")
+        return 2
+
+    models = [m.strip() for m in args.models.split(",") if m.strip()]
+    if not models:
+        sys.stderr.write("ERROR: --models must include at least one model\n")
+        return 2
+    try:
+        workers = min(len(models), max_parallel())
+    except ValueError as ex:
+        sys.stderr.write(f"ERROR: {ex}\n")
+        return 2
+    check = policy["model_policy_error"]
+    for model in models:
+        policy_error = check(model, args.allow_legacy_model)
+        if policy_error:
+            sys.stderr.write(f"ERROR: {policy_error}\n")
+            return 2
+
+    stdin_data = "" if sys.stdin.isatty() else sys.stdin.read()
+    if args.prompt and stdin_data:
+        user = f"{args.prompt}\n\n--- CONTEXT ---\n{stdin_data}"
+    elif args.prompt:
+        user = args.prompt
+    elif stdin_data:
+        user = stdin_data
+    else:
+        sys.exit("ERROR: no prompt (pass an argument and/or pipe stdin)")
+
+    # Stateless context boundary: reject oversize BEFORE any auth/network.
+    # Diagnostic carries counts only — never the prompt content or the key.
+    allow_oversize = args.allow_oversize or os.environ.get("OLL_ALLOW_OVERSIZE") == "1"
+    est_total = estimate_input_tokens(args.system) + estimate_input_tokens(user)
+    limit = input_limit()
+    if est_total > limit:
+        if allow_oversize:
+            sys.stderr.write(f"oversize override: estimated input {est_total} tok > limit {limit} tok\n")
+        else:
+            sys.stderr.write(
+                f"ERROR: estimated input {est_total} tok exceeds limit {limit} tok "
+                f"(system {estimate_input_tokens(args.system)} + user {estimate_input_tokens(user)}); "
+                f"use --allow-oversize or OLL_ALLOW_OVERSIZE=1 to proceed\n")
+            sys.exit(2)
+
+    # Per-member resolution: an explicit/env value binds every member; with
+    # nothing provided each member gets its OWN model's measured default, and
+    # an unmeasured model keeps the provider default (key absent). Pure and
+    # already validated above, so this cannot raise.
+    member_efforts = {
+        m: policy["resolve_effort"](args.effort, env_effort, m) for m in models
+    }
+
+    key = load_key()
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        results = list(ex.map(
+            lambda m: ask(m, args.system, user, args.max_tokens, key,
+                          policy["build_payload"], member_efforts[m]), models))
+
+    print(f"# Council: {len(results)} models, same prompt, parallel\n")
+    for model, msg, usage in results:
+        print(f"## {model}  [{usage}]\n{msg}\n")
+    # The done-line must SAY what budget the panel ran at: one level when it
+    # was uniform, 'model-policy' when members differed by measured policy,
+    # nothing only when every member truly ran unbounded.
+    levels = set(member_efforts.values())
+    if levels == {None}:
+        effort_note = ""
+    elif len(levels) == 1:
+        effort_note = f"; effort={levels.pop()}"
+    else:
+        effort_note = "; effort=model-policy"
+    sys.stderr.write(f"[council done: {', '.join(models)}; max_parallel={workers}{effort_note}]\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

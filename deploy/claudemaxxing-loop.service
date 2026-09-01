@@ -1,0 +1,18 @@
+# SOURCE OF TRUTH: repo template deploy/claudemaxxing-loop.service. install.sh substitutes
+# __HOME__ and copies this to ~/.config/systemd/user/ (copy, NOT symlink). Edit here, re-run
+# ./install.sh, which also reloads the unit IF the timer is already armed (arming stays opt-in).
+#
+# Linux counterpart of com.claudemaxxing.loop.plist (launchd). Same wrapper, same posture:
+# the daily ACT half of the autonomous self-improve loop. Paired with claudemaxxing-loop.timer.
+[Unit]
+Description=claudemaxxing autonomous self-improve heartbeat (daily)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The wrapper sets its own PATH and is fully self-contained (oll hits the Ollama HTTP API
+# directly; no opencode binary needed). No TimeoutStartSec cap — the round is bounded by the
+# wrapper's single-flight lock + /self-improve --max-turns, matching launchd's no-timeout behavior.
+TimeoutStartSec=infinity
+ExecStart=/bin/bash __HOME__/.config/claudemaxxing/loop-cron.sh

@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+"""intent-queue — the forward-looking BUSINESS-intent queue for the proactive layer.
+
+The proactive sibling of loop-queue (see knowledge/hermes-strategic-evolution-plan.md §1). It
+reuses loop-queue's *mechanism* — atomic JSONL, content-hash idempotency, a gate exit-code — but
+stays a SEPARATE queue on purpose (council-proactivity.md):
+  • loop-queue's `status --gate` fires /self-improve (a HARNESS round); a business intent must fire
+    a PROACTIVE round, not a harness one.
+  • loop-queue items carry an ETCLOVG layer; a "stale deal" or "unscored lead" has no such layer.
+Conflating them would make one gate fire the wrong loop. So: same shape, distinct state file.
+
+State: knowledge/intent-queue.jsonl (repo-local; commit it for cross-machine durability).
+
+Each item:
+  id            iq-<8hex(kind+intent)>  — content hash → idempotent add + recurrence detection
+  ts            ISO8601 capture time
+  kind          the intent type (stale-deal | unscored-leads | velocity-gap | funnel-missing |
+                touch-overdue | pipeline-health | manual | …)  — for match/routing
+  source        who captured it: hermes-watch | manual
+  load_bearing  false = AUTO (internal, idempotent, reversible → may execute unattended)
+                true  = STOP-AT-SELECT (external/irreversible/human-authored → propose only)
+  urgency       0..3 heuristic set by the watcher (feeds the v1 selection gate)
+  intent        one-line statement of the proposed action (the proactive-round input)
+  status        open | claimed | resolved | dismissed
+  round         resolving round ref, set on resolve/dismiss
+
+SAFETY: this tool only CAPTURES and ROUTES intents. It never executes them. The load_bearing flag
+is set deterministically by the watcher (never LLM-inferred) and is the boundary the proactive
+round obeys — AUTO intents may run unattended; load-bearing intents stop at SELECT for human
+sign-off (same rule as "unattended runs stop at SELECT for doctrine/install.sh").
+
+Commands:
+  intent-queue add "do X" --kind stale-deal --source hermes-watch [--load-bearing] [--urgency 2]
+  intent-queue list [--status open|claimed|resolved|dismissed|all] [--json]
+  intent-queue status [--json] [--gate]   # --gate: exit 0 if actionable (open>0), 1 if idle
+  intent-queue claim <id>
+  intent-queue resolve <id> [--round <ref>] [--note <text>]
+  intent-queue dismiss <id> [--note <text>]   # Ricardo said no → training signal for the gate
+  intent-queue reopen <id>
+"""
+import argparse, fcntl, hashlib, json, os, sys, tempfile, time
+from datetime import datetime, timezone
+
+# consume-once under concurrency (2026-08-09): same contract, mechanism and
+# rationale as bin/loop-queue — every mutating verb runs its load→mutate→save
+# transaction under a bounded sidecar flock, and `claim` is a compare-and-swap.
+# Deliberately duplicated (~20 lines) rather than shared: both tools stay
+# standalone single-file scripts by design.
+MUTATING_CMDS = {"add", "claim", "resolve", "dismiss", "reopen"}
+
+
+def acquire_lock(path):
+    """Bounded exclusive flock on a sidecar <queue>.lock. Returns the open file
+    (closing it releases the lock); exits 1 cleanly on deadline."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    deadline = time.monotonic() + float(os.environ.get("INTENT_QUEUE_LOCK_TIMEOUT", "10"))
+    fh = open(path + ".lock", "a+")
+    while True:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fh
+        except OSError:
+            if time.monotonic() >= deadline:
+                fh.close()
+                print("intent-queue: queue lock busy (another writer holds it) — "
+                      "gave up after the bounded wait", file=sys.stderr)
+                sys.exit(1)
+            time.sleep(0.05)
+
+
+def repo_root():
+    import subprocess
+    try:
+        out = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return os.getcwd()
+
+
+def queue_path():
+    return os.path.join(os.environ.get("INTENT_QUEUE_DIR") or os.path.join(repo_root(), "knowledge"),
+                        "intent-queue.jsonl")
+
+
+def _norm(text):
+    return " ".join((text or "").lower().split())
+
+
+def item_id(kind, intent):
+    h = hashlib.sha1(f"{_norm(kind)}\x00{_norm(intent)}".encode()).hexdigest()[:8]
+    return f"iq-{h}"
+
+
+def load(path):
+    items = []
+    if os.path.isfile(path):
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    items.append(json.loads(line))
+                except ValueError:
+                    pass  # tolerate a corrupt line rather than lose the queue
+    return items
+
+
+def save(path, items):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".intent-queue.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            for it in items:
+                fh.write(json.dumps(it, ensure_ascii=False) + "\n")
+        os.replace(tmp, path)  # atomic
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def now_iso():
+    return os.environ.get("INTENT_QUEUE_TS") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def cmd_add(args, path, items):
+    intent = args.intent
+    if not intent:
+        print("add: intent text required", file=sys.stderr)
+        return 2
+    iid = item_id(args.kind, intent)
+    # idempotent: an OPEN/CLAIMED item with this content hash already covers it.
+    for it in items:
+        if it.get("id") == iid and it.get("status") in ("open", "claimed"):
+            print(f"= {iid} already {it['status']} (idempotent, not re-added)")
+            return 0
+    # a DISMISSED item with this hash means Ricardo already said no — respect it, don't re-nag.
+    for it in items:
+        if it.get("id") == iid and it.get("status") == "dismissed":
+            print(f"= {iid} was dismissed — not re-adding (respecting the earlier 'no')")
+            return 0
+    recurred = any(it.get("id") == iid and it.get("status") == "resolved" for it in items)
+    items.append({
+        "id": iid, "ts": now_iso(), "kind": args.kind or "manual",
+        "source": args.source or "manual", "load_bearing": bool(args.load_bearing),
+        "urgency": max(0, min(3, args.urgency)), "intent": intent, "status": "open",
+        "round": None, **({"recurred": True} if recurred else {}),
+    })
+    save(path, items)
+    lb = "load-bearing→SELECT" if args.load_bearing else "auto"
+    print(f"+ {iid} [{args.kind or 'manual'}] ({lb}, u{max(0,min(3,args.urgency))})"
+          f"{' RECURRED' if recurred else ''}: {intent}")
+    return 0
+
+
+def _find(items, iid):
+    matches = [it for it in items if it.get("id") == iid or it.get("id") == f"iq-{iid}"]
+    return matches[-1] if matches else None
+
+
+def cmd_claim(args, path, items):
+    it = _find(items, args.id)
+    if not it:
+        print(f"claimed: no item {args.id}", file=sys.stderr)
+        return 1
+    # compare-and-swap (same consume-once contract as loop-queue): only an OPEN
+    # intent is claimable; a nonzero exit means another session holds it.
+    if it.get("status") != "open":
+        print(f"claim: {it['id']} is {it.get('status')} — not claimable", file=sys.stderr)
+        return 1
+    return _set_status(args, path, items, "claimed", "→")
+
+
+def _set_status(args, path, items, status, glyph):
+    it = _find(items, args.id)
+    if not it:
+        print(f"{status}: no item {args.id}", file=sys.stderr)
+        return 1
+    it["status"] = status
+    if status in ("resolved", "dismissed"):
+        it["round"] = getattr(args, "round", None) or now_iso()[:10]
+    if status == "open":
+        it["round"] = None
+    if getattr(args, "note", None):
+        it["note"] = args.note
+    save(path, items)
+    tail = f" (round {it['round']})" if it.get("round") else ""
+    print(f"{glyph} {it['id']} {status}{tail}")
+    return 0
+
+
+def cmd_resolve(args, path, items):
+    return _set_status(args, path, items, "resolved", "✓")
+
+
+def cmd_dismiss(args, path, items):
+    return _set_status(args, path, items, "dismissed", "✗")
+
+
+def cmd_reopen(args, path, items):
+    return _set_status(args, path, items, "open", "↺")
+
+
+def cmd_list(args, path, items):
+    want = args.status
+    sel = [it for it in items if want == "all" or it.get("status") == want]
+    if args.json:
+        print(json.dumps(sel, indent=2))
+        return 0
+    if not sel:
+        print(f"(no {want} items)")
+        return 0
+    for it in sel:
+        flag = " ⚠RECURRED" if it.get("recurred") and it.get("status") != "resolved" else ""
+        lb = "SELECT" if it.get("load_bearing") else "auto  "
+        rnd = f" → {it['round']}" if it.get("round") else ""
+        print(f"{it['id']}  [{it.get('kind','?'):14}] {it.get('status','?'):9} "
+              f"{lb} u{it.get('urgency',0)}{flag}{rnd}  {it.get('intent','')}")
+    return 0
+
+
+def cmd_status(args, path, items):
+    counts = {"open": 0, "claimed": 0, "resolved": 0, "dismissed": 0}
+    for it in items:
+        counts[it.get("status", "open")] = counts.get(it.get("status", "open"), 0) + 1
+    actionable = sum(1 for it in items if it.get("status") == "open")
+    if args.json:
+        print(json.dumps({**counts, "total": len(items), "actionable": actionable}))
+    elif not args.gate:
+        print(f"open={counts['open']} claimed={counts['claimed']} resolved={counts['resolved']} "
+              f"dismissed={counts['dismissed']} total={len(items)} actionable={actionable}")
+    if args.gate:
+        return 0 if actionable > 0 else 1
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description="forward-looking business-intent queue for the proactive loop")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    a = sub.add_parser("add")
+    a.add_argument("intent", nargs="?")
+    a.add_argument("--kind", default="manual")
+    a.add_argument("--source", default="manual")
+    a.add_argument("--load-bearing", action="store_true", dest="load_bearing")
+    a.add_argument("--urgency", type=int, default=1)
+    a.set_defaults(fn=cmd_add)
+
+    l = sub.add_parser("list")
+    l.add_argument("--status", choices=["open", "claimed", "resolved", "dismissed", "all"], default="open")
+    l.add_argument("--json", action="store_true")
+    l.set_defaults(fn=cmd_list)
+
+    s = sub.add_parser("status")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--gate", action="store_true")
+    s.set_defaults(fn=cmd_status)
+
+    for name, fn in (("claim", cmd_claim), ("resolve", cmd_resolve),
+                     ("dismiss", cmd_dismiss), ("reopen", cmd_reopen)):
+        p = sub.add_parser(name)
+        p.add_argument("id")
+        if name in ("resolve", "dismiss"):
+            p.add_argument("--round")
+            p.add_argument("--note")
+        p.set_defaults(fn=fn)
+
+    args = ap.parse_args()
+    path = queue_path()
+    # mutating verbs run the whole load→mutate→save transaction under the
+    # bounded sidecar lock; reads stay lock-free (save() is an atomic replace).
+    lock = acquire_lock(path) if args.cmd in MUTATING_CMDS else None
+    try:
+        items = load(path)
+        rc = args.fn(args, path, items)
+    finally:
+        if lock is not None:
+            lock.close()
+    sys.exit(rc)
+
+
+if __name__ == "__main__":
+    main()

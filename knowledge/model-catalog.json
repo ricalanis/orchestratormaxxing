@@ -1,0 +1,226 @@
+{
+ "fetched_at": "2026-08-30T15:26:21Z",
+ "live_ids": [
+  "deepseek-v4-flash:0731",
+  "deepseek-v4-pro:0813",
+  "gemma4:31b",
+  "glm-5.1",
+  "glm-5.2",
+  "glm-5.3",
+  "glm-5.3-flash",
+  "gpt-oss:120b",
+  "gpt-oss:20b",
+  "kimi-k2.6",
+  "kimi-k2.7-code",
+  "kimi-k3",
+  "minimax-m2.7",
+  "minimax-m3",
+  "mistral-large-3:675b",
+  "nemotron-3-nano:30b",
+  "nemotron-3-super",
+  "nemotron-3-ultra",
+  "qwen3.5:397b"
+ ],
+ "models": {
+  "deepseek-v4-flash:0731": {
+   "context": 1000000,
+   "modalities": [
+    "Text"
+   ],
+   "output": null,
+   "usage_label": "Medium Usage",
+   "usage_rank": 1,
+   "vision": false
+  },
+  "deepseek-v4-pro:0813": {
+   "context": 1000000,
+   "modalities": [
+    "Text"
+   ],
+   "output": null,
+   "usage_label": "Extra High Usage",
+   "usage_rank": 3,
+   "vision": false
+  },
+  "gemma4:31b": {
+   "context": 256000,
+   "modalities": [
+    "Text",
+    "Image"
+   ],
+   "output": null,
+   "usage_label": "Low Usage",
+   "usage_rank": 0,
+   "vision": true
+  },
+  "glm-5.1": {
+   "context": 198000,
+   "modalities": [
+    "Text"
+   ],
+   "output": null,
+   "usage_label": "High Usage",
+   "usage_rank": 2,
+   "vision": false
+  },
+  "glm-5.2": {
+   "context": 976000,
+   "modalities": [
+    "Text"
+   ],
+   "output": null,
+   "usage_label": "High Usage",
+   "usage_rank": 2,
+   "vision": false
+  },
+  "glm-5.3": {
+   "context": 1000000,
+   "modalities": [
+    "Text"
+   ],
+   "output": null,
+   "usage_label": "High Usage",
+   "usage_rank": 2,
+   "vision": false
+  },
+  "glm-5.3-flash": {
+   "context": 1000000,
+   "modalities": [
+    "Text",
+    "Image"
+   ],
+   "output": null,
+   "usage_label": "Medium Usage",
+   "usage_rank": 1,
+   "vision": true
+  },
+  "gpt-oss:120b": {
+   "context": 128000,
+   "modalities": [
+    "Text"
+   ],
+   "output": null,
+   "usage_label": "Medium Usage",
+   "usage_rank": 1,
+   "vision": false
+  },
+  "gpt-oss:20b": {
+   "context": 128000,
+   "modalities": [
+    "Text"
+   ],
+   "output": null,
+   "usage_label": "Low Usage",
+   "usage_rank": 0,
+   "vision": false
+  },
+  "kimi-k2.6": {
+   "context": 256000,
+   "modalities": [
+    "Text",
+    "Image"
+   ],
+   "output": null,
+   "usage_label": "High Usage",
+   "usage_rank": 2,
+   "vision": true
+  },
+  "kimi-k2.7-code": {
+   "context": 256000,
+   "modalities": [
+    "Text",
+    "Image"
+   ],
+   "output": null,
+   "usage_label": "High Usage",
+   "usage_rank": 2,
+   "vision": true
+  },
+  "kimi-k3": {
+   "context": 1000000,
+   "modalities": [
+    "Text",
+    "Image"
+   ],
+   "output": null,
+   "usage_label": "Extra High Usage",
+   "usage_rank": 3,
+   "vision": true
+  },
+  "minimax-m2.7": {
+   "context": 200000,
+   "modalities": [
+    "Text"
+   ],
+   "output": null,
+   "usage_label": "Medium Usage",
+   "usage_rank": 1,
+   "vision": false
+  },
+  "minimax-m3": {
+   "context": 512000,
+   "modalities": [
+    "Text",
+    "Image"
+   ],
+   "output": null,
+   "usage_label": "High Usage",
+   "usage_rank": 2,
+   "vision": true
+  },
+  "mistral-large-3:675b": {
+   "context": 256000,
+   "modalities": [
+    "Text",
+    "Image"
+   ],
+   "output": null,
+   "usage_label": "Medium Usage",
+   "usage_rank": 1,
+   "vision": true
+  },
+  "nemotron-3-nano:30b": {
+   "context": 1000000,
+   "modalities": [
+    "Text"
+   ],
+   "output": null,
+   "usage_label": "Low Usage",
+   "usage_rank": 0,
+   "vision": false
+  },
+  "nemotron-3-super": {
+   "context": 256000,
+   "modalities": [
+    "Text"
+   ],
+   "output": null,
+   "usage_label": "Medium Usage",
+   "usage_rank": 1,
+   "vision": false
+  },
+  "nemotron-3-ultra": {
+   "context": 256000,
+   "modalities": [
+    "Text"
+   ],
+   "output": null,
+   "usage_label": "High Usage",
+   "usage_rank": 2,
+   "vision": false
+  },
+  "qwen3.5:397b": {
+   "context": 256000,
+   "modalities": [
+    "Text",
+    "Image"
+   ],
+   "output": null,
+   "usage_label": "Medium Usage",
+   "usage_rank": 1,
+   "vision": true
+  }
+ },
+ "source": "ollama.com/library (published rows)",
+ "unknown": []
+}

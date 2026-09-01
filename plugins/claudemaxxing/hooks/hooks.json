@@ -1,0 +1,113 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"${SOLPLAN_CHILD:-0}\" = 1 ] && exit 0; \"$HOME/.local/bin/warp-agent-recovery\" register-agent codex 2>/dev/null; \"$HOME/.local/bin/agent-tab-status\" idle 2>/dev/null; \"$HOME/.local/bin/warp-agent-event\" codex session_start 2>/dev/null; true",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"${SOLPLAN_CHILD:-0}\" = 1 ] && exit 0; \"$HOME/.local/bin/memoryctl\" brief --max-bytes 12000 2>/dev/null; true",
+            "timeout": 15,
+            "statusMessage": "Loading shared Claude/Codex memory"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"${SOLPLAN_CHILD:-0}\" = 1 ] && exit 0; o=\"$(\"$HOME/.local/bin/mem-audit\" 2>/dev/null)\"; echo \"$o\" | grep -qE '\u26a0|\u2717' && printf 'Memory audit flags (re-verify stale/superseded memory before trusting it):\\n%s\\n' \"$o\"; true",
+            "timeout": 15,
+            "statusMessage": "Auditing project memory"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"${SOLPLAN_CHILD:-0}\" = 1 ] && exit 0; loop-tick --kick --quiet >/dev/null 2>&1; n=\"$(loop-queue status --json 2>/dev/null)\"; echo \"$n\" | grep -q '\"actionable\": 0' || printf 'Self-improve queue has open flaws \u2014 use $claudemaxxing:self-improve to drain:\\n%s\\n' \"$(loop-queue list 2>/dev/null)\"; true",
+            "timeout": 5,
+            "statusMessage": "Watching harness health"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"${SOLPLAN_CHILD:-0}\" = 1 ] && exit 0; session-log tail 2>/dev/null; true",
+            "timeout": 15,
+            "statusMessage": "Loading project session log"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"${SOLPLAN_CHILD:-0}\" = 1 ] && exit 0; \"$HOME/.local/bin/agent-tab-status\" working 2>/dev/null; \"$HOME/.local/bin/warp-agent-event\" codex prompt_submit 2>/dev/null; true",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"${SOLPLAN_CHILD:-0}\" = 1 ] && exit 0; \"$HOME/.local/bin/agent-tab-status\" attention 2>/dev/null; \"$HOME/.local/bin/warp-agent-event\" codex permission_request 2>/dev/null; \"$HOME/.local/bin/agent-done-notify\" --agent codex 2>/dev/null; true",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "request_user_input|AskUserQuestion|ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"${SOLPLAN_CHILD:-0}\" = 1 ] && exit 0; \"$HOME/.local/bin/agent-tab-status\" attention 2>/dev/null; \"$HOME/.local/bin/warp-agent-event\" codex question_asked 2>/dev/null; \"$HOME/.local/bin/agent-done-notify\" --agent codex 2>/dev/null; true",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "request_user_input|AskUserQuestion|ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"${SOLPLAN_CHILD:-0}\" = 1 ] && exit 0; \"$HOME/.local/bin/agent-tab-status\" working 2>/dev/null; \"$HOME/.local/bin/warp-agent-event\" codex permission_replied 2>/dev/null; true",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"${SOLPLAN_CHILD:-0}\" = 1 ] && printf '{}\\n' && exit 0; \"$HOME/.local/bin/codex-stop-hook\"",
+            "timeout": 15,
+            "statusMessage": "Recording completion"
+          }
+        ]
+      }
+    ]
+  }
+}

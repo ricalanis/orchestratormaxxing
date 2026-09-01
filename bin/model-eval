@@ -1,0 +1,722 @@
+#!/usr/bin/env python3
+"""model-eval — routing decisions that survive their own methodology.
+
+`bin/model-bench` answered "which model looks better today". It could not defend
+that answer: a cross-family critique (Sonnet, 2026-08-27) showed the winner was
+partly an artifact of the evaluator's choices. This tool encodes the fixes as
+mechanism rather than intention. Doctrine: memory `model-eval-design-doctrine`,
+derivation `knowledge/model-eval-doctrine-2026-08-27.md`.
+
+What is different, and which failure each part prevents:
+
+  * **Pre-registration.** The task set, models, n, and the stopping rule are
+    written and hashed BEFORE the first model call, and the hash rides in the
+    results. The prior eval dropped a task class after seeing scores — and it was
+    exactly the class whose contract was known-broken. Including it flipped the
+    winner. There is deliberately NO exclusion flag.
+  * **Golden gate.** Hand-written correct-but-differently-worded answers are
+    scored by the frozen contracts first. Any golden failure ABORTS before a
+    single model call. A contract that required the literal substring "retry"
+    once failed a correct answer saying "retries in a tight loop"; this is the
+    ~zero-cost check that catches that.
+  * **Distinct instances, not reps.** N different problems per class, not N
+    samples of one prompt. Reps at temperature 0 measure decode stability, not
+    capability, so they cannot support a capability claim.
+  * **Paired + interleaved.** Every model sees the same instances, and calls are
+    interleaved in time rather than run model-by-model, so a provider load spike
+    is spread across arms instead of landing on one.
+  * **Exact statistics.** Clopper-Pearson CIs and McNemar on the paired table.
+    9/9 vs 8/9 is noise ([66,100]% vs [52,100]%); ~117 trials per arm are needed
+    to separate 98% from 89% at 80% power.
+  * **Ties go to the incumbent.** Overlapping CIs / non-significant McNemar
+    returns "KEEP INCUMBENT", never "the bigger number won".
+
+Raw rows are machine-local run evidence: one gitignored .results/model-eval/
+<spec_hash>.jsonl per run, never knowledge/ (the loop cron autocommits it and a
+merge silently reverted a finished 120-row run — lq-d64b06f8). knowledge/ holds
+only rendered conclusions; pre-split rows there stay readable via report's
+fallback.
+
+Verbs:  preregister · golden · run · report
+Exit:   0 ok · 1 error · 2 golden gate failed (no model was called) · 3 no result
+"""
+import argparse
+import hashlib
+import json
+import math
+import os
+import random
+import re
+import ssl
+import statistics
+import sys
+import time
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+AUTH_JSON = os.path.expanduser("~/.local/share/opencode/auth.json")
+URL = "https://ollama.com/v1/chat/completions"
+RESULTS_DIR = os.path.join(REPO, ".results", "model-eval")
+LEGACY_OUT = os.path.join(REPO, "knowledge", "model-eval.jsonl")
+SYSTEM = "You are a focused worker. Do exactly the task and return only the result."
+
+# ---------------------------------------------------------------- instances
+SERVICES = ["gateway", "auth", "cache", "ledger", "worker", "router", "queue", "index"]
+
+DEFECTS = [
+    ("bare_except", "    try:\n        return fn()\n    except Exception:\n        pass\n    return None",
+     ("except", "exception"), ("swallow", "silent", "pass", "suppress", "hides", "masks", "ignor")),
+    ("mutable_default", "def collect(item, into=[]):\n    into.append(item)\n    return into",
+     ("default",), ("mutable", "shared", "persists", "accumulat", "[]", "list")),
+    ("eq_vs_is", "def is_root(name):\n    return name is 'root'",
+     ("is",), ("identity", "==", "equality", "interning", "compar")),
+    ("unclosed_file", "def read_all(path):\n    f = open(path)\n    return f.read()",
+     ("open", "file"), ("close", "with", "context manager", "leak", "descriptor")),
+    ("shadowed_builtin", "def tally(list):\n    return sum(list) / len(list)",
+     ("list",), ("shadow", "builtin", "built-in", "overrid", "reserved")),
+]
+
+
+def make_instances(kind, n, seed):
+    """Deterministic, DISTINCT problems. Ground truth is by construction, so the
+    scorer never has to judge — it compares against a value we computed."""
+    rnd = random.Random(f"{kind}:{seed}")
+    out = []
+    if kind == "reason":
+        # Constraint puzzles solved by brute force here, so the expected answer
+        # is derived, never assumed. Only puzzles with a UNIQUE solution ship.
+        import itertools
+        # Build constraints FROM a hidden permutation, adding one at a time
+        # until the solution set is unique. Sampling 5 constraints and rejecting
+        # non-unique sets almost never terminates at 7 slots (5040 perms, unique
+        # is rare) -- measured, it hung. This construction always terminates and
+        # yields genuinely constrained puzzles.
+        while len(out) < n:
+            names = rnd.sample(SERVICES, 7)
+            truth = names[:]
+            rnd.shuffle(truth)
+            idx = {sv: i for i, sv in enumerate(truth)}
+            pool = []
+            for _ in range(40):
+                kind_c = rnd.choice(["before", "imm", "pos", "notpos"])
+                x, y = rnd.sample(names, 2)
+                if kind_c == "before" and idx[x] < idx[y]:
+                    pool.append((f"{x} deploys at some point before {y}",
+                                 lambda p, x=x, y=y: p.index(x) < p.index(y)))
+                elif kind_c == "imm" and idx[y] == idx[x] + 1:
+                    pool.append((f"{y} deploys immediately after {x}",
+                                 lambda p, x=x, y=y: p.index(y) == p.index(x) + 1))
+                elif kind_c == "pos":
+                    pos = idx[x]
+                    pool.append((f"{x} is in position {pos + 1}",
+                                 lambda p, x=x, pos=pos: p.index(x) == pos))
+                elif kind_c == "notpos":
+                    bad = rnd.randrange(7)
+                    if bad != idx[x]:
+                        pool.append((f"{x} is not in position {bad + 1}",
+                                     lambda p, x=x, bad=bad: p.index(x) != bad))
+            # Relational constraints FIRST; a bare "X is in position N" hands the
+            # answer over rather than testing reasoning, so those are tried only
+            # after the relational ones have failed to isolate a unique order.
+            rank = {"before": 0, "immediately": 0, "not in position": 1, "is in position": 2}
+            def _tier(t):
+                for k, v in rank.items():
+                    if k in t:
+                        return v
+                return 2
+            pool.sort(key=lambda tf: _tier(tf[0]))
+            perms = list(itertools.permutations(names))
+            chosen, live = [], perms
+            for text, fn in pool:
+                if len(live) == 1:
+                    break
+                nxt = [p for p in live if fn(p)]
+                if len(nxt) < len(live):
+                    chosen.append(text)
+                    live = nxt
+            positional = sum(1 for c in chosen if "is in position" in c)
+            if (len(live) != 1 or list(live[0]) != truth
+                    or not (4 <= len(chosen) <= 8) or positional > 1):
+                continue
+            cons = "\n".join(f"{i+1}. {c}." for i, c in enumerate(chosen))
+            out.append({"prompt": f"Seven services deploy in a fixed order:\n{cons}\n"
+                                  "Exactly one order satisfies all of them. Reason it out, then "
+                                  "end with a final line exactly: ORDER: a,b,c,d,e,f,g",
+                        "expect": ",".join(truth), "max_tokens": 8000})
+    elif kind == "extract":
+        for _ in range(n):
+            v = {k: rnd.randrange(10, 9999) for k in ("ttl_seconds", "timeout_seconds",
+                                                      "retry_count", "flaw_count")}
+            doc = (f"The watcher stamps its result and reuses it for {v['ttl_seconds']} seconds. "
+                   f"The verifier budget is {v['timeout_seconds']} seconds. Only "
+                   f"{v['retry_count']} consecutive timeouts enqueue a flaw. A misreport once "
+                   f"fabricated {v['flaw_count']} queued flaws in one day.")
+            out.append({"prompt": 'Extract into JSON only. No fence, no commentary. Schema: '
+                                  '{"ttl_seconds": int, "timeout_seconds": int, '
+                                  '"retry_count": int, "flaw_count": int}\n\n' + doc,
+                        "expect": v, "max_tokens": 3000})
+    elif kind == "digest":
+        for _ in range(n):
+            k = rnd.choice([3, 4, 5, 6])
+            topics = rnd.sample(["el watcher", "la cola de fallos", "el verificador",
+                                 "el candado", "la marca de tiempo", "el presupuesto",
+                                 "la ronda", "el gate humano"], k)
+            doc = " ".join(f"{t.capitalize()} tiene una regla propia y un valor medido." for t in topics)
+            out.append({"prompt": f"Summarize the note below in exactly {k} bullets, one sentence "
+                                  f"each. No preamble, no closing line.\n\n{doc}",
+                        "expect": k, "max_tokens": 3000})
+    elif kind == "review":
+        for i in range(n):
+            name, snippet, must_name, must_say = DEFECTS[i % len(DEFECTS)]
+            filler = "\n".join(f"def helper_{j}(x):\n    return x + {j}" for j in range(i % 3 + 1))
+            out.append({"prompt": "Review this Python for real defects. For each defect output one "
+                                  "line: `LINE <n> | <defect> | <fix>`. No prose outside those "
+                                  f"lines.\n\n```python\n{filler}\n\n{snippet}\n```",
+                        "expect": {"name": name, "any_of": must_name, "and_any_of": must_say},
+                        "max_tokens": 3000})
+    elif kind == "cite":
+        HABLA = [
+            ("el director", "la plataforma lleva {m} meses sin que nadie la toque"),
+            ("Ricardo", "lo primero sería levantar el inventario de lo que ya existe"),
+            ("el director", "necesito algo que le pueda enseñar al consejo en {w} semanas"),
+            ("Ricardo", "puedo entregarles un spike replicable con el diagnóstico"),
+            ("el director", "el presupuesto lo autorizo yo hasta {k} mil pesos"),
+            ("Ricardo", "cerramos un piso de {h} horas y facturamos por hora consumida"),
+            ("el director", "el código y la infraestructura se quedan con nosotros"),
+            ("Ricardo", "ustedes son dueños de todo el entregable desde el inicio"),
+            ("el director", "te mando el acceso al repositorio el {d}"),
+            ("Ricardo", "tenemos {p} personas metiendo datos a mano todos los días"),
+        ]
+        for _ in range(n):
+            v = {"m": rnd.randrange(6, 40), "w": rnd.randrange(2, 9),
+                 "k": rnd.randrange(100, 900), "h": rnd.randrange(20, 90),
+                 "d": rnd.choice(["lunes", "martes", "jueves", "viernes"]),
+                 "p": rnd.choice(["dos", "tres", "cuatro", "cinco"])}
+            sents = [{"speaker": sp, "text": tx.format(**v).capitalize() + "."}
+                     for sp, tx in HABLA]
+            rnd.shuffle(sents)
+            # The trap: an AI summary that restates the content in words that
+            # appear NOWHERE above. Quoting it is the failure Hermes rejects.
+            items = ("Se acordó realizar una evaluación preliminar del sistema heredado y "
+                     "presentar alternativas de modernización. Se proporcionarán credenciales "
+                     "de acceso al inicio de la semana entrante. Ambas partes convinieron un "
+                     "esquema de facturación por tiempo invertido.")
+            payload = json.dumps({"sentences": sents, "summary": {"action_items": items}},
+                                 ensure_ascii=False, indent=1)
+            out.append({"prompt":
+                "Eres el turno de digestión. Devuelve SOLO un array JSON de ops.\n"
+                "REGLA CRÍTICA: `quote` DEBE ser subcadena VERBATIM de algún "
+                "`sentences[].text`. `summary.action_items` lo generó una IA y NO es habla "
+                "real: nunca cites de ahí.\n"
+                'Formato: [{"op":"objective.open","title":<str>,"quote":<str verbatim>,'
+                '"speaker":<str>}]\nEmite entre 2 y 4 ops. Solo el JSON.\n\n--- ENTRADA ---\n'
+                + payload,
+                "expect": {"speech": [x["text"] for x in sents], "summary": items},
+                "max_tokens": 8000})
+    elif kind == "trace":
+        # Ground truth is obtained by RUNNING the program, never by reasoning
+        # about it here — if the evaluator has to solve the task to score it,
+        # the scorer inherits the evaluator's mistakes.
+        while len(out) < n:
+            a, b = rnd.randrange(2, 9), rnd.randrange(2, 9)
+            lim = rnd.randrange(7, 14)
+            op = rnd.choice(["+", "*", "-"])
+            src = (f"total = {a}\n"
+                   f"seen = []\n"
+                   f"for i in range(1, {lim}):\n"
+                   f"    if i %% {b} == 0:\n"
+                   f"        total = total {op} i\n"
+                   f"    elif i %% 2:\n"
+                   f"        total = total + (i // 2)\n"
+                   f"    else:\n"
+                   f"        for j in range(i %% 3):\n"
+                   f"            total = total + j\n"
+                   f"        seen.append(i)\n"
+                   f"print(total, len(seen))") % ()
+            ns = {}
+            buf = []
+            exec(compile(src.replace("print(total, len(seen))",
+                                     "__out__ = f'{total} {len(seen)}'"), "<t>", "exec"), ns)
+            truth = ns["__out__"]
+            out.append({"prompt": "Trace this Python by hand and give ONLY the line it prints. "
+                                  "No explanation, no code fence — the exact printed line and "
+                                  f"nothing else.\n\n```python\n{src}\n```",
+                        "expect": truth, "max_tokens": 6000})
+    else:
+        raise SystemExit(f"unknown task class {kind!r}")
+    return out
+
+
+# ------------------------------------------------------------------ scoring
+def score(kind, inst, text):
+    """Deterministic. Returns (bool, detail). Frozen before any model runs."""
+    t = (text or "").strip()
+    if not t:
+        return False, "empty"
+    if kind == "reason":
+        m = re.findall(r"ORDER:\s*([a-zA-Z,\s-]+)", t)
+        if not m:
+            return False, "no ORDER line"
+        got = ",".join(x.strip().lower() for x in m[-1].split(",") if x.strip())
+        return got == inst["expect"], f"got {got!r}"
+    if kind == "extract":
+        s = re.sub(r"^```(?:json)?|```$", "", t, flags=re.M).strip()
+        try:
+            d = json.loads(s)
+        except Exception:
+            return False, "not JSON"
+        bad = [k for k, v in inst["expect"].items() if d.get(k) != v]
+        return not bad, ("ok" if not bad else f"wrong: {bad}")
+    if kind == "digest":
+        lines = [l.strip() for l in t.splitlines() if l.strip()]
+        bullets = [l for l in lines if re.match(r"^([-*•]|\d+[.)])\s+", l)]
+        return (len(lines) == inst["expect"] and len(bullets) == inst["expect"],
+                f"{len(bullets)} bullets / {len(lines)} lines, want {inst['expect']}")
+    if kind == "cite":
+        def _norm(x):
+            return re.sub(r"\s+", " ", (x or "")).strip().lower()
+        body = re.sub(r"^```(?:json)?|```$", "", t, flags=re.M).strip()
+        try:
+            ops = json.loads(body)
+        except Exception:
+            return False, "not JSON"
+        if not isinstance(ops, list) or not (2 <= len(ops) <= 4):
+            return False, f"want 2-4 ops, got {len(ops) if isinstance(ops,list) else '?'}"
+        speech = [_norm(x) for x in inst["expect"]["speech"]]
+        summ = _norm(inst["expect"]["summary"])
+        for i, op in enumerate(ops):
+            q = _norm(op.get("quote"))
+            if not q:
+                return False, f"op{i}: no quote"
+            if not any(q in sp for sp in speech):
+                return False, (f"op{i}: CITED THE AI SUMMARY" if q in summ
+                               else f"op{i}: hallucinated quote")
+        return True, f"{len(ops)} ops verbatim"
+    if kind == "trace":
+        # last non-empty line, punctuation-tolerant; the task is the numbers
+        lines = [l.strip().strip("`*. ") for l in t.splitlines() if l.strip()]
+        got = lines[-1] if lines else ""
+        got = re.sub(r"\s+", " ", got)
+        return got == inst["expect"], f"got {got!r} want {inst['expect']!r}"
+    if kind == "review":
+        if len([l for l in t.splitlines() if l.strip().upper().startswith("LINE ")]) < 1:
+            return False, "no LINE rows"
+        low = t.lower()
+        e = inst["expect"]
+        # accept-pattern lists, NOT a single literal substring -- the "retry"
+        # false negative is exactly what one literal costs.
+        return (any(w in low for w in e["any_of"]) and any(w in low for w in e["and_any_of"]),
+                f"defect={e['name']}")
+    return False, "unknown class"
+
+
+# Hand-written, correct-but-differently-worded answers. The golden gate scores
+# these with the frozen contracts BEFORE any model is called; a failure here
+# means the contract has a false negative and the run must not proceed.
+def goldens(kind, inst):
+    if kind == "reason":
+        return [f"Working through it briefly.\n\nORDER: {inst['expect']}",
+                f"By elimination the order follows.\nORDER: {inst['expect'].upper()}"]
+    if kind == "extract":
+        return [json.dumps(inst["expect"]),
+                "```json\n" + json.dumps(inst["expect"], indent=1) + "\n```"]
+    if kind == "digest":
+        k = inst["expect"]
+        return ["\n".join(f"- Punto {i+1}." for i in range(k)),
+                "\n".join(f"{i+1}. Punto {i+1}." for i in range(k))]
+    if kind == "cite":
+        sp = inst["expect"]["speech"]
+        return [json.dumps([{"op": "objective.open", "title": "t1", "quote": sp[0], "speaker": "x"},
+                            {"op": "objective.open", "title": "t2", "quote": sp[1], "speaker": "y"}],
+                           ensure_ascii=False),
+                "```json\n" + json.dumps(
+                    [{"op": "objective.open", "title": "t", "quote": sp[2][:40], "speaker": "z"},
+                     {"op": "objective.open", "title": "u", "quote": sp[3], "speaker": "w"}],
+                    ensure_ascii=False) + "\n```"]
+    if kind == "trace":
+        return [inst["expect"], f"`{inst['expect']}`", f"Working through the loop.\n{inst['expect']}"]
+    if kind == "review":
+        e = inst["expect"]
+        # deliberately worded UNLIKE the pattern list's first entry
+        phrasing = {
+            "bare_except": "LINE 7 | the exception handler quietly swallows every error | re-raise",
+            "mutable_default": "LINE 1 | default argument is a shared mutable list | use None",
+            "eq_vs_is": "LINE 2 | identity comparison instead of equality | use ==",
+            "unclosed_file": "LINE 2 | the opened file is never closed | use a with-block",
+            "shadowed_builtin": "LINE 1 | parameter shadows the builtin list | rename it",
+        }
+        return [phrasing[e["name"]]]
+    return []
+
+
+# -------------------------------------------------------------- statistics
+def clopper_pearson(k, n, alpha=0.05):
+    """Exact binomial CI. Normal approximations are invalid at k==n, which is
+    precisely where routing evals live."""
+    if n == 0:
+        return (0.0, 1.0)
+    def beta_ppf(p, a, b):
+        lo, hi = 0.0, 1.0
+        for _ in range(200):
+            mid = (lo + hi) / 2
+            if _betainc(a, b, mid) < p:
+                lo = mid
+            else:
+                hi = mid
+        return (lo + hi) / 2
+    lo = 0.0 if k == 0 else beta_ppf(alpha / 2, k, n - k + 1)
+    hi = 1.0 if k == n else beta_ppf(1 - alpha / 2, k + 1, n - k)
+    return (lo, hi)
+
+
+def _betainc(a, b, x):
+    """Regularised incomplete beta by series; adequate for CI bisection."""
+    if x <= 0:
+        return 0.0
+    if x >= 1:
+        return 1.0
+    lbeta = math.lgamma(a) + math.lgamma(b) - math.lgamma(a + b)
+    front = math.exp(a * math.log(x) + b * math.log(1 - x) - lbeta) / a
+    f, c, d = 1.0, 1.0, 0.0
+    for i in range(300):
+        m = i // 2
+        if i == 0:
+            num = 1.0
+        elif i % 2 == 0:
+            num = (m * (b - m) * x) / ((a + 2 * m - 1) * (a + 2 * m))
+        else:
+            num = -((a + m) * (a + b + m) * x) / ((a + 2 * m) * (a + 2 * m + 1))
+        d = 1.0 + num * d
+        d = 1e-30 if abs(d) < 1e-30 else d
+        d = 1.0 / d
+        c = 1.0 + num / c
+        c = 1e-30 if abs(c) < 1e-30 else c
+        f *= c * d
+        if abs(1.0 - c * d) < 1e-10:
+            break
+    return front * (f - 1.0)
+
+
+def mcnemar(b, c):
+    """Exact two-sided McNemar on discordant pairs (b = A-only wins, c = B-only)."""
+    n = b + c
+    if n == 0:
+        return 1.0
+    k = min(b, c)
+    tail = sum(math.comb(n, i) for i in range(k + 1)) / (2 ** n)
+    return min(1.0, 2 * tail)
+
+
+# ------------------------------------------------------------------ runtime
+def ssl_ctx():
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
+def load_key():
+    try:
+        e = json.load(open(AUTH_JSON)).get("ollama-cloud") or {}
+    except Exception as ex:
+        sys.exit(f"ERROR reading {AUTH_JSON}: {ex}")
+    k = e.get("key") or e.get("apiKey")
+    if not k:
+        sys.exit("ERROR: no 'ollama-cloud' key in OpenCode auth store")
+    return k
+
+
+def call(model, prompt, max_tokens, effort, key):
+    body = {"model": model,
+            "messages": [{"role": "system", "content": SYSTEM},
+                         {"role": "user", "content": prompt}],
+            "max_tokens": max_tokens, "temperature": 0, "stream": True,
+            "stream_options": {"include_usage": True}}
+    if effort:
+        body["reasoning_effort"] = effort
+    req = urllib.request.Request(URL, data=json.dumps(body).encode(),
+                                 headers={"Authorization": f"Bearer {key}",
+                                          "Content-Type": "application/json"})
+    t0 = time.monotonic()
+    ttft, parts, usage = None, [], None
+    with urllib.request.urlopen(req, context=ssl_ctx(), timeout=600) as r:
+        for raw in r:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            chunk = line[5:].strip()
+            if chunk == "[DONE]":
+                break
+            try:
+                ev = json.loads(chunk)
+            except Exception:
+                continue
+            if ev.get("usage"):
+                usage = ev["usage"]
+            for ch in ev.get("choices", []):
+                d = ch.get("delta") or {}
+                if d.get("reasoning_content") or d.get("reasoning") or d.get("content"):
+                    if ttft is None:
+                        ttft = time.monotonic() - t0
+                if d.get("content"):
+                    parts.append(d["content"])
+    return {"ttft": ttft, "wall": time.monotonic() - t0,
+            "usage": usage or {}, "text": "".join(parts)}
+
+
+# --------------------------------------------------------------------- verbs
+def resolve_out(args, spec, writing):
+    """Raw rows are machine-local run evidence: one gitignored file per run, keyed
+    by spec_hash. They must never land under knowledge/ — the loop cron autocommits
+    that directory and concurrent sessions merge it, which silently reverted a
+    finished 120-row run to the previously committed rows (lq-d64b06f8).
+    knowledge/ carries only rendered conclusions."""
+    if args.out:
+        path = os.path.abspath(args.out)
+        # Compare REALPATHS: abspath string-matches the link name, not where it
+        # lands, so `ln -s knowledge k` would write through the link into
+        # knowledge/ — the flaw back through a side door.
+        real = os.path.realpath(path)
+        know = os.path.realpath(os.path.join(REPO, "knowledge"))
+        if writing and (real == know or real.startswith(know + os.sep)):
+            sys.exit("ERROR: raw rows under knowledge/ get autocommitted and merged away; "
+                     f"write to {RESULTS_DIR} instead (default: <spec_hash>.jsonl there)")
+    else:
+        path = os.path.join(RESULTS_DIR, f"{spec['spec_hash']}.jsonl")
+    if writing and os.path.dirname(path):
+        # at resolve time, before credentials: an uncreatable target fails fast
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    return path
+
+
+def spec_of(args):
+    return {"models": [m.strip() for m in args.models.split(",") if m.strip()],
+            "classes": [c.strip() for c in args.classes.split(",") if c.strip()],
+            "n_per_cell": args.n, "effort": args.effort, "seed": args.seed,
+            "temperature": 0, "exclusion_rule": "NONE — every class declared here is reported",
+            "stopping_rule": "overlapping 95% CIs or McNemar p>=0.05 -> KEEP INCUMBENT",
+            "incumbent": args.incumbent}
+
+
+def spec_hash(spec):
+    return hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def cmd_preregister(args):
+    spec = spec_of(args)
+    spec["spec_hash"] = spec_hash({k: v for k, v in spec.items()})
+    path = args.spec
+    json.dump(spec, open(path, "w"), indent=1, sort_keys=True)
+    print(f"pre-registered {spec['spec_hash']} -> {path}")
+    print(json.dumps(spec, indent=1, sort_keys=True))
+    return 0
+
+
+def run_golden(spec):
+    """Score hand-written correct answers with the frozen contracts."""
+    bad = []
+    for kind in spec["classes"]:
+        for inst in make_instances(kind, min(5, spec["n_per_cell"]), spec["seed"]):
+            for g in goldens(kind, inst):
+                ok, detail = score(kind, inst, g)
+                if not ok:
+                    bad.append(f"{kind}: golden rejected ({detail}) :: {g[:70]!r}")
+    return bad
+
+
+def cmd_golden(args):
+    spec = json.load(open(args.spec))
+    bad = run_golden(spec)
+    if bad:
+        print("GOLDEN GATE FAILED — the contract has false negatives:")
+        for b in bad:
+            print("  ✗ " + b)
+        return 2
+    print(f"golden gate passed for {', '.join(spec['classes'])} — contracts admit "
+          "correct answers phrased differently")
+    return 0
+
+
+def cmd_run(args):
+    spec = json.load(open(args.spec))
+    out = resolve_out(args, spec, writing=True)   # refuse a knowledge/ target first
+    bad = run_golden(spec)
+    if bad:
+        print("GOLDEN GATE FAILED — refusing to call any model:")
+        for b in bad:
+            print("  ✗ " + b)
+        return 2
+    print(f"golden gate passed · spec {spec['spec_hash']} · "
+          f"{len(spec['models'])} models × {len(spec['classes'])} classes × "
+          f"{spec['n_per_cell']} distinct instances")
+    print(f"rows -> {out}")
+    key = load_key()
+    jobs = []
+    for kind in spec["classes"]:
+        for i, inst in enumerate(make_instances(kind, spec["n_per_cell"], spec["seed"])):
+            for model in spec["models"]:          # interleaved: models adjacent in time
+                jobs.append((kind, i, inst, model))
+
+    done = [0]
+
+    def work(job):
+        kind, i, inst, model = job
+        rec = {"spec_hash": spec["spec_hash"], "model": model, "class": kind,
+               "instance": i, "effort": spec["effort"]}
+        for attempt in range(4):
+            try:
+                r = call(model, inst["prompt"], inst["max_tokens"], spec["effort"], key)
+                ok, detail = score(kind, inst, r["text"])
+                u = r["usage"]
+                gen = (r["wall"] - r["ttft"]) if r["ttft"] else None
+                ct = u.get("completion_tokens")
+                rec.update({"outcome": "pass" if ok else "fail", "detail": detail,
+                            "tok": ct, "wall": round(r["wall"], 2),
+                            "ttft": round(r["ttft"], 2) if r["ttft"] else None,
+                            "decode_tps": round(ct / gen, 1) if ct and gen and gen > 0 else None})
+                break
+            except Exception as ex:
+                # infra is retried to a fixed count of DECIDED trials and counted
+                # per arm; dropping it asymmetrically is survivorship bias
+                rec["infra_attempts"] = attempt + 1
+                if attempt == 3:
+                    rec.update({"outcome": "infra", "detail": f"{type(ex).__name__}"})
+                else:
+                    time.sleep(8 * (attempt + 1))
+        done[0] += 1
+        if done[0] % 10 == 0:
+            print(f"  … {done[0]}/{len(jobs)}", flush=True)
+        return rec
+
+    import threading
+    lock = threading.Lock()
+    rows = []
+    with open(out, "a") as fh, ThreadPoolExecutor(max_workers=args.concurrency) as ex:
+        for rec in ex.map(work, jobs):
+            with lock:                       # append as each lands: a crash keeps
+                rows.append(rec)             # what completed, and progress is
+                fh.write(json.dumps(rec) + "\n")   # readable while the run is live
+                fh.flush()
+    return report(rows, spec)
+
+
+def report(rows, spec):
+    rows = [r for r in rows if r.get("spec_hash") == spec["spec_hash"]]
+    if not rows:
+        sys.stderr.write("no rows for this spec\n")
+        return 3
+    models = spec["models"]
+    print(f"\n=== spec {spec['spec_hash']} · effort={spec['effort']} · "
+          f"n={spec['n_per_cell']} distinct instances/cell · exclusion: {spec['exclusion_rule']} ===")
+    hdr = f"{'class':10s}" + "".join(f"{m[:22]:>30s}" for m in models)
+    print(hdr); print("-" * len(hdr))
+    for kind in spec["classes"] + ["ALL"]:
+        line = f"{kind:10s}"
+        for m in models:
+            g = [r for r in rows if r["model"] == m and (kind == "ALL" or r["class"] == kind)]
+            dec = [r for r in g if r["outcome"] in ("pass", "fail")]
+            k = sum(1 for r in dec if r["outcome"] == "pass")
+            infra = sum(1 for r in g if r["outcome"] == "infra")
+            lo, hi = clopper_pearson(k, len(dec))
+            line += f"{f'{k}/{len(dec)} [{lo:.0%}-{hi:.0%}]' + (f' i{infra}' if infra else ''):>30s}"
+        print(line)
+
+    if len(models) == 2:
+        a, b = models
+        pa_all = {(r["class"], r["instance"]): r for r in rows if r["model"] == a}
+        pb_all = {(r["class"], r["instance"]): r for r in rows if r["model"] == b}
+        per = []
+        for c in spec["classes"]:
+            ks = [k for k in pa_all if k[0] == c and k in pb_all
+                  and pa_all[k]["outcome"] in ("pass", "fail")
+                  and pb_all[k]["outcome"] in ("pass", "fail")]
+            bx = sum(1 for k in ks if pa_all[k]["outcome"] == "pass" and pb_all[k]["outcome"] == "fail")
+            cx = sum(1 for k in ks if pa_all[k]["outcome"] == "fail" and pb_all[k]["outcome"] == "pass")
+            per.append((c, bx, cx, mcnemar(bx, cx), len(ks)))
+        print(f"\nPER-CLASS paired tests (Holm-corrected across {len(per)} classes — "
+              "pooling can net one class's gain against another's loss):")
+        print(f"  {'class':10s}{'A only':>8s}{'B only':>8s}{'raw p':>9s}{'Holm p':>9s}  verdict")
+        order = sorted(per, key=lambda r: r[3])
+        running = 0.0
+        for i, (c, bx, cx, pv, n) in enumerate(order):
+            running = max(running, min(1.0, pv * (len(order) - i)))
+            v = (f"{a if bx > cx else b} better" if running < 0.05 else "no difference")
+            print(f"  {c:10s}{bx:>8d}{cx:>8d}{pv:>9.4f}{running:>9.4f}  {v}")
+        pa = {(r["class"], r["instance"]): r for r in rows if r["model"] == a}
+        pb = {(r["class"], r["instance"]): r for r in rows if r["model"] == b}
+        keys = [k for k in pa if k in pb
+                and pa[k]["outcome"] in ("pass", "fail") and pb[k]["outcome"] in ("pass", "fail")]
+        bb = sum(1 for k in keys if pa[k]["outcome"] == "pass" and pb[k]["outcome"] == "fail")
+        cc = sum(1 for k in keys if pa[k]["outcome"] == "fail" and pb[k]["outcome"] == "pass")
+        p = mcnemar(bb, cc)
+        print(f"\nPAIRED (n={len(keys)} instances both decided): {a} only={bb} · {b} only={cc} "
+              f"· McNemar exact p={p:.3f}")
+        ka = sum(1 for k in keys if pa[k]["outcome"] == "pass")
+        kb = sum(1 for k in keys if pb[k]["outcome"] == "pass")
+        la, ha = clopper_pearson(ka, len(keys))
+        lb, hb = clopper_pearson(kb, len(keys))
+        overlap = not (ha < lb or hb < la)
+        inc = spec.get("incumbent")
+        print(f"  {a}: {ka}/{len(keys)} [{la:.0%}-{ha:.0%}]   {b}: {kb}/{len(keys)} [{lb:.0%}-{hb:.0%}]")
+        if p >= 0.05 or overlap:
+            print(f"\n  VERDICT: KEEP INCUMBENT ({inc}) — "
+                  f"{'CIs overlap' if overlap else ''}{' and ' if overlap and p>=0.05 else ''}"
+                  f"{f'McNemar p={p:.3f} >= 0.05' if p >= 0.05 else ''}. "
+                  "The stopping rule was fixed before the run; a larger point estimate is not a win.")
+        else:
+            win = a if bb > cc else b
+            print(f"\n  VERDICT: {win} beats the other (McNemar p={p:.3f}, CIs disjoint).")
+
+    print("\ncost per DECIDED pass (the scarce resource on a flat subscription):")
+    for m in models:
+        g = [r for r in rows if r["model"] == m and r["outcome"] == "pass" and r.get("tok")]
+        allg = [r for r in rows if r["model"] == m and r["outcome"] in ("pass", "fail")]
+        tot = sum(r["tok"] for r in rows if r["model"] == m and r.get("tok"))
+        tt = sorted(r["ttft"] for r in rows if r["model"] == m and r.get("ttft"))
+        dt = [r["decode_tps"] for r in rows if r["model"] == m and r.get("decode_tps")]
+        print(f"  {m:24s} {tot/max(1,len(g)):8.0f} tok/pass · decode p50 "
+              f"{statistics.median(dt) if dt else 0:6.1f} tps · TTFT p50 "
+              f"{statistics.median(tt) if tt else 0:5.1f}s p95 {tt[int(len(tt)*.95)-1] if tt else 0:5.1f}s")
+    print("  (TTFT is reported separately: a stall shared by all arms is provider load, not a model)")
+    return 0
+
+
+def cmd_report(args):
+    spec = json.load(open(args.spec))
+    path = resolve_out(args, spec, writing=False)
+    if not os.path.exists(path) and not args.out and os.path.exists(LEGACY_OUT):
+        path = LEGACY_OUT          # rows recorded before the .results/ split
+    if not os.path.exists(path):
+        sys.stderr.write(f"no rows: {path} does not exist\n")
+        return 3
+    rows = [json.loads(l) for l in open(path)]
+    return report(rows, spec)
+
+
+def main():
+    p = argparse.ArgumentParser(description="Pre-registered, paired model routing eval")
+    p.add_argument("--spec", default=os.path.join(REPO, "knowledge", "model-eval-spec.json"))
+    p.add_argument("--out", help="override the row file (default: .results/model-eval/<spec_hash>.jsonl)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    for name in ("preregister",):
+        s = sub.add_parser(name)
+        s.add_argument("--models", required=True)
+        s.add_argument("--classes", default="digest,review,reason,extract")  # trace also available
+        s.add_argument("--n", type=int, default=20)
+        s.add_argument("--effort", default="low")
+        s.add_argument("--seed", default="2026-08-27")
+        s.add_argument("--incumbent", required=True)
+    sub.add_parser("golden")
+    r = sub.add_parser("run")
+    r.add_argument("--concurrency", type=int, default=3)
+    sub.add_parser("report")
+    args = p.parse_args()
+    return {"preregister": cmd_preregister, "golden": cmd_golden,
+            "run": cmd_run, "report": cmd_report}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

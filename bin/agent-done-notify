@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+"""Fail-open Telegram notifications for agent completion and input requests."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+from urllib.parse import quote
+
+
+# Fleet identity (notify target, relay, dashboard base, server hostname) lives
+# in ONE user-owned file — $CLAUDEMAXXING_FLEET_ENV, else
+# ~/.config/claudemaxxing/fleet.env — read once per process; an explicit process
+# env var of the same name ranks above it. There is no built-in tenant default:
+# an unconfigured machine notifies nobody and spawns no transport.
+_FLEET_CACHE: dict[str, str] | None = None
+STATE_DIR = Path.home() / ".config" / "claudemaxxing" / "agent-notify-state"
+ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+CONTROL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
+BLANK_LINES_RE = re.compile(r"\n[ \t]*\n(?:[ \t]*\n)+")
+CREDENTIAL_RES = (
+    re.compile(r"sk-[A-Za-z0-9_-]{8,}"),
+    re.compile(r"ghp_[A-Za-z0-9]{8,}"),
+    re.compile(r"AKIA[A-Z0-9]{12,}"),
+    re.compile(r"xox[a-z]-[A-Za-z0-9-]{8,}"),
+    re.compile(r"Bearer\s+[A-Za-z0-9._-]{8,}"),
+)
+
+
+def _agent_from_argv(argv: list[str]) -> str | None:
+    if not argv:
+        return "claude"
+    if len(argv) == 2 and argv[0] == "--agent" and argv[1] in {"claude", "codex", "opencode"}:
+        return argv[1]
+    return None
+
+
+def _clean(text: str) -> str:
+    text = ANSI_RE.sub("", text)
+    text = CONTROL_RE.sub("", text)
+    text = BLANK_LINES_RE.sub("\n\n", text)
+    for pattern in CREDENTIAL_RES:
+        text = pattern.sub("[redacted]", text)
+    return text.strip()
+
+
+def _bounded_message(first_line: str, summary: str = "", suffix: str = "") -> str:
+    clean_summary = _clean(summary)[:400]
+    message = first_line if not clean_summary else f"{first_line}\n{clean_summary}"
+    message = _clean(message)
+    if not suffix:
+        return message.encode("utf-8")[:600].decode("utf-8", errors="ignore")
+    body_limit = max(0, 600 - len(suffix.encode("utf-8")) - 1)
+    body = message.encode("utf-8")[:body_limit].decode("utf-8", errors="ignore")
+    return f"{body}\n{suffix}"
+
+
+def _fleet_env() -> dict[str, str]:
+    """Parse fleet.env once per process. KEY=VALUE lines, blank lines and `#`
+    comments, optional `export ` prefix and double quotes, no shell expansion.
+    Any read/parse failure degrades to "not configured" (an empty mapping)."""
+    global _FLEET_CACHE
+    if _FLEET_CACHE is not None:
+        return _FLEET_CACHE
+    values: dict[str, str] = {}
+    try:
+        override = os.environ.get("CLAUDEMAXXING_FLEET_ENV", "").strip()
+        path = Path(override) if override else Path.home() / ".config" / "claudemaxxing" / "fleet.env"
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].lstrip()
+            key, _, value = line.partition("=")
+            key, value = key.strip(), value.strip()
+            if len(value) >= 2 and value[0] == value[-1] == '"':
+                value = value[1:-1]
+            if key:
+                values[key] = value
+    except (OSError, UnicodeError, ValueError):
+        values = {}
+    _FLEET_CACHE = values
+    return values
+
+
+def _fleet(key: str) -> str:
+    """Per key: explicit process env var > fleet.env > "" (empty == not configured)."""
+    value = os.environ.get(key, "").strip()
+    return value or _fleet_env().get(key, "").strip()
+
+
+def _dashboard_base() -> str:
+    value = os.environ.get("DASHBOARD_URL", "").strip()
+    if not value:
+        path = Path.home() / ".config" / "claudemaxxing" / "dashboard-url"
+        try:
+            value = path.read_text(encoding="utf-8").splitlines()[0].strip()
+        except (OSError, IndexError, UnicodeError):
+            value = ""
+    value = (value or _fleet("CLAUDEMAXXING_DASHBOARD_URL")).rstrip("/")
+    return "" if value.lower() == "off" else value
+
+
+def _host_key() -> str:
+    try:
+        path = Path.home() / ".config" / "claudemaxxing" / "notify-host-key"
+        try:
+            value = path.read_text(encoding="utf-8").splitlines()[0].strip()
+        except (FileNotFoundError, IndexError):
+            value = ""
+        if value:
+            return value
+        hostname = socket.gethostname().lower().split(".", 1)[0]
+        server = _fleet("CLAUDEMAXXING_SERVER_HOSTNAME").lower().split(".", 1)[0]
+        return "local" if server and hostname == server else hostname
+    except (OSError, UnicodeError, ValueError):
+        return ""
+
+
+def _session_link(session: str) -> str:
+    base = _dashboard_base()
+    if not base:
+        return ""
+    if session:
+        host_key = _host_key()
+        if host_key:
+            return (
+                f"{base}/?tab=sessions&open="
+                f"{quote(host_key, safe='')}/{quote(session, safe='')}"
+            )
+    return f"{base}/?tab=sessions"
+
+
+def _claude_summary(transcript_path: object) -> str:
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return ""
+    try:
+        with open(transcript_path, "rb") as transcript:
+            transcript.seek(0, os.SEEK_END)
+            size = transcript.tell()
+            transcript.seek(max(0, size - 65536))
+            tail = transcript.read(65536).decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        return ""
+
+    summary = ""
+    for line in tail.splitlines():
+        try:
+            entry = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+            continue
+        message = entry.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        texts = [
+            block.get("text")
+            for block in content
+            if isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+        ]
+        if texts:
+            summary = "\n".join(texts)
+    return summary
+
+
+def _session_name() -> str:
+    """The tmux session this hook fired inside — the human-meaningful id
+    (claude-proyecto-2), not the opaque session_id. Fail-open outside tmux."""
+    if not os.environ.get("TMUX"):
+        return ""
+    tmux = shutil.which("tmux")
+    if not tmux:
+        return ""
+    try:
+        r = subprocess.run(
+            [tmux, "display-message", "-p", "#{session_name}"],
+            capture_output=True, text=True, timeout=2, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return r.stdout.strip()[:96] if r.returncode == 0 else ""
+
+
+def _target() -> str:
+    path = Path.home() / ".config" / "claudemaxxing" / "notify-target"
+    try:
+        first_line = path.read_text(encoding="utf-8").splitlines()[0].strip()
+    except (OSError, IndexError, UnicodeError):
+        first_line = ""
+    return first_line or _fleet("CLAUDEMAXXING_NOTIFY_TARGET")
+
+
+def _in_cooldown(session_id: object) -> bool:
+    if not isinstance(session_id, str) or not session_id:
+        return False
+    stamp = STATE_DIR / hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    now = time.time()
+    try:
+        previous = float(stamp.read_text(encoding="ascii").strip())
+        if 0 <= now - previous < 120:
+            return True
+    except (OSError, UnicodeError, ValueError):
+        pass
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(f"{now:.6f}\n", encoding="ascii")
+    except OSError:
+        pass
+    return False
+
+
+def _transport() -> tuple[list[str], str] | None:
+    target = _target()
+    if not target:
+        return None
+    hermes = shutil.which("hermes")
+    if hermes:
+        return [hermes, "send", "--to", target, "-q"], target
+    relay = _fleet("CLAUDEMAXXING_NOTIFY_RELAY")
+    if not relay:
+        return None
+    tailscale = shutil.which("tailscale")
+    if tailscale:
+        remote = f'"$HOME/.local/bin/hermes" send --to {shlex.quote(target)} -q'
+        return [tailscale, "ssh", relay, remote], target
+    return None
+
+
+def _send(message: str) -> None:
+    resolved = _transport()
+    if not resolved:
+        return
+    argv, _ = resolved
+    try:
+        subprocess.run(
+            argv,
+            input=message.encode("utf-8"),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def main(argv: list[str]) -> int:
+    agent = _agent_from_argv(argv)
+    if agent is None:
+        return 0
+    try:
+        raw = sys.stdin.buffer.read()
+        payload = json.loads(raw)
+    except (OSError, TypeError, ValueError):
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+
+    event = payload.get("hook_event_name")
+    cwd = payload.get("cwd")
+    project = os.path.basename(cwd.rstrip(os.sep)) if isinstance(cwd, str) else ""
+    project = project or "proyecto"
+    agent_name = {"opencode": "OpenCode"}.get(agent, agent.capitalize())
+    session = _session_name()
+    link = _session_link(session)
+    where = f"{project} · {session}" if session else project
+
+    if event == "Stop":
+        if agent in {"codex", "opencode"}:
+            # Both hosts hand the final text directly: Codex via its notify
+            # hook, OpenCode via the claudemaxxing-notify plugin (session.idle).
+            value = payload.get("last_assistant_message")
+            summary = value if isinstance(value, str) else ""
+        else:
+            summary = _claude_summary(payload.get("transcript_path"))
+        _send(_bounded_message(f"✅ {agent_name} terminó — {where}", summary, link))
+    elif event in {"Notification", "PermissionRequest", "PreToolUse"}:
+        if _in_cooldown(payload.get("session_id")):
+            return 0
+        value = payload.get("message")
+        reason = value if isinstance(value, str) and value else "permiso o pregunta pendiente"
+        _send(_bounded_message(f"⚠️ {agent_name} necesita input — {where}", reason, link))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    except Exception:
+        pass
+    raise SystemExit(0)

@@ -1,0 +1,7 @@
+{
+  "uuid": "cogload@claudemaxxing.local",
+  "name": "cogload window sampler",
+  "description": "Exposes the focused application's WM_CLASS-equivalent id and the open-window count over session D-Bus, so the cogload collector can measure app-switch rate under Wayland. Never exposes window titles.",
+  "shell-version": ["48", "49", "50"],
+  "session-modes": ["user"]
+}

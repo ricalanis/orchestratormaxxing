@@ -1,0 +1,4 @@
+interface:
+  display_name: "Self Improve"
+  short_description: "Help with Self Improve tasks"
+  default_prompt: "Use $claudemaxxing:self-improve to run one governed harness improvement round."

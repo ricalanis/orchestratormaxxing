@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Bounded command-line adapter for the orchestration practices core."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+
+
+TEXT_LIMIT = 4096
+CONTEXT_LIMIT = 1024 * 1024
+
+
+def fail(message: str) -> int:
+    print(f"orchestration-practice: {message}", file=sys.stderr)
+    return 1
+
+
+def emit(value: object) -> None:
+    print(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+
+
+def bounded_context(path_text: str) -> dict:
+    """Read one local JSON object, rejecting unsafe inputs before parsing."""
+    path = Path(path_text)
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise ValueError(f"cannot inspect context: {exc.strerror or exc}") from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise ValueError("context symlinks are refused")
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("context must be a regular file")
+    if info.st_size > CONTEXT_LIMIT:
+        raise ValueError(f"context exceeds {CONTEXT_LIMIT} bytes")
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as source:
+            data = source.read(CONTEXT_LIMIT + 1)
+    except OSError as exc:
+        raise ValueError(f"cannot read context: {exc.strerror or exc}") from exc
+    if len(data) > CONTEXT_LIMIT:
+        raise ValueError(f"context exceeds {CONTEXT_LIMIT} bytes")
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid context JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError("context JSON must be an object")
+    return value
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(prog="orchestration-practice")
+    commands = result.add_subparsers(dest="command", required=True)
+    for name in ("match", "evaluate"):
+        command = commands.add_parser(name)
+        command.add_argument("--host", required=True)
+        command.add_argument("--text", required=True)
+        command.add_argument("--json", action="store_true", required=True)
+        if name == "evaluate":
+            command.add_argument("--context", required=True)
+    catalog = commands.add_parser("catalog")
+    catalog.add_argument("--json", action="store_true", required=True)
+    return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    # This executable remains relocatable within a checkout/install tree.
+    repo_root = Path(__file__).resolve().parent.parent
+    installed_root = repo_root / "share" / "claudemaxxing"
+    sys.path.insert(0, str(repo_root if (repo_root / "orchestration_practices").is_dir()
+                           else installed_root))
+    import orchestration_practices as core
+
+    args = parser().parse_args(argv)
+    if args.command in {"match", "evaluate"} and len(args.text) > TEXT_LIMIT:
+        return fail(f"text exceeds {TEXT_LIMIT} characters")
+
+    try:
+        if args.command == "catalog":
+            catalog = core.load_catalog()
+            levels = sorted({item["level"] for item in catalog["practices"]})
+            emit({"levels": levels, "practice_count": len(catalog["practices"]), "schema_version": catalog["schema_version"]})
+            return 0
+        if args.command == "match":
+            result = core.match_practices(args.text, args.host)
+            emit(result)
+            return 0 if result["status"] == "matched" else 2
+        context = bounded_context(args.context)
+        result = core.evaluate(args.text, args.host, context)
+        emit(result)
+        return 0 if result["status"] == "ready" else (2 if result["status"] == "abstain" else 3)
+    except (ValueError, core.CatalogError) as exc:
+        return fail(str(exc))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

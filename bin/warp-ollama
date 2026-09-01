@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""warp-ollama — print the paste-ready config to point Warp's agent at Ollama Cloud.
+
+Warp's "Custom inference endpoint" (Settings → search "inference endpoint") takes a
+PUBLIC, OpenAI-compatible base URL + API key + model id(s), then surfaces those models
+in Warp's model picker. Ollama Cloud (https://ollama.com/v1) is exactly that — a public
+HTTPS, OpenAI-compatible endpoint — so Warp's agent can ride the SAME heavy frontier
+models the harness already uses, with NO tunnel. (Warp routes requests through its own
+servers and rejects localhost/private IPs — a local Ollama would need a tunnel; see
+knowledge/warp-ollama-provider.md.)
+
+This tool does NOT store or change anything. It reads the existing `ollama-cloud` key from
+OpenCode's auth store (the same single source of truth `oll` uses) and prints the values
+to paste into Warp. Full guide: knowledge/warp-ollama-provider.md.
+
+Usage:
+    warp-ollama            # print Base URL + API key + recommended models
+    warp-ollama --mask     # mask the key (safe for screen-sharing / pairing)
+    warp-ollama --json     # machine-readable
+"""
+import argparse, json, os, runpy, sys
+
+AUTH_JSON = os.path.expanduser("~/.local/share/opencode/auth.json")
+BASE_URL = "https://ollama.com/v1"
+
+# Recommended heavy-frontier models for Warp's agent (same doctrine as the worker pool:
+# no small/nano models). `oll-sync` keeps the live OpenCode catalog current; any id there
+# also works as a Warp model identifier.
+POLICY = runpy.run_path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "oll"))
+RECOMMENDED = list(POLICY["NORMAL_WORKER_MODELS"])
+
+
+def load_key():
+    try:
+        d = json.load(open(AUTH_JSON))
+    except Exception as e:
+        sys.exit(f"ERROR reading {AUTH_JSON}: {e}\n"
+                 "Run ./bootstrap.sh (or SETUP.md) to wire the Ollama Cloud key first.")
+    entry = d.get("ollama-cloud") or {}
+    key = entry.get("key") or entry.get("apiKey")
+    if not key:
+        sys.exit("ERROR: no 'ollama-cloud' key in OpenCode auth store "
+                 f"({AUTH_JSON}). Wire it via ./bootstrap.sh or SETUP.md.")
+    return key
+
+
+def mask(key):
+    return f"{key[:4]}…{key[-4:]}" if len(key) > 8 else "…"
+
+
+def main():
+    p = argparse.ArgumentParser(description="Paste-ready Warp ⇆ Ollama Cloud config")
+    p.add_argument("--mask", action="store_true", help="mask the API key (screen-share safe)")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    args = p.parse_args()
+
+    key = load_key()
+    shown = mask(key) if args.mask else key
+
+    if args.json:
+        print(json.dumps({"provider": "custom", "base_url": BASE_URL,
+                          "api_key": shown, "models": RECOMMENDED}, indent=2))
+        return
+
+    print("Warp ⇆ Ollama Cloud — custom inference endpoint")
+    print('Paste into Warp:  Settings → search "inference endpoint" → add endpoint\n')
+    print(f"  Base URL   {BASE_URL}")
+    print(f"  API key    {shown}")
+    print(f"  Model(s)   {', '.join(RECOMMENDED)}\n")
+    print("Notes:")
+    print("  • Public HTTPS endpoint → no tunnel needed (Warp routes through its servers).")
+    print("  • These models are billed by Ollama, not your Warp AI credits, when selected.")
+    print("  • Pick a model from Warp's model picker after saving to route through it.")
+    print("  • Full guide / local-Ollama (tunnel) path: knowledge/warp-ollama-provider.md")
+    if not args.mask:
+        sys.stderr.write("\n[the API key above is a secret — re-run with --mask when sharing your screen]\n")
+
+
+if __name__ == "__main__":
+    main()

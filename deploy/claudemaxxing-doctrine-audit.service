@@ -1,0 +1,21 @@
+# SOURCE OF TRUTH: repo template deploy/claudemaxxing-doctrine-audit.service. install.sh
+# substitutes __HOME__/__REPO__ and copies this to ~/.config/systemd/user/ (copy, NOT symlink).
+# Edit here, re-run ./install.sh, which reloads the unit IF the timer is already armed (arming
+# stays opt-in).
+#
+# The monthly doctrine-contradiction-audit SEEDER: enqueues at most one loop-queue item and exits.
+# It never invokes an agent — the round that eventually drains the queue does, under its own caps.
+# Paired with claudemaxxing-doctrine-audit.timer.
+[Unit]
+Description=claudemaxxing monthly doctrine contradiction audit (seeder only)
+
+[Service]
+Type=oneshot
+# The seeder writes one queue line and exits; a minute is generous. A short ceiling is itself a
+# cap — a seeder that hangs is a seeder that is doing something it was not supposed to do.
+TimeoutStartSec=60
+# Belt-and-braces with the wrapper's own `cd "$REPO"`: systemd --user would otherwise start this in
+# $HOME, where loop-queue falls back to cwd and writes its queue outside the repo, silently
+# (the 2026-08-10 stranded-queue incident). install.sh substitutes __REPO__.
+WorkingDirectory=__REPO__
+ExecStart=/bin/bash __HOME__/.config/claudemaxxing/claudemaxxing-doctrine-audit.sh

@@ -1,0 +1,549 @@
+#!/usr/bin/env python3
+"""zed-setup — add Ollama Cloud to Zed without replacing user settings.
+
+The default action additively merges the Ollama API URL into Zed's JSON
+settings. API keys remain in OpenCode's auth store and are only displayed by
+the explicit ``--key-hint`` action.
+
+Zed's settings.json is JSONC, so two write paths exist and neither reformats
+what it does not own: strict JSON is merged structurally (the only path that
+can insert a key), while a commented document has its owned *values* spliced in
+place by character span. A commented file needing an insertion is refused.
+
+Usage:
+    zed-setup             # merge the Ollama Cloud URL into Zed settings
+    zed-setup --check     # report through the exit status; never write
+    zed-setup --print     # print a paste-ready settings snippet
+    zed-setup --key-hint  # print the shared key and where to paste it
+"""
+import argparse
+import json
+import os
+import runpy
+import shutil
+import stat
+import sys
+import tempfile
+
+
+API_URL = "https://ollama.com"
+
+
+def settings_path():
+    return os.path.expanduser("~/.config/zed/settings.json")
+
+
+def auth_path():
+    return os.path.expanduser("~/.local/share/opencode/auth.json")
+
+
+def _policy():
+    policy_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "oll")
+    return runpy.run_path(policy_path)
+
+
+def recommended_models():
+    return list(_policy()["NORMAL_WORKER_MODELS"])
+
+
+def default_model():
+    """The harness's canonical default, from bin/oll — the same constant
+    `warp-model-pin` reads, so Zed and Warp cannot drift apart."""
+    return _policy()["DEFAULT_MODEL"]
+
+
+def load_key():
+    path = auth_path()
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception as exc:
+        sys.exit(
+            f"ERROR reading {path}: {exc}\n"
+            "Run ./bootstrap.sh (or SETUP.md) to wire the Ollama Cloud key first."
+        )
+    entry = data.get("ollama-cloud") or {}
+    key = entry.get("key") or entry.get("apiKey")
+    if not key:
+        sys.exit(
+            "ERROR: no 'ollama-cloud' key in OpenCode auth store "
+            f"({path}). Wire it via ./bootstrap.sh or SETUP.md."
+        )
+    return key
+
+
+def strip_comments(source):
+    """Replace JSONC comments with equal-length whitespace.
+
+    Offset-preserving by construction: every consumed character emits exactly
+    one replacement and newlines survive. That is what lets the write path
+    locate a value in the masked text and splice it back into the original
+    bytes at the same offsets, instead of re-serializing the document (which
+    would destroy every comment in it).
+    """
+    uncommented = []
+    index = 0
+    in_string = False
+    escaped = False
+    while index < len(source):
+        char = source[index]
+        following = source[index + 1] if index + 1 < len(source) else ""
+
+        if in_string:
+            uncommented.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+
+        if char == '"':
+            in_string = True
+            uncommented.append(char)
+            index += 1
+            continue
+        if char == "/" and following == "/":
+            uncommented.extend("  ")
+            index += 2
+            while index < len(source) and source[index] not in "\r\n":
+                uncommented.append(" ")
+                index += 1
+            continue
+        if char == "/" and following == "*":
+            uncommented.extend("  ")
+            index += 2
+            while index < len(source):
+                if index + 1 < len(source) and source[index:index + 2] == "*/":
+                    uncommented.extend("  ")
+                    index += 2
+                    break
+                uncommented.append(source[index] if source[index] in "\r\n" else " ")
+                index += 1
+            continue
+
+        uncommented.append(char)
+        index += 1
+
+    masked = "".join(uncommented)
+    if len(masked) != len(source):
+        raise ValueError("comment mask changed the document length")
+    return masked
+
+
+def drop_trailing_commas(clean):
+    """Delete commas that precede a closing brace/bracket. NOT offset-preserving
+    — only ever used to feed the stdlib parser, never to locate a span."""
+    result = []
+    index = 0
+    in_string = False
+    escaped = False
+    while index < len(clean):
+        char = clean[index]
+        if in_string:
+            result.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == ",":
+            lookahead = index + 1
+            while lookahead < len(clean) and clean[lookahead].isspace():
+                lookahead += 1
+            if lookahead < len(clean) and clean[lookahead] in "}]":
+                index += 1
+                continue
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
+def jsonc_to_json(source):
+    """Remove JSONC comments and trailing commas without touching strings."""
+    return drop_trailing_commas(strip_comments(source))
+
+
+def load_settings_for_check(path):
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.loads(jsonc_to_json(handle.read()))
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        print(f"ERROR: cannot parse {path} for checking: {exc}", file=sys.stderr)
+        return {}
+
+
+class _SpanScanner:
+    """Locate every string scalar in a JSONC document by its JSON path.
+
+    Hand-rolled on purpose: the stdlib decoder reports no offsets, and the write
+    path needs an exact character span so it can replace one value without
+    touching the bytes around it. Trailing commas are tolerated because Zed
+    accepts them. Input must be the offset-preserving mask from
+    ``strip_comments`` — spans are only meaningful against the original text.
+    """
+
+    WHITESPACE = " \t\r\n"
+
+    def __init__(self, text):
+        self.text = text
+        self.pos = 0
+        self.spans = {}
+
+    def scan(self):
+        self._space()
+        self._value(())
+        self._space()
+        if self.pos != len(self.text):
+            raise ValueError(f"trailing content at offset {self.pos}")
+        return self.spans
+
+    def _space(self):
+        while self.pos < len(self.text) and self.text[self.pos] in self.WHITESPACE:
+            self.pos += 1
+
+    def _peek(self):
+        if self.pos >= len(self.text):
+            raise ValueError("unexpected end of document")
+        return self.text[self.pos]
+
+    def _string(self):
+        """Consume one string, returning the span of its interior."""
+        if self._peek() != '"':
+            raise ValueError(f"expected a string at offset {self.pos}")
+        self.pos += 1
+        start = self.pos
+        while True:
+            if self.pos >= len(self.text):
+                raise ValueError("unterminated string")
+            char = self.text[self.pos]
+            if char == "\\":
+                self.pos += 2
+                continue
+            if char == '"':
+                end = self.pos
+                self.pos += 1
+                return start, end
+            self.pos += 1
+
+    def _value(self, path):
+        self._space()
+        char = self._peek()
+        if char == "{":
+            return self._object(path)
+        if char == "[":
+            return self._array(path)
+        if char == '"':
+            start, end = self._string()
+            self.spans[path] = (start, end)
+            return None
+        literal = self.pos
+        while self.pos < len(self.text) and self.text[self.pos] not in ",}]" + self.WHITESPACE:
+            self.pos += 1
+        if self.pos == literal:
+            raise ValueError(f"unparseable value at offset {self.pos}")
+        return None
+
+    def _object(self, path):
+        self.pos += 1
+        while True:
+            self._space()
+            char = self._peek()
+            if char == "}":
+                self.pos += 1
+                return None
+            if char == ",":
+                self.pos += 1
+                continue
+            start, end = self._string()
+            key = json.loads(self.text[start - 1:end + 1])
+            self._space()
+            if self._peek() != ":":
+                raise ValueError(f"expected ':' after key at offset {self.pos}")
+            self.pos += 1
+            self._value(path + (key,))
+
+    def _array(self, path):
+        self.pos += 1
+        index = 0
+        while True:
+            self._space()
+            char = self._peek()
+            if char == "]":
+                self.pos += 1
+                return None
+            if char == ",":
+                self.pos += 1
+                continue
+            self._value(path + (index,))
+            index += 1
+
+
+# A malformed document must REFUSE (exit 2), never traceback. The hand-rolled
+# scanner reaches for self.text[self.pos] on a truncated document (IndexError)
+# and recurses per nesting level (RecursionError); neither is a ValueError, so
+# catching only ValueError turned "input we cannot parse" into a crash. Named
+# once so both refusal sites in main() cannot drift apart.
+REFUSABLE = (ValueError, IndexError, RecursionError)
+
+
+def owned_targets():
+    """The three values zed-setup owns, and only these. Everything else in the
+    file belongs to the user."""
+    return [
+        (("language_models", "ollama", "api_url"), API_URL),
+        (("agent", "default_model", "provider"), "ollama"),
+        (("agent", "default_model", "model"), default_model()),
+    ]
+
+
+def plan_edits(source):
+    """``(edits, missing)`` for the owned keys.
+
+    ``edits`` are ``(start, end, replacement)`` spans into ``source``; ``missing``
+    are dotted paths that would have to be *inserted*, which a targeted splice
+    cannot do without reformatting — and so destroying — a commented document.
+    """
+    spans = _SpanScanner(strip_comments(source)).scan()
+    edits, missing = [], []
+    for path, value in owned_targets():
+        span = spans.get(path)
+        if span is None:
+            missing.append(".".join(path))
+            continue
+        start, end = span
+        replacement = json.dumps(value)[1:-1]
+        if source[start:end] != replacement:
+            edits.append((start, end, replacement))
+    return edits, missing
+
+
+def splice(source, edits):
+    """Apply spans back-to-front so earlier offsets stay valid."""
+    result = source
+    for start, end, replacement in sorted(edits, reverse=True):
+        result = result[:start] + replacement + result[end:]
+    return result
+
+
+def comment_text(text):
+    """The document's comment characters — exactly the positions where the mask
+    differs from the source."""
+    return "".join(a for a, b in zip(text, strip_comments(text)) if a != b)
+
+
+def verify_splice(source, result):
+    """Refuse anything the splice touched beyond the owned values.
+
+    Independent of how the edit was computed: re-read both documents and require
+    that the result parses, matches the owned targets, is otherwise the same
+    document, and kept every comment character. A mis-targeted span (the obvious
+    failure mode — ``agent.favorite_models[*].model`` carries the same tag) fails
+    here rather than reaching the user's disk.
+    """
+    before = json.loads(jsonc_to_json(source))
+    after = json.loads(jsonc_to_json(result))
+    expected = json.loads(json.dumps(before))
+    for path, value in owned_targets():
+        node = expected
+        for key in path[:-1]:
+            node = node[key]
+        node[path[-1]] = value
+    if after != expected:
+        raise ValueError("the edit changed a value outside the owned keys")
+    if comment_text(source) != comment_text(result):
+        raise ValueError("the edit altered the document's comments")
+
+
+def configured(data):
+    try:
+        if data["language_models"]["ollama"]["api_url"] != API_URL:
+            return False
+    except (KeyError, TypeError):
+        return False
+    try:
+        dm = data["agent"]["default_model"]
+        return dm.get("provider") == "ollama" and dm.get("model") == default_model()
+    except (KeyError, TypeError, AttributeError):
+        return False
+
+
+def merge_url(data):
+    language_models = data.get("language_models")
+    if not isinstance(language_models, dict):
+        language_models = {}
+        data["language_models"] = language_models
+
+    ollama = language_models.get("ollama")
+    if not isinstance(ollama, dict):
+        ollama = {}
+        language_models["ollama"] = ollama
+
+    ollama["api_url"] = API_URL
+
+    # Point the agent at the harness default too. Zed takes a bare model tag and
+    # its settings.json is user-owned, so unlike Warp this needs no reconciler —
+    # writing it once holds across updates. Additive: any other `agent` key the
+    # user set survives untouched.
+    agent = data.get("agent")
+    if not isinstance(agent, dict):
+        agent = {}
+        data["agent"] = agent
+    existing = agent.get("default_model")
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    merged["provider"] = "ollama"
+    merged["model"] = default_model()
+    agent["default_model"] = merged
+
+
+def atomic_write(path, data):
+    atomic_write_text(path, json.dumps(data, indent=2) + "\n")
+
+
+def atomic_write_text(path, text):
+    directory = os.path.dirname(path)
+    previous_mode = None
+    try:
+        previous_mode = stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        pass
+
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=directory, delete=False
+        ) as handle:
+            temp_path = handle.name
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if previous_mode is not None:
+            os.chmod(temp_path, previous_mode)
+        os.replace(temp_path, path)
+    except Exception:
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
+        raise
+
+
+def print_snippet():
+    snippet = {"language_models": {"ollama": {"api_url": API_URL}}}
+    print("Paste into Zed settings.json:")
+    print(json.dumps(snippet, indent=2))
+    print(f"Suggested favorite models: {', '.join(recommended_models())}")
+
+
+def print_key_hint():
+    print(load_key())
+    print("Paste it in Zed Agent Panel -> LLM Providers -> Ollama.")
+    print("Alternatively, export OLLAMA_API_KEY.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Configure Zed for Ollama Cloud")
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument("--check", action="store_true", help="check configuration without writing")
+    actions.add_argument("--print", dest="print_config", action="store_true",
+                         help="print a paste-ready settings block")
+    actions.add_argument("--key-hint", action="store_true",
+                         help="print the shared Ollama Cloud key and instructions")
+    args = parser.parse_args()
+
+    if args.print_config:
+        print_snippet()
+        return 0
+    if args.key_hint:
+        print_key_hint()
+        return 0
+
+    path = settings_path()
+    if args.check:
+        return 0 if configured(load_settings_for_check(path)) else 1
+
+    directory = os.path.dirname(path)
+    if not os.path.isdir(directory) and shutil.which("zed") is None:
+        return 0
+    os.makedirs(directory, exist_ok=True)
+
+    if not os.path.exists(path):
+        data = {}
+        merge_url(data)
+        atomic_write(path, data)
+        return 0
+
+    with open(path, encoding="utf-8") as handle:
+        source = handle.read()
+
+    try:
+        data = json.loads(source)
+    except REFUSABLE:
+        # REFUSABLE, not ValueError: json.loads raises RecursionError on deeply
+        # nested input, and on some interpreters (Xcode's 3.9, which is what a
+        # minimal /usr/bin:/bin PATH resolves to) that comes from json's own
+        # scanner rather than from our JSONC pass. Catching only ValueError let
+        # it escape as a traceback (exit 1) instead of the refusal below --
+        # the same class of miss REFUSABLE was introduced to close.
+        data = None
+    else:
+        if not isinstance(data, dict):
+            print(
+                f"ERROR: cannot safely parse {path}: "
+                "top-level settings value is not an object",
+                file=sys.stderr,
+            )
+            return 2
+        # Strict JSON has no comments to lose, so the structural merge stays.
+        # It is also the only path that can INSERT a missing key.
+        if configured(data):
+            return 0
+        merge_url(data)
+        atomic_write(path, data)
+        return 0
+
+    # Commented / trailing-comma settings — Zed's own default shape, and the
+    # Mac's live file. Re-serializing would destroy the comments, so edit the
+    # owned values in place by character span, or refuse. lq-95d9477d: refusing
+    # every commented file left Zed pinned to a retired model with no way to fix
+    # it, defeating the point of Zed and Warp reading one DEFAULT_MODEL constant.
+    try:
+        edits, missing = plan_edits(source)
+    except REFUSABLE as exc:
+        print(f"ERROR: cannot safely parse {path}: {exc}", file=sys.stderr)
+        return 2
+    if missing:
+        print(
+            f"ERROR: cannot safely update {path}: it is a commented (JSONC) file, "
+            f"so these keys would have to be inserted: {', '.join(missing)}. "
+            "Replacing a value in place keeps your comments; inserting a key does "
+            "not. Run `zed-setup --print` and paste the block in yourself.",
+            file=sys.stderr,
+        )
+        return 2
+    if not edits:
+        return 0
+    result = splice(source, edits)
+    try:
+        verify_splice(source, result)
+    except REFUSABLE as exc:
+        print(f"ERROR: refusing to write {path}: {exc}", file=sys.stderr)
+        return 2
+    atomic_write_text(path, result)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

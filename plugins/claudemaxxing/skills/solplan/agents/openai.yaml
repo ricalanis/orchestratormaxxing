@@ -1,0 +1,4 @@
+interface:
+  display_name: "Solplan"
+  short_description: "Plan before fanout with Sol Ultra"
+  default_prompt: "Use $claudemaxxing:solplan to plan nontrivial unplanned work before considering $claudemaxxing:fanout."

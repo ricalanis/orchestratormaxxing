@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+"""model-catalog — the harness's machine-readable facts about its own models.
+
+Selection policy in this harness was running on prose, and prose drifted twice:
+
+  * `bin/oll-sync::ctx_for()` GUESSED context by family prefix, so
+    `deepseek-v4-pro:0813` (really 1M) was registered in OpenCode at 200K and
+    `glm-5.2` (really 976K) at 200K — lq-17b20b52.
+  * Commit a7e7a7b9 made `deepseek-v4-pro:0813` the routine-fanout default
+    describing it as "medium usage" when the provider publishes
+    "Extra High Usage" — lq-faefaa8c. That silently overrode a written rule
+    ("never routine fanout") that nothing mechanical was enforcing.
+
+Both are the same failure: a model FACT that nothing measured. This tool reads
+the facts the provider publishes and caches them, so `oll-sync` stops guessing
+and a usage-class ceiling becomes something `harness-verify` can enforce.
+
+The one invariant: **an unknown fact stays UNKNOWN.** A guess that is silently
+wrong is worse than an absence that is loudly right — that is exactly how a 1M
+model got a 200K window and nobody noticed for weeks.
+
+Verbs
+  refresh   probe the live catalog + each model's published facts, write cache
+  show      read the cache (never network)
+  limits    print `context output` for one model, for oll-sync to consume
+  check     gate: cache exists, parses, and covers every live catalog id
+
+Exit codes: 0 ok · 1 error · 2 cache missing/stale · 3 incomplete coverage
+"""
+import argparse
+import json
+import os
+import re
+import ssl
+import sys
+import time
+import urllib.error
+import urllib.request
+
+AUTH_JSON = os.path.expanduser("~/.local/share/opencode/auth.json")
+MODELS_URL = "https://ollama.com/v1/models"
+LIBRARY_URL = "https://ollama.com/library/{name}"
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(HERE)
+DEFAULT_CACHE = os.path.join(REPO, "knowledge", "model-catalog.json")
+
+# Ordered cheapest → most expensive. The ORDER is the point: it is what makes a
+# policy ceiling ("the volume default must not exceed Medium") expressible as a
+# comparison instead of a code review.
+USAGE_ORDER = ("Low Usage", "Medium Usage", "High Usage", "Extra High Usage")
+
+# Output caps are NOT published on the library rows. We record None rather than
+# invent one; callers apply their own documented default. Recording a guess here
+# would recreate ctx_for's bug in a new file.
+OUTPUT_UNKNOWN = None
+
+_ROW_RE = re.compile(
+    r'href="/library/(?P<href>[^"]+)"[^>]*>\s*'
+    r'<span[^>]*>\s*<p[^>]*>(?P<name>[^<]+)</p>'
+    r'.*?<p class="flex text-neutral-500">(?P<facts>[^<]+)</p>',
+    re.S,
+)
+_CTX_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*([KM])\s+context window", re.I)
+_SIZE_RE = re.compile(r"^[0-9.]+(?:GB|MB|TB)$", re.I)
+
+
+def usage_rank(label):
+    """Position of a usage label in USAGE_ORDER, or None if unrankable.
+
+    None for an unknown label is deliberate: ranking it as 0 would let an
+    unmeasured model slip under a ceiling it was never compared against.
+    """
+    try:
+        return USAGE_ORDER.index(label)
+    except (ValueError, TypeError):
+        return None
+
+
+def parse_context(text):
+    """'1M context window' -> 1000000. Returns None when absent — never a default."""
+    m = _CTX_RE.search(text or "")
+    if not m:
+        return None
+    value, unit = float(m.group(1)), m.group(2).upper()
+    return int(value * (1_000_000 if unit == "M" else 1_000))
+
+
+def parse_rows(html):
+    """Map every tag row on a library page to its published facts.
+
+    A cloud row reads 'Extra High Usage · 1M context window · Text · 1 week ago';
+    a local row reads '6.6GB · 256K context window · ...'. Discriminating on that
+    first field is load-bearing — a 6.6GB laptop build must never be read as the
+    policy for a 397B cloud worker.
+    """
+    rows = {}
+    for m in _ROW_RE.finditer(html or ""):
+        parts = [p.strip() for p in m.group("facts").split("·")]
+        head = parts[0] if parts else ""
+        is_size = bool(_SIZE_RE.match(head))
+        modalities = []
+        for p in parts[1:]:
+            if "context window" in p or re.search(r"\bago\b", p):
+                continue
+            modalities = [x.strip() for x in p.split(",") if x.strip()]
+            break
+        rows[m.group("name").strip()] = {
+            "usage_label": None if is_size else (head if head in USAGE_ORDER else None),
+            "size": head if is_size else None,
+            "context": parse_context(m.group("facts")),
+            "modalities": modalities,
+            "raw": m.group("facts").strip(),
+        }
+    return rows
+
+
+def row_name_for(model_id):
+    """Catalog id -> library row name. 'glm-5.2' -> 'glm-5.2:cloud';
+    'qwen3.5:397b' -> 'qwen3.5:397b-cloud'."""
+    return f"{model_id}-cloud" if ":" in model_id else f"{model_id}:cloud"
+
+
+def library_slug(model_id):
+    """Catalog id -> library page slug (the part before any tag)."""
+    return model_id.split(":", 1)[0]
+
+
+def facts_from_page(model_id, rows):
+    """Facts for one id, or None. None means UNKNOWN and must stay unknown."""
+    row = rows.get(row_name_for(model_id))
+    if not row or row.get("usage_label") is None or row.get("context") is None:
+        return None
+    return {
+        "usage_label": row["usage_label"],
+        "usage_rank": usage_rank(row["usage_label"]),
+        "context": row["context"],
+        "output": OUTPUT_UNKNOWN,
+        "modalities": row["modalities"],
+        "vision": any(m.lower() in ("image", "video") for m in row["modalities"]),
+    }
+
+
+# ------------------------------------------------------------------ transport
+def ssl_ctx():
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
+def load_key():
+    try:
+        entry = json.load(open(AUTH_JSON)).get("ollama-cloud") or {}
+    except Exception as ex:
+        sys.exit(f"ERROR reading {AUTH_JSON}: {ex}")
+    key = entry.get("key") or entry.get("apiKey")
+    if not key:
+        sys.exit("ERROR: no 'ollama-cloud' key in OpenCode auth store")
+    return key
+
+
+def fetch(url, key=None):
+    headers = {"User-Agent": "claudemaxxing-model-catalog"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=60, context=ssl_ctx()) as r:
+        return r.read().decode("utf-8", "replace")
+
+
+def live_model_ids(key):
+    data = json.loads(fetch(MODELS_URL, key))
+    return sorted(m["id"] for m in data.get("data", []))
+
+
+# --------------------------------------------------------------------- verbs
+def cmd_refresh(args):
+    key = load_key()
+    ids = live_model_ids(key)
+    pages, models, unknown = {}, {}, []
+    for mid in ids:
+        slug = library_slug(mid)
+        if slug not in pages:
+            try:
+                pages[slug] = parse_rows(fetch(LIBRARY_URL.format(name=slug)))
+            except urllib.error.URLError as ex:
+                sys.stderr.write(f"  ! {slug}: fetch failed ({ex.reason})\n")
+                pages[slug] = {}
+        facts = facts_from_page(mid, pages[slug])
+        if facts is None:
+            unknown.append(mid)
+            sys.stderr.write(f"  ? {mid}: no published row — recorded UNKNOWN\n")
+        else:
+            models[mid] = facts
+    payload = {
+        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "source": "ollama.com/library (published rows)",
+        "live_ids": ids,
+        "unknown": unknown,
+        "models": models,
+    }
+    os.makedirs(os.path.dirname(args.cache), exist_ok=True)
+    tmp = args.cache + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(payload, f, indent=1, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, args.cache)
+    print(f"catalog: {len(models)}/{len(ids)} models resolved -> {args.cache}")
+    if unknown:
+        print("UNKNOWN (recorded as such, never guessed): " + ", ".join(unknown))
+        return 3
+    return 0
+
+
+def load_cache(path):
+    try:
+        return json.load(open(path))
+    except FileNotFoundError:
+        sys.stderr.write(f"ERROR: no catalog cache at {path}; run `model-catalog refresh`\n")
+        return None
+    except Exception as ex:
+        sys.stderr.write(f"ERROR: catalog cache unreadable ({ex}); run `model-catalog refresh`\n")
+        return None
+
+
+def cmd_show(args):
+    cache = load_cache(args.cache)
+    if cache is None:
+        return 2
+    models = cache["models"]
+    if args.model:
+        if args.model not in models:
+            sys.stderr.write(f"UNKNOWN: {args.model} has no published facts in the cache\n")
+            return 3
+        models = {args.model: models[args.model]}
+    if args.json:
+        print(json.dumps(models, indent=1, sort_keys=True))
+        return 0
+    print(f"# catalog fetched {cache.get('fetched_at','?')}")
+    print(f"{'model':26s}{'usage':>18s}{'context':>10s}  modalities")
+    for mid in sorted(models, key=lambda m: (models[m]["usage_rank"], m)):
+        f = models[mid]
+        print(f"{mid:26s}{f['usage_label']:>18s}{f['context']:>10,}  "
+              f"{', '.join(f['modalities']) or '-'}")
+    if cache.get("unknown"):
+        print("\nUNKNOWN (no published row): " + ", ".join(cache["unknown"]))
+    return 0
+
+
+def cmd_limits(args):
+    cache = load_cache(args.cache)
+    if cache is None:
+        return 2
+    facts = cache["models"].get(args.model)
+    if not facts:
+        sys.stderr.write(f"UNKNOWN: {args.model} has no published facts\n")
+        return 3
+    print(f"{facts['context']} {facts['output'] if facts['output'] else ''}".strip())
+    return 0
+
+
+def cmd_check(args):
+    cache = load_cache(args.cache)
+    if cache is None:
+        return 2
+    missing = [m for m in cache.get("live_ids", []) if m not in cache["models"]]
+    if missing:
+        sys.stderr.write("catalog does not cover: " + ", ".join(missing) + "\n")
+        return 3
+    print(f"catalog ok: {len(cache['models'])} models, fetched {cache.get('fetched_at','?')}")
+    return 0
+
+
+def main():
+    # --cache is accepted on BOTH sides of the verb: callers write it either way
+    # and an arg-order technicality must not be the reason a gate cannot run.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--cache", default=DEFAULT_CACHE)
+    p = argparse.ArgumentParser(
+        description="Published facts about the Ollama Cloud model pool",
+        parents=[common])
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("refresh", parents=[common])
+    s = sub.add_parser("show", parents=[common])
+    s.add_argument("--model")
+    s.add_argument("--json", action="store_true")
+    s = sub.add_parser("limits", parents=[common])
+    s.add_argument("model")
+    sub.add_parser("check", parents=[common])
+    args = p.parse_args()
+    return {"refresh": cmd_refresh, "show": cmd_show,
+            "limits": cmd_limits, "check": cmd_check}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

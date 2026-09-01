@@ -1,0 +1,526 @@
+#!/usr/bin/env python3
+"""
+oll — one-shot worker call to an Ollama Cloud model (OpenAI-compatible).
+
+The "worker" primitive for the orchestrator pattern: Claude (the orchestrator)
+delegates a well-scoped task to a cheap/strong Ollama Cloud model via this CLI,
+keeping Opus budget and rate limits for orchestration + verification.
+
+Usage:
+    bin/oll "summarize this" --model gpt-oss:120b
+    cat file.py | bin/oll "review for bugs" --model glm-5.3
+    bin/oll "summarize this"
+    bin/oll "design the architecture" --reasoning
+
+Reads the key from OpenCode's auth store (~/.local/share/opencode/auth.json,
+provider "ollama-cloud") — single source of truth, no secret here.
+"""
+import argparse, json, math, os, select, ssl, sys, urllib.request, urllib.error
+
+AUTH_JSON = os.path.expanduser("~/.local/share/opencode/auth.json")
+URL = "https://ollama.com/v1/chat/completions"
+DEFAULT_MODEL = "deepseek-v4-flash:0731"
+REASONING_MODEL = "glm-5.3"
+NORMAL_WORKER_MODELS = (
+    "deepseek-v4-flash:0731",
+    "glm-5.3",
+    "kimi-k3",
+    "kimi-k2.7-code",
+    "qwen3.5:397b",
+)
+# One topology-independent matrix for workspace-capable OpenCode sessions.
+# `oll` remains response-only; `o delegate --profile ...` consumes this policy
+# and supplies the tools, persistence, contract gate, and closeable lifecycle.
+STATEFUL_ROUTES = {
+    "volume": {"agent": "deepseekv4-coder", "model": "deepseek-v4-flash:0731"},
+    "reasoning": {"agent": "glm-coder", "model": "glm-5.3"},
+    "bounded-code": {"agent": "kimi-coder", "model": "kimi-k2.7-code"},
+    "long-horizon": {"agent": "kimi-k3-coder", "model": "kimi-k3"},
+    "general": {"agent": "qwen-coder", "model": "qwen3.5:397b"},
+    "long-context": {"agent": "minimax-coder", "model": "minimax-m3"},
+    "planning": {"agent": "kimiplan", "model": "kimi-k3"},
+}
+STATEFUL_AGENT_ALIASES = {"oplanner": "kimiplan"}
+
+# Usage-class ceiling per role — the mechanical form of a rule this harness had
+# only in prose, and lost. knowledge/opencode-first-class-2026-08-11.md recorded
+# that deepseek-v4-pro "is included but Extra-High usage -> reserved for
+# low-volume reasoning (the oplanner), never routine fanout". Eight days later
+# commit a7e7a7b9 made it the routine-fanout default, describing it as "medium
+# usage" — a wrong label that no check could contradict, so the pool billed at
+# the top tier for a week (lq-faefaa8c).
+#
+# A ceiling is not a preference. Roles that run on every task pay their class
+# thousands of times; roles selected for capability pay it rarely, so they may
+# cost more. Facts come from bin/model-catalog (what the provider publishes),
+# never from a constant typed here — that is the mistake being corrected.
+ROLE_USAGE_CEILING = {
+    "volume":        "Medium Usage",      # every fanout chunk, the bare `oll` default
+    "general":       "Medium Usage",      # bulk work
+    "bounded-code":  "High Usage",        # per-chunk, code-specialised
+    "reasoning":     "High Usage",        # explicit escalation only
+    "long-context":  "High Usage",        # selected by context need
+    "long-horizon":  "Extra High Usage",  # capability-selected, deliberately rare
+    "planning":      "Extra High Usage",  # one read-only call per plan
+}
+USAGE_ORDER = ("Low Usage", "Medium Usage", "High Usage", "Extra High Usage")
+
+
+def usage_rank(label):
+    """Rank in USAGE_ORDER, or None when unrankable.
+
+    None rather than 0 for an unknown label: ranking an unmeasured model as the
+    cheapest would let it slip under a ceiling it was never compared against —
+    the same silent-default failure the ceiling exists to prevent.
+    """
+    try:
+        return USAGE_ORDER.index(label)
+    except (ValueError, TypeError):
+        return None
+
+
+def usage_policy_violations(catalog, default_model=None):
+    """Roles whose model exceeds its usage ceiling, worst first.
+
+    `catalog` is bin/model-catalog's cache. A model the catalog does not cover is
+    reported as `unknown`, never as compliant — silence about a fact is not
+    evidence the fact is fine.
+    """
+    models = (catalog or {}).get("models", {})
+    checks = [(role, row["model"]) for role, row in STATEFUL_ROUTES.items()]
+    checks.append(("volume", default_model or DEFAULT_MODEL))  # the bare `oll` default
+    out = []
+    seen = set()
+    for role, model in checks:
+        if (role, model) in seen:
+            continue
+        seen.add((role, model))
+        ceiling = ROLE_USAGE_CEILING.get(role)
+        if ceiling is None:
+            continue
+        facts = models.get(model)
+        label = (facts or {}).get("usage_label")
+        rank, cap = usage_rank(label), usage_rank(ceiling)
+        if rank is None:
+            out.append({"role": role, "model": model, "usage_label": label,
+                        "ceiling": ceiling, "status": "unknown"})
+        elif rank > cap:
+            out.append({"role": role, "model": model, "usage_label": label,
+                        "ceiling": ceiling, "status": "over", "excess": rank - cap})
+    return sorted(out, key=lambda v: (-v.get("excess", 0), v["role"]))
+
+
+def load_model_catalog(path=None):
+    """Read bin/model-catalog's cache; None when absent (callers must not guess)."""
+    path = path or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "knowledge", "model-catalog.json")
+    try:
+        return json.load(open(path))
+    except Exception:
+        return None
+
+
+LEGACY_MODEL_REPLACEMENTS = {
+    "glm-4.7": "glm-5.3",
+    "glm-5": "glm-5.3",
+    "glm-5.1": "glm-5.3",
+    "glm-5.2": "glm-5.3",
+    "kimi-k2.5": "kimi-k2.7-code",
+    "kimi-k2.6": "kimi-k2.7-code",
+    "kimi-k2-thinking": "kimi-k2.7-code",
+    "qwen3-coder-next": "qwen3.5:397b",
+    "qwen3-coder:480b": "qwen3.5:397b",
+    "qwen3-vl:235b": "qwen3.5:397b",
+}
+
+
+# The provider's ACTUAL accepted set, quoted from its own 400:
+#   invalid reasoning value: 'minimal' (must be "high", "medium", "low", "max", or "none")
+# It was briefly the union of the three vendors' *documented* vocabularies, which
+# included OpenAI's "minimal" — so `--effort minimal` passed validation here and
+# then died at the provider with HTTP 400 (measured 2026-08-27). A validator that
+# accepts a value the provider rejects is worse than no validator: it moves the
+# failure from argument-parse time to mid-flight, which is exactly what this
+# closed set exists to prevent. Verify against a live 400 before adding a value.
+# (`{"think": false}` is the sibling trap: the provider accepts and IGNORES it.)
+REASONING_EFFORTS = ("none", "low", "medium", "high", "max")
+
+
+def normalize_effort(value, source="--effort"):
+    """Return a canonical effort string, or None for 'unset'. Pure — no I/O.
+
+    Unset and invalid are deliberately different outcomes: unset leaves the
+    provider default alone, invalid raises. Silently dropping a typo would let
+    a whole fanout run unbounded while its command line claims otherwise.
+    """
+    if value is None:
+        return None
+    text = value.strip().lower()
+    if not text:
+        return None
+    if text not in REASONING_EFFORTS:
+        raise ValueError(
+            f"invalid {source} {value!r}; choose from " + ", ".join(REASONING_EFFORTS)
+        )
+    return text
+
+
+# Measured per-MODEL default reasoning effort (lq-956ab278). The 2026-08-27
+# sweep (knowledge/model-usage-policy-2026-08-26.md, 2 reps/cell on the Hermes
+# citation gate) proved the effort dial is a MODEL property, not a global:
+# deepseek-v4-flash:0731 is INVERTED (low is its most expensive level at
+# 1570-2360t; none its cheapest at 215t, still 2/2 correct), glm-5.3-flash is
+# cheapest at low (179t) and BREAKS at none (0/2 — it stops segregating
+# reasoning from the answer, destroying any shape contract), glm-5.2 is
+# cheapest at none (146t). Only swept models appear here; an unmeasured model
+# gets NO default — facts come from measurement, never typed constants (same
+# rule as ROLE_USAGE_CEILING). One task-class so far: for genuinely deep work
+# raise it per call with --effort. To measure the unset baseline on a covered
+# model, pass --effort default. glm-5.3 swept 2026-08-30 (same shape-contract
+# protocol, 2 reps/level, cap 400): none 209-303t and 0/2 shape (reasoning
+# lands in content, like flash), low 27-29t 2/2, unset 92-268t 2/2 — low is
+# cheapest and clean, so it carries the same "low" as flash.
+MODEL_EFFORT_POLICY = {
+    "deepseek-v4-flash:0731": "none",
+    "glm-5.3": "low",
+    "glm-5.3-flash": "low",
+    "glm-5.2": "none",
+}
+EFFORT_PROVIDER_DEFAULT = "default"  # CLI/env token; never sent on the wire
+
+
+def resolve_effort(explicit=None, env=None, model=None):
+    """ONE definition of effort precedence: --effort > OLL_REASONING_EFFORT >
+    measured model policy > unset. Pure — no I/O.
+
+    The token 'default' at either explicit layer forces the provider default
+    (key absent), so the unset baseline stays measurable on a policy-covered
+    model. Empty/None means 'not provided' and falls through; a provided but
+    invalid value raises even when policy could cover the model — an env typo
+    must never silently fall back while the command line claims the budget
+    was bounded.
+    """
+    for source, value in (("--effort", explicit), ("OLL_REASONING_EFFORT", env)):
+        if value is None or not value.strip():
+            continue
+        if value.strip().lower() == EFFORT_PROVIDER_DEFAULT:
+            return None
+        return normalize_effort(value, source=source)
+    return MODEL_EFFORT_POLICY.get(model)
+
+
+def build_payload(*, model, system, user, max_tokens, temperature, effort=None):
+    """Build the chat-completions body. Pure — no auth, no network.
+
+    `reasoning_effort` is OMITTED when unset, never sent as null: this call is
+    the default path for every worker in the harness, so an opt-in control must
+    leave the existing wire format byte-identical when nobody opts in.
+    """
+    payload = {
+        "model": model,
+        "messages": [{"role": "system", "content": system},
+                     {"role": "user", "content": user}],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": False,
+    }
+    if effort is not None:
+        payload["reasoning_effort"] = effort
+    return payload
+
+
+def model_policy_error(model, allow_legacy=False):
+    """Return an actionable error for superseded normal-worker models."""
+    replacement = LEGACY_MODEL_REPLACEMENTS.get(model)
+    if replacement and not allow_legacy:
+        return (
+            f"model {model!r} is legacy for normal fanout; use {replacement!r}, "
+            "or pass --allow-legacy-model for an intentional historical benchmark"
+        )
+    return None
+
+
+def resolve_stateful_route(profile):
+    """Return a copy of one canonical stateful route, or raise KeyError."""
+    row = STATEFUL_ROUTES[profile]
+    return {"profile": profile, "agent": row["agent"], "model": row["model"]}
+
+
+def resolve_stateful_agent(agent):
+    """Resolve a harness-owned agent to its canonical profile and model."""
+    canonical = STATEFUL_AGENT_ALIASES.get(agent, agent)
+    for profile, row in STATEFUL_ROUTES.items():
+        if row["agent"] == canonical:
+            return {"profile": profile, "agent": canonical, "model": row["model"]}
+    raise KeyError(agent)
+
+
+def select_model(model=None, reasoning=False):
+    """Resolve the explicit routing policy without inspecting prompt content."""
+    return REASONING_MODEL if reasoning else (model or DEFAULT_MODEL)
+
+
+def estimate_input_tokens(text, divisor=3):
+    """Stateless char-based estimate: ceil(len(text)/divisor). Pure — no I/O."""
+    return math.ceil(len(text) / divisor)
+
+
+def input_limit():
+    """Max estimated input tokens before we reject. Env-tunable; default 50000."""
+    try:
+        return int(os.environ.get("OLL_MAX_ESTIMATED_INPUT_TOKENS", "50000"))
+    except ValueError:
+        return 50000
+
+
+def stdin_first_byte_timeout():
+    """Seconds to wait for stdin's FIRST byte before failing loud; default 30.
+
+    Unparsable or non-positive values fall back to the default rather than
+    raising or firing instantly: a zero would race any normal `producer | oll`
+    pipeline whose first write hasn't landed yet, and fail-safe for a hang
+    guard means "stays armed", never "fires on everything".
+    """
+    try:
+        value = float(os.environ.get("OLL_STDIN_FIRST_BYTE_TIMEOUT", "30"))
+    except (TypeError, ValueError):
+        return 30.0
+    return value if value > 0 else 30.0
+
+
+def read_stdin_all_bounded(timeout):
+    """Read non-tty stdin to EOF, but bound the wait for the FIRST byte.
+
+    An inherited stdin that is open but never written (a session manager's fd,
+    a FIFO with an idle writer) made the old bare read() block FOREVER; the
+    caller's external timeout then killed the process with zero stdout and
+    zero stderr — a dead-provider signature that got misfiled as "large argv
+    prompts hang the lane" (lq-e1fa0a69; argv and stdin build an identical
+    payload, so this read was the only code that could differ). select()
+    bounds only the first byte: a producer that stalls MID-stream can still
+    block the read, which is the caller's own pipeline to manage.
+    Raises TimeoutError when the stream stays open and silent past `timeout`.
+    """
+    try:
+        fd = sys.stdin.fileno()
+    except (OSError, ValueError):
+        # An in-process stdin (a contract's StringIO) has no fd to watch and
+        # cannot exhibit the OS-level silent-open-pipe hang — read it plain.
+        return sys.stdin.read()
+    ready, _, _ = select.select([fd], [], [], timeout)
+    if not ready:
+        raise TimeoutError(
+            f"stdin is open but delivered no data within {timeout:g}s")
+    return sys.stdin.read()
+
+
+def normalize_response_content(content):
+    """Return trimmed assistant text, or None for a genuine provider empty."""
+    if not isinstance(content, str):
+        return None
+    text = content.strip()
+    return text or None
+
+
+def ssl_ctx():
+    try:
+        import certifi; return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
+def load_key():
+    try:
+        d = json.load(open(AUTH_JSON))
+    except Exception as e:
+        sys.exit(f"ERROR reading {AUTH_JSON}: {e}")
+    entry = d.get("ollama-cloud") or {}
+    key = entry.get("key") or entry.get("apiKey")
+    if not key:
+        sys.exit("ERROR: no 'ollama-cloud' key in OpenCode auth store")
+    return key
+
+
+def main():
+    p = argparse.ArgumentParser(description="One-shot Ollama Cloud worker call")
+    p.add_argument("prompt", nargs="?", help="task prompt (omit to read all of stdin as the prompt)")
+    route = p.add_mutually_exclusive_group()
+    route.add_argument("--model", help=f"ollama-cloud model id (default {DEFAULT_MODEL})")
+    route.add_argument("--reasoning", action="store_true",
+                       help=f"route explicitly to {REASONING_MODEL} for complex reasoning")
+    inspect = p.add_mutually_exclusive_group()
+    inspect.add_argument("--route-profile", metavar="PROFILE",
+                         help="print the canonical stateful OpenCode route; no auth/network")
+    inspect.add_argument("--route-agent", metavar="AGENT",
+                         help="print the canonical route for a harness-owned agent")
+    inspect.add_argument("--check-model", metavar="MODEL",
+                         help="check legacy-model policy without auth/network")
+    p.add_argument("--json", action="store_true",
+                   help="emit machine-readable JSON for route inspection")
+    p.add_argument("--system", default="You are a focused worker. Do exactly the task and return only the result.",
+                   help="system prompt")
+    p.add_argument("--max-tokens", type=int, default=8192,
+                   help="max output tokens (reasoning models need >=2-4k or return empty)")
+    p.add_argument("--temperature", type=float, default=0.2)
+    p.add_argument("--effort", metavar="LEVEL",
+                   help="bound the model's reasoning budget: "
+                        + "|".join(REASONING_EFFORTS)
+                        + ", or 'default' to force the provider's own default. "
+                          "Unset: the measured per-model policy "
+                          "(MODEL_EFFORT_POLICY) when the model was swept, else "
+                          "the provider's. Reasoning is billed from the SAME "
+                          "budget as the answer, so a thinking model can spend "
+                          "--max-tokens and return nothing. "
+                          "Env default: OLL_REASONING_EFFORT.")
+    p.add_argument("--allow-oversize", action="store_true",
+                   help="proceed even when the estimated input exceeds the limit (also OLL_ALLOW_OVERSIZE=1)")
+    p.add_argument("--allow-legacy-model", action="store_true",
+                   help="allow a superseded model only for an intentional historical benchmark")
+    args = p.parse_args()
+
+    # Validate the REQUESTED reasoning budget FIRST: before the auth store is
+    # read, before the network, before a prompt is even assembled. A rejected
+    # value must cost nothing and must never be confused with a missing key.
+    # The model is not selected yet, so this call validates the explicit/env
+    # layers only; the policy layer is applied after select_model() below.
+    env_effort = os.environ.get("OLL_REASONING_EFFORT")
+    try:
+        resolve_effort(args.effort, env_effort)
+    except ValueError as ex:
+        sys.stderr.write(f"ERROR: {ex}\n")
+        return 2
+
+    # Route inspection is argument-only and must be judged on what the USER
+    # passed, so it runs before select_model() fills in a default model —
+    # otherwise every inspection call looks like "a model was selected".
+    if args.route_profile or args.route_agent or args.check_model:
+        if args.prompt or args.model or args.reasoning:
+            p.error("route inspection cannot be combined with a prompt or model selection")
+        if args.route_profile:
+            try:
+                result = resolve_stateful_route(args.route_profile)
+            except KeyError:
+                p.error(
+                    f"unknown stateful profile {args.route_profile!r}; choose from "
+                    + ", ".join(STATEFUL_ROUTES)
+                )
+        elif args.route_agent:
+            try:
+                result = resolve_stateful_agent(args.route_agent)
+            except KeyError:
+                p.error(f"agent {args.route_agent!r} is not harness-owned")
+        else:
+            policy_error = model_policy_error(args.check_model, args.allow_legacy_model)
+            if policy_error:
+                sys.stderr.write(f"ERROR: {policy_error}\n")
+                return 2
+            result = {"model": args.check_model, "status": "allowed"}
+        if args.json:
+            print(json.dumps(result, separators=(",", ":"), sort_keys=True))
+        elif "agent" in result:
+            print(f"{result['profile']}\t{result['agent']}\t{result['model']}")
+        return 0
+    if args.json:
+        p.error("--json is only valid with --route-profile, --route-agent, or --check-model")
+
+    args.model = select_model(args.model, args.reasoning)
+
+    policy_error = model_policy_error(args.model, args.allow_legacy_model)
+    if policy_error:
+        sys.stderr.write(f"ERROR: {policy_error}\n")
+        return 2
+
+    # Same pure resolution as above, now with the model so the measured policy
+    # layer can apply. Cannot raise: the provided layers were validated above.
+    effort = resolve_effort(args.effort, env_effort, args.model)
+
+    if sys.stdin.isatty():
+        stdin_data = ""
+    else:
+        try:
+            stdin_data = read_stdin_all_bounded(stdin_first_byte_timeout())
+        except TimeoutError as ex:
+            sys.stderr.write(
+                f"ERROR: {ex}. If no stdin input was intended, invoke with "
+                "`< /dev/null`; for a slow producer raise "
+                "OLL_STDIN_FIRST_BYTE_TIMEOUT.\n")
+            return 2
+    if args.prompt and stdin_data:
+        user = f"{args.prompt}\n\n--- INPUT ---\n{stdin_data}"
+    elif args.prompt:
+        user = args.prompt
+    elif stdin_data:
+        user = stdin_data
+    else:
+        sys.exit("ERROR: no prompt (pass an argument and/or pipe stdin)")
+
+    # Stateless context boundary: reject oversize BEFORE any auth/network.
+    # Diagnostic carries counts only — never the prompt content (which may be
+    # sensitive) and never the key.
+    allow_oversize = args.allow_oversize or os.environ.get("OLL_ALLOW_OVERSIZE") == "1"
+    est_total = estimate_input_tokens(args.system) + estimate_input_tokens(user)
+    limit = input_limit()
+    if est_total > limit:
+        if allow_oversize:
+            sys.stderr.write(f"oversize override: estimated input {est_total} tok > limit {limit} tok\n")
+        else:
+            sys.stderr.write(
+                f"ERROR: estimated input {est_total} tok exceeds limit {limit} tok "
+                f"(system {estimate_input_tokens(args.system)} + user {estimate_input_tokens(user)}); "
+                f"use --allow-oversize or OLL_ALLOW_OVERSIZE=1 to proceed\n")
+            sys.exit(2)
+
+    payload = build_payload(
+        model=args.model, system=args.system, user=user,
+        max_tokens=args.max_tokens, temperature=args.temperature, effort=effort,
+    )
+    req = urllib.request.Request(URL, data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json",
+                                          "Authorization": f"Bearer {load_key()}"})
+    try:
+        with urllib.request.urlopen(req, timeout=300, context=ssl_ctx()) as r:
+            data = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        sys.exit(f"HTTP {e.code}: {e.read().decode()[:300]}")
+    except urllib.error.URLError as e:
+        sys.exit(f"Network error: {e.reason}")
+
+    msg = normalize_response_content(data["choices"][0]["message"]["content"])
+    usage = data.get("usage", {})
+    sys.stderr.write(f"[{args.model} | in {usage.get('prompt_tokens','?')} / out {usage.get('completion_tokens','?')} tok]\n")
+    _log_usage(args.model, usage)
+    if msg is None:
+        sys.stderr.write(
+            "ERROR: provider_empty — completion contained no assistant text. "
+            "On a thinking model this usually means the reasoning consumed the "
+            "whole budget: try --effort low (or none) first, which is far cheaper "
+            "than raising --max-tokens; then split the task.\n"
+        )
+        return 65
+    print(msg)
+    return 0
+
+
+def _log_usage(model, usage):
+    """Append this call's token usage to a local JSONL the dashboard reads,
+    so the Usage tab shows real Ollama Cloud consumption (best-effort)."""
+    try:
+        import time
+        d = os.path.expanduser("~/.local/share/claudemaxxing")
+        os.makedirs(d, exist_ok=True)
+        rec = {
+            "ts": int(time.time()),
+            "model": model,
+            "prompt_tokens": usage.get("prompt_tokens", 0) or 0,
+            "completion_tokens": usage.get("completion_tokens", 0) or 0,
+            "total_tokens": usage.get("total_tokens", 0) or 0,
+        }
+        with open(os.path.join(d, "oll-usage.jsonl"), "a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except Exception:
+        pass
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

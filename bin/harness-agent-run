@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# Provider-neutral launcher for one autonomous harness round.
+# Default remains Claude for backwards compatibility. Opt into Codex explicitly:
+#   HARNESS_HOST=codex harness-agent-run self-improve
+#
+# Codex unattended mode needs network access for the Ollama bridges. Therefore its
+# full-access flag is only selected after the explicit HARNESS_HOST=codex opt-in;
+# the self-improve skill still stops load-bearing changes at PROPOSED.
+set -euo pipefail
+
+ACTION="${1:-}"
+if [ "$ACTION" != "self-improve" ]; then
+  echo "Usage: harness-agent-run self-improve" >&2
+  exit 2
+fi
+
+HOST="${HARNESS_HOST:-claude}"
+TIMEOUT_SECONDS="${HARNESS_TIMEOUT_SECONDS:-3600}"
+MAX_TURNS="${MAX_TURNS:-80}"
+
+run_bounded() {
+  if command -v timeout >/dev/null 2>&1; then
+    exec timeout --signal=TERM --kill-after=30 "$TIMEOUT_SECONDS" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    exec gtimeout --signal=TERM --kill-after=30 "$TIMEOUT_SECONDS" "$@"
+  else
+    echo "WARN: timeout/gtimeout unavailable; running without an external wall-clock bound" >&2
+    exec "$@"
+  fi
+}
+
+# Same wall-clock bound WITHOUT exec — the claude arm captures output to parse
+# the round's own token anatomy after the run.
+run_bounded_captured() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --signal=TERM --kill-after=30 "$TIMEOUT_SECONDS" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout --signal=TERM --kill-after=30 "$TIMEOUT_SECONDS" "$@"
+  else
+    echo "WARN: timeout/gtimeout unavailable; running without an external wall-clock bound" >&2
+    "$@"
+  fi
+}
+
+case "$HOST" in
+  claude)
+    # Measured round cost ledger (2026-08-09): the round's own usage — input /
+    # output / cache_read / cache_creation as FOUR SEPARATE numbers (caching
+    # cuts price, not volume; cache reads measured at 97% of this fleet's
+    # observed token volume) — parsed from the host's structured output into
+    # .results/round-usage.jsonl. ADVISORY by contract: parsing is best-effort,
+    # the narrative still lands in the log, and the wrapper's exit code is the
+    # round's exit code, never the parser's. Codex arm: unmeasured (its usage
+    # shape is unverified — measure it before guessing a schema).
+    ROUND_OUT="$(mktemp "${TMPDIR:-/tmp}/harness-round.XXXXXX")"
+    trap 'rm -f "$ROUND_OUT"' EXIT
+    set +e
+    run_bounded_captured "${CLAUDE_BIN:-claude}" -p "/self-improve" \
+      --dangerously-skip-permissions --max-turns "$MAX_TURNS" \
+      --output-format json > "$ROUND_OUT"
+    RC=$?
+    set -e
+    REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+    RESULTS_DIR="${HARNESS_RESULTS_DIR:-${REPO_ROOT:+$REPO_ROOT/.results}}" \
+    ROUND_RC="$RC" python3 - "$ROUND_OUT" <<'PY' || cat "$ROUND_OUT"
+import json, os, sys
+from datetime import datetime, timezone
+
+raw = open(sys.argv[1]).read()
+try:
+    d = json.loads(raw)
+except ValueError:
+    # not JSON (schema drift, hard kill) — surface everything, record nothing
+    sys.stdout.write(raw)
+    sys.exit(0)
+# keep the operator's narrative trail in the log
+print(d.get("result") or "")
+u = d.get("usage") or {}
+row = {
+    "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "input": u.get("input_tokens"), "output": u.get("output_tokens"),
+    "cache_read": u.get("cache_read_input_tokens"),
+    "cache_creation": u.get("cache_creation_input_tokens"),
+    "cost_usd": d.get("total_cost_usd"), "num_turns": d.get("num_turns"),
+    "rc": int(os.environ.get("ROUND_RC", "0")),
+}
+print(f"[round-usage] input={row['input']} output={row['output']} "
+      f"cache_read={row['cache_read']} cache_creation={row['cache_creation']} "
+      f"cost_usd={row['cost_usd']} turns={row['num_turns']}")
+results = os.environ.get("RESULTS_DIR") or ""
+if results.startswith("/") and all(
+        isinstance(row[k], int) for k in ("input", "output", "cache_read", "cache_creation")):
+    try:
+        os.makedirs(results, exist_ok=True)
+        with open(os.path.join(results, "round-usage.jsonl"), "a") as fh:
+            fh.write(json.dumps(row) + "\n")  # single O_APPEND write: atomic
+    except Exception as ex:
+        print(f"[round-usage] ledger write skipped: {ex}", file=sys.stderr)
+PY
+    exit "$RC"
+    ;;
+  codex)
+    run_bounded "${CODEX_BIN:-codex}" exec \
+      --dangerously-bypass-approvals-and-sandbox \
+      --dangerously-bypass-hook-trust \
+      'Use $claudemaxxing:self-improve to run exactly one governed round. Obey its unattended/load-bearing PROPOSED gate.'
+    ;;
+  *)
+    echo "Unknown HARNESS_HOST '$HOST' (want claude or codex)" >&2
+    exit 2
+    ;;
+esac

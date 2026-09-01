@@ -1,0 +1,533 @@
+#!/usr/bin/env python3
+"""token-ledger — chapter-18 token audit + loop-portfolio ledger.
+
+The deterministic, re-runnable tool for the two exercises in Orchestra of One,
+chapter 18 ("The Operator's Ledger"):
+  - `audit` : Exercise 1, the 15-minute token audit — MCP servers connected vs.
+              actually called, instruction-file size, default model/effort.
+  - `loops` : Exercise 3, the loop-portfolio ledger — every armed loop as a row
+              of trigger × cap × gate × monthly token estimate, naming the row
+              with no cap.
+
+Honesty over coverage: when something cannot be measured (no usage rows, an
+unreadable transcript, a missing config), the tool says `unmeasured` or
+`unknown` rather than inventing a number. An incomplete scan degrades to
+"unknown", never to "not called" — absence of evidence is not evidence of
+absence.
+
+Privacy is structural (A3): only the server NAME and the derived scope/prefix
+leave this tool. Never env, args, command, headers, url, or any other value
+from a .claude.json server entry — on stdout, --json, stderr, or the snapshot.
+
+Usage:
+  token-ledger audit [--json] [--write]
+  token-ledger loops [--json] [--write]
+
+Env: TOKEN_LEDGER_HOME, TOKEN_LEDGER_REPO, TOKEN_LEDGER_NOW (hermetic overrides).
+"""
+import argparse, json, os, re, sys
+from datetime import datetime, timedelta, timezone
+
+WINDOW_DAYS = 14
+THRESHOLD_LINES = 200
+AGENT_MARKERS = ("harness-agent-run", "claude", "codex", "opencode",
+                 "occ", "oll", "provider-ask")
+# Interpreters that may front the real script in an ExecStart line.
+_INTERPRETERS = frozenset((
+    "bash", "sh", "dash", "zsh", "env", "python", "python3", "node", "perl"))
+# Markers must match as whole words, and a whole word is still not enough: a
+# marker followed by `/` or `.` is a PATH COMPONENT, not an invocation.
+# Both false positives were measured on the real host, and both inflated the one
+# number this ledger exists to make trustworthy — the list of loops with no cap:
+#   `claudemaxxing`        → substring of the deploy directory, flagged every
+#                            hermes-* and cogload-* timer (9 phantom rows)
+#   `~/.claude/projects`   → cogload-nightly READS transcripts and spends zero
+#                            model tokens; it was the last phantom left
+# An agent invocation looks like `claude -p …`, `codex exec …`, `harness-agent-run
+# self-improve` — the marker is followed by whitespace or end-of-line, never by a
+# path separator.
+_AGENT_RE = re.compile(
+    r"(?<![\w-])(?:" + "|".join(re.escape(m) for m in AGENT_MARKERS) + r")(?![\w./-])")
+GATE_NAMES = ("harness-verify", "mut")
+CHROME_PREFIX = "mcp__claude-in-chrome__"
+
+# --- path / clock resolution --------------------------------------------------
+
+def _home():
+    return os.environ.get("TOKEN_LEDGER_HOME") or os.path.expanduser("~")
+
+def _repo():
+    env = os.environ.get("TOKEN_LEDGER_REPO")
+    if env:
+        return env
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+def _now():
+    env = os.environ.get("TOKEN_LEDGER_NOW")
+    if env:
+        try:
+            return datetime.fromisoformat(env.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+    return datetime.now(timezone.utc)
+
+def _date_str(now):
+    return now.strftime("%Y-%m-%d")
+
+def _iso(now):
+    return now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+# --- small helpers ------------------------------------------------------------
+
+def _read_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+def _count_lines(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read().count(b"\n")
+    except OSError:
+        return 0
+
+def _file_size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+def _count_subdirs(path):
+    try:
+        return sum(1 for e in os.scandir(path) if e.is_dir())
+    except OSError:
+        return 0
+
+def _normalize_prefix(name):
+    """claude.ai Figma → mcp__claude_ai_Figma__ (non-alphanumeric runs → _)."""
+    return "mcp__" + re.sub(r"[^a-zA-Z0-9]+", "_", name) + "__"
+
+# --- transcript scan (A2, A6) -------------------------------------------------
+
+def _extract_tool_uses(obj):
+    """Pull tool_use names from a parsed JSONL record — message.content and
+    a top-level content. A string appearing in a text block is NOT a call."""
+    if not isinstance(obj, dict):
+        return []
+    names = []
+    for source in (obj.get("message"), obj):
+        if not isinstance(source, dict):
+            continue
+        content = source.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "tool_use":
+                name = item.get("name")
+                if isinstance(name, str):
+                    names.append(name)
+    return names
+
+def _scan_transcripts(home, now):
+    """Return (tool_names, files_scanned, unreadable, complete)."""
+    projects_dir = os.path.join(home, ".claude", "projects")
+    cutoff_ts = (now - timedelta(days=WINDOW_DAYS)).timestamp()
+    tool_names, files_scanned, unreadable = [], 0, 0
+    complete = True
+
+    if not os.path.isdir(projects_dir):
+        return tool_names, files_scanned, unreadable, complete
+
+    for root, _dirs, files in os.walk(projects_dir):
+        for fname in files:
+            if not fname.endswith(".jsonl"):
+                continue
+            path = os.path.join(root, fname)
+            try:
+                mtime = os.stat(path).st_mtime
+            except OSError:
+                continue
+            if mtime < cutoff_ts:
+                continue
+            files_scanned += 1
+            try:
+                with open(path, "r") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        tool_names.extend(_extract_tool_uses(obj))
+            except OSError:
+                unreadable += 1
+                complete = False
+    return tool_names, files_scanned, unreadable, complete
+
+# --- audit --------------------------------------------------------------------
+
+def cmd_audit(args, now):
+    home, repo = _home(), _repo()
+    cj = _read_json(os.path.join(home, ".claude.json")) or {}
+
+    # --- MCP inventory (A1): local + remote + chrome ---
+    servers = []
+    mcp = cj.get("mcpServers")
+    if isinstance(mcp, dict):
+        for name in mcp:
+            servers.append({"name": name, "scope": "local",
+                            "prefix": "mcp__" + name + "__",
+                            "evidence_source": "mcpServers",
+                            "liveness": "configured"})
+    repo_mcp = _read_json(os.path.join(repo, ".mcp.json"))
+    if repo_mcp and isinstance(repo_mcp.get("mcpServers"), dict):
+        for name in repo_mcp["mcpServers"]:
+            servers.append({"name": name, "scope": "local",
+                            "prefix": "mcp__" + name + "__",
+                            "evidence_source": ".mcp.json",
+                            "liveness": "configured"})
+    # `claudeAiMcpEverConnected` is a HISTORY of connectors this account has ever
+    # attached — NOT the set loaded today. The live set is account-level, resolved
+    # server-side at session start, and is not readable from any local file. Saying
+    # so per row matters: reading this array as the active surface produced a "7
+    # dead connectors, remove them" finding on 2026-08-16 when only 3 were live,
+    # and none of the three are removable with `claude mcp remove` (which governs
+    # local servers only). `claude mcp list` is the authority; this is provenance.
+    remote = cj.get("claudeAiMcpEverConnected")
+    if isinstance(remote, list):
+        for name in remote:
+            if isinstance(name, str):
+                px = _normalize_prefix(name)
+                servers.append({"name": name, "scope": "remote",
+                                "tool_prefix": px, "prefix": px,
+                                "evidence_source": "claudeAiMcpEverConnected (history)",
+                                "liveness": "unknown"})
+    if cj.get("claudeInChromeDefaultEnabled"):
+        servers.append({"name": "claude-in-chrome", "scope": "chrome",
+                        "tool_prefix": CHROME_PREFIX, "prefix": CHROME_PREFIX,
+                        "evidence_source": "claudeInChromeDefaultEnabled",
+                        "liveness": "configured"})
+
+    # --- transcript scan (A2, A6) ---
+    tool_names, files_scanned, unreadable, complete = _scan_transcripts(home, now)
+
+    mcp_out = []
+    for srv in servers:
+        calls = sum(1 for n in tool_names if n.startswith(srv["prefix"]))
+        if calls > 0:
+            called = True
+        elif not complete:
+            called = "unknown"
+        else:
+            called = False
+        entry = {"name": srv["name"], "scope": srv["scope"],
+                 "called_last_14d": called, "calls": calls,
+                 "evidence_source": srv["evidence_source"],
+                 "liveness": srv["liveness"]}
+        if "tool_prefix" in srv:
+            entry["tool_prefix"] = srv["tool_prefix"]
+        mcp_out.append(entry)
+
+    # --- CLAUDE.md (A4): lines AND bytes ---
+    gmd = os.path.join(home, ".claude", "CLAUDE.md")
+    rmd = os.path.join(repo, "CLAUDE.md")
+    repo_lines = _count_lines(rmd)
+    claude_md = {
+        "global_lines": _count_lines(gmd), "global_bytes": _file_size(gmd),
+        "repo_lines": repo_lines, "repo_bytes": _file_size(rmd),
+        "threshold_lines": THRESHOLD_LINES,
+        "repo_over_threshold": repo_lines > THRESHOLD_LINES,
+    }
+
+    # --- settings + skills ---
+    sj = _read_json(os.path.join(home, ".claude", "settings.json")) or {}
+    settings = {"model": sj.get("model"), "effort": sj.get("effortLevel")}
+    skills = {
+        "global": _count_subdirs(os.path.join(home, ".claude", "skills")),
+        "repo": _count_subdirs(os.path.join(repo, "skills")),
+    }
+
+    result = {
+        "date": _date_str(now),
+        "generated_at": _iso(now),
+        "mcp_servers": mcp_out,
+        "claude_md": claude_md,
+        "settings": settings,
+        "skills": skills,
+        "scan": {"window_days": WINDOW_DAYS, "files_scanned": files_scanned,
+                 "unreadable": unreadable, "complete": complete},
+    }
+    _emit(result, args, now, "audit", repo)
+
+# --- loops --------------------------------------------------------------------
+
+def _read_trigger(timer_path):
+    """OnCalendar= value from [Timer], verbatim including the prefix."""
+    try:
+        in_timer = False
+        with open(timer_path) as f:
+            for line in f:
+                s = line.strip()
+                if s.startswith("[") and s.endswith("]"):
+                    in_timer = (s == "[Timer]")
+                    continue
+                if not in_timer:
+                    continue
+                if s.startswith("OnCalendar="):
+                    return s
+                for p in ("OnActiveSec=", "OnBootSec=", "OnStartupSec=",
+                          "OnUnitActiveSec=", "OnUnitInactiveSec="):
+                    if s.startswith(p):
+                        return s
+    except OSError:
+        pass
+    return "unknown"
+
+def _read_service_chain(service_path):
+    """Return (exec_start_args, wrapper_script_text). One level deep.
+
+    exec_start_args is the ExecStart value MINUS the first token (the script
+    path) — a path like ~/.config/claudemaxxing/loop-cron.sh contains "claude"
+    as a substring of the directory name, which would make every unit in that
+    directory falsely agent-invoking. The path is only used to locate the
+    script; markers are searched in the script's CONTENTS and any ExecStart
+    arguments after the path."""
+    exec_start = None
+    try:
+        in_svc = False
+        with open(service_path) as f:
+            for line in f:
+                s = line.strip()
+                if s.startswith("[") and s.endswith("]"):
+                    in_svc = (s == "[Service]")
+                    continue
+                if in_svc and s.startswith("ExecStart="):
+                    exec_start = s[len("ExecStart="):]
+                    break
+    except OSError:
+        return None, None
+    if not exec_start:
+        return exec_start, None
+    parts = exec_start.split()
+    # systemd allows prefix characters on the command (`-` ignore-failure,
+    # `@` argv[0] override, `+`/`!` privilege modifiers). Strip them before
+    # anything tries to open the path.
+    if parts:
+        parts[0] = parts[0].lstrip("-@+!:")
+    # Every real unit on this host is `ExecStart=/bin/bash <script>`, not a bare
+    # script path. Resolving parts[0] finds the INTERPRETER: its caps are absent
+    # (so a capped loop reports uncapped) and it is a binary (so reading it once
+    # crashed the verb). Skip a leading interpreter and take the first argument
+    # that is an existing file — that is the script whose text actually decides
+    # this row's caps and whether it invokes an agent.
+    idx = 0
+    if parts and os.path.basename(parts[0]) in _INTERPRETERS:
+        idx = next((i for i in range(1, len(parts))
+                    if not parts[i].startswith("-") and os.path.isfile(parts[i])), 0)
+        if idx == 0:  # interpreter with no resolvable script (e.g. `bash -c '...'`)
+            idx = 1 if len(parts) > 1 else 0
+    script_path = parts[idx] if parts and idx < len(parts) else None
+    # Markers are searched in the script's CONTENTS and in the arguments AROUND
+    # it — never in the script's own path, because ~/.config/claudemaxxing/…
+    # contains "claude" as a substring of the directory name and would make
+    # every unit deployed there falsely agent-invoking.
+    exec_args = " ".join(p for i, p in enumerate(parts) if i != idx)
+    script_text = None
+    if script_path:
+        # A unit's ExecStart may point straight at a compiled BINARY, not a shell
+        # script — this host has several. Decoding one as UTF-8 raised
+        # UnicodeDecodeError and took the whole `loops` verb down with it, so the
+        # target is read leniently and an undecodable one simply yields no script
+        # text: the row survives with script-derived fields absent, which is the
+        # honest answer, rather than the ledger refusing to report at all.
+        try:
+            with open(script_path, errors="replace") as f:
+                script_text = f.read()
+        except (OSError, UnicodeDecodeError, ValueError):
+            pass
+    return exec_args, script_text
+
+def _extract_caps(text):
+    cap = {"max_turns": None, "timeout_seconds": None}
+    m = re.search(r"MAX_TURNS=(\d+)", text)
+    if m:
+        cap["max_turns"] = int(m.group(1))
+    m = re.search(r"HARNESS_TIMEOUT_SECONDS=(\d+)", text)
+    if not m:
+        m = re.search(r"HARNESS_TIMEOUT_SECONDS:-(\d+)", text)
+    if m:
+        cap["timeout_seconds"] = int(m.group(1))
+    return cap
+
+def _fires_per_month(trigger):
+    if trigger == "unknown":
+        return 30
+    val = trigger[len("OnCalendar="):] if trigger.startswith("OnCalendar=") else trigger
+    val = val.strip()
+    if val == "hourly":
+        return 720
+    if val == "daily":
+        return 30
+    if val == "weekly":
+        return 4
+    if val == "monthly":
+        return 1
+    parts = val.split()
+    if parts:
+        date_part = parts[0]
+        if any(date_part.startswith(d) for d in
+               ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")):
+            return 4
+        if date_part == "*-*-*" and len(parts) >= 2:
+            if parts[1].startswith("*:"):
+                return 720
+            return 30
+    return 30
+
+def _read_mean_round_tokens(repo):
+    path = os.path.join(repo, ".results", "round-usage.jsonl")
+    totals = []
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                    totals.append(
+                        row.get("input", 0) + row.get("output", 0) +
+                        row.get("cache_read", 0) + row.get("cache_creation", 0))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        pass
+    return sum(totals) / len(totals) if totals else None
+
+def cmd_loops(args, now):
+    home, repo = _home(), _repo()
+    units = os.path.join(home, ".config", "systemd", "user")
+    wants = os.path.join(units, "timers.target.wants")
+    mean_rt = _read_mean_round_tokens(repo)
+
+    rows, uncapped = [], []
+
+    if os.path.isdir(units):
+        for fname in sorted(os.listdir(units)):
+            if not fname.endswith(".timer"):
+                continue
+            armed = os.path.exists(os.path.join(wants, fname))
+            trigger = _read_trigger(os.path.join(units, fname))
+            svc_name = fname[:-len(".timer")] + ".service"
+            exec_args, script_text = _read_service_chain(
+                os.path.join(units, svc_name))
+            combined = " ".join(filter(None, (exec_args, script_text)))
+            agent_invoking = bool(_AGENT_RE.search(combined))
+            cap = _extract_caps(script_text or exec_args or "")
+            gate = next((g for g in GATE_NAMES if g in combined),
+                        "unknown" if agent_invoking else "n/a")
+
+            if not agent_invoking:
+                est_basis, monthly, mrt = "n/a", 0, None
+            elif mean_rt is not None:
+                est_basis = "measured"
+                monthly = mean_rt * _fires_per_month(trigger)
+                mrt = mean_rt
+            else:
+                est_basis, monthly, mrt = "unmeasured", None, None
+
+            row = {
+                "name": fname, "armed": armed, "trigger": trigger,
+                "agent_invoking": agent_invoking, "cap": cap, "gate": gate,
+                "monthly_estimate": monthly, "est_basis": est_basis,
+            }
+            if mrt is not None:
+                row["mean_round_tokens"] = mrt
+            rows.append(row)
+
+            if armed and agent_invoking:
+                if cap["max_turns"] is None and cap["timeout_seconds"] is None:
+                    uncapped.append(fname)
+
+    result = {"date": _date_str(now), "rows": rows, "uncapped": uncapped}
+    _emit(result, args, now, "loops", repo)
+
+# --- output / snapshot --------------------------------------------------------
+
+def _emit(obj, args, now, verb, repo):
+    if args.json:
+        print(json.dumps(obj, indent=2))
+    else:
+        _print_human(obj, verb)
+    if args.write:
+        _write_snapshot(obj, now, verb, repo)
+
+def _write_snapshot(obj, now, verb, repo):
+    snap_dir = os.path.join(repo, "knowledge", "token-ledger")
+    os.makedirs(snap_dir, exist_ok=True)
+    date = _date_str(now)
+    n = 1
+    while True:
+        path = os.path.join(snap_dir, f"{verb}-{date}-{n}.json")
+        if not os.path.exists(path):
+            break
+        n += 1
+    with open(path, "w") as f:
+        json.dump(obj, f, indent=2)
+
+def _print_human(obj, verb):
+    if verb == "audit":
+        print(f"token audit — {obj['date']}")
+        print(f"MCP servers ({len(obj['mcp_servers'])}):")
+        for s in obj["mcp_servers"]:
+            print(f"  {s['name']:30s} [{s['scope']:6s}]  "
+                  f"called={s['called_last_14d']}  calls={s['calls']}")
+        cm = obj["claude_md"]
+        print(f"CLAUDE.md: global={cm['global_lines']}L/{cm['global_bytes']}B  "
+              f"repo={cm['repo_lines']}L/{cm['repo_bytes']}B  "
+              f"over={cm['repo_over_threshold']}")
+        print(f"Settings: model={obj['settings']['model']}  "
+              f"effort={obj['settings']['effort']}")
+        print(f"Skills: global={obj['skills']['global']}  "
+              f"repo={obj['skills']['repo']}")
+        sc = obj["scan"]
+        print(f"Scan: {sc['files_scanned']} files  "
+              f"unreadable={sc['unreadable']}  complete={sc['complete']}")
+    else:
+        print(f"loop portfolio — {obj['date']}")
+        for r in obj["rows"]:
+            cap_s = f"turns={r['cap']['max_turns']} timeout={r['cap']['timeout_seconds']}"
+            print(f"  {r['name']:30s} armed={r['armed']}  trigger={r['trigger']}  "
+                  f"agent={r['agent_invoking']}  cap={cap_s}  gate={r['gate']}  "
+                  f"est={r['est_basis']}  monthly={r['monthly_estimate']}")
+        if obj["uncapped"]:
+            print(f"UNCAPPED: {', '.join(obj['uncapped'])}")
+        else:
+            print("UNCAPPED: (none)")
+
+# --- main ---------------------------------------------------------------------
+
+def main():
+    p = argparse.ArgumentParser(prog="token-ledger",
+                                description="chapter-18 token audit + loop ledger")
+    sub = p.add_subparsers(dest="verb")
+    for v in ("audit", "loops"):
+        vp = sub.add_parser(v)
+        vp.add_argument("--json", action="store_true")
+        vp.add_argument("--write", action="store_true")
+    args = p.parse_args()
+    now = _now()
+    if args.verb == "audit":
+        cmd_audit(args, now)
+    elif args.verb == "loops":
+        cmd_loops(args, now)
+    else:
+        p.print_help(sys.stderr)
+        sys.exit(2)
+
+if __name__ == "__main__":
+    main()

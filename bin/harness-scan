@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""harness-scan — external-research intake for the /self-improve loop's MINE step.
+
+The local guards (harness-verify, mem-audit) only surface flaws the harness can *already*
+detect about itself. This tool is the EXTERNAL intake: it pulls recent harness/agent-design
+patterns from arXiv (always) and optionally X/web (via the `xsearch` bridge), so the loop can
+discover externally-motivated flaws — "a fresh paper says harnesses should do X; we don't →
+candidate flaw." It only *fetches and lists* (deterministic); deciding whether each pattern is
+a flaw we have stays with Opus + the cross-model critic (the iron rule: intake is mechanical,
+judgement is gated).
+
+Read-only. Network-tolerant: arXiv failure is reported, not fatal (exit 0 unless --strict).
+
+Usage:
+  bin/harness-scan                 # arXiv, last 7 days, harness/agent patterns
+  bin/harness-scan --days 14       # widen the window
+  bin/harness-scan --x             # also run `xsearch` for X/web (needs XAI_API_KEY)
+  bin/harness-scan --json          # machine-readable
+  bin/harness-scan --strict        # exit 1 if arXiv fetch fails (for CI)
+"""
+import argparse, json, os, shutil, ssl, subprocess, sys, urllib.parse, urllib.request
+import xml.etree.ElementTree as ET
+from datetime import date, timedelta
+
+ARXIV_API = "http://export.arxiv.org/api/query"
+
+# One broad query over the categories + abstract terms that matter for THIS harness's pillars:
+# orchestration/verification, memory governance, tool/context discipline, self-improvement.
+ARXIV_QUERY = (
+    "(cat:cs.AI OR cat:cs.SE OR cat:cs.CL OR cat:cs.MA) AND "
+    # Anchor group: every hit must be about LLM/foundation-model agents. Without this, the bare
+    # topic terms below (abs:verification, abs:"multi-agent") match ANY domain's papers —
+    # speaker verification, forestry robots, quantum RL — and flood the loop queue (lq-00e46b74).
+    "(abs:LLM OR abs:\"large language model\" OR abs:\"language model\" OR abs:\"foundation model\") AND "
+    "(abs:agentic OR abs:\"LLM agent\" OR abs:\"multi-agent\" OR abs:\"agent harness\" OR "
+    "abs:\"agent memory\" OR abs:\"context engineering\" OR abs:\"self-improving\" OR "
+    "abs:\"tool selection\" OR abs:\"self-correction\" OR abs:verification)"
+)
+
+# Cheap relevance tags so the orchestrator can bucket hits to ETCLOVG layers fast.
+PILLAR_TERMS = {
+    "verification": ["verif", "critic", "self-correct", "judge", "refut", "test-time"],
+    "memory": ["memory", "context", "retriev", "forget", "bitemporal", "long-horizon"],
+    "tool/skill": ["tool", "skill", "function call", "routing"],
+    "orchestration": ["orchestrat", "multi-agent", "workflow", "harness", "planner"],
+    "self-improve": ["self-improv", "self-evolv", "optimi", "trajectory", "retrospective"],
+}
+
+
+def _ctx():
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
+def tag(title):
+    low = title.lower()
+    hits = [p for p, terms in PILLAR_TERMS.items() if any(t in low for t in terms)]
+    return hits or ["general"]
+
+
+def fetch_arxiv(days, max_results=80):
+    """Return (papers, error). papers = [{date,title,id,link,pillars}] within the window."""
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    params = urllib.parse.urlencode({
+        "search_query": ARXIV_QUERY,
+        "sortBy": "submittedDate", "sortOrder": "descending",
+        "max_results": str(max_results),
+    })
+    url = f"{ARXIV_API}?{params}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "harness-scan/1.0"})
+        raw = urllib.request.urlopen(req, timeout=40, context=_ctx()).read()
+    except Exception as e:
+        return [], f"arXiv fetch failed: {e}"
+    if not raw.strip():
+        return [], "arXiv returned empty response (rate-limit or network)"
+    try:
+        root = ET.fromstring(raw)
+    except Exception as e:
+        return [], f"arXiv parse failed: {e}"
+    ns = {"a": "http://www.w3.org/2005/Atom"}
+
+    def _txt(entry, path):  # None-safe: missing element OR empty .text → "" (never crashes)
+        el = entry.find(path, ns)
+        return (el.text or "").strip() if el is not None else ""
+
+    out = []
+    for e in root.findall("a:entry", ns):
+        pub = _txt(e, "a:published")[:10]
+        if not pub or pub < cutoff:   # skip entries with no/old date
+            continue
+        title = " ".join(_txt(e, "a:title").split())
+        link = _txt(e, "a:id")
+        if not title:                 # skip malformed entries with no title
+            continue
+        out.append({"date": pub, "title": title, "link": link, "pillars": tag(title)})
+    return out, None
+
+
+def run_xsearch(days):
+    """Best-effort X/web pull via the xsearch bridge. Returns (text, error)."""
+    exe = shutil.which("xsearch") or (
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "xsearch.py"))
+    if not (shutil.which("xsearch") or os.path.isfile(exe)):
+        return "", "xsearch not found on PATH (run install.sh) — skipped X/web"
+    q = ("agentic coding harness patterns this week: orchestration, verification, memory "
+         "governance, tool/skill discipline, self-improving agents — new techniques to steal")
+    try:
+        r = subprocess.run([exe if os.path.isfile(exe) else "xsearch", q,
+                            "--days", str(days), "--sources", "x,web"],
+                           capture_output=True, text=True, timeout=180)
+        return (r.stdout or r.stderr).strip(), None
+    except Exception as e:
+        return "", f"xsearch failed: {e}"
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--days", type=int, default=7)
+    ap.add_argument("--x", action="store_true", help="also pull X/web via xsearch")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--strict", action="store_true", help="exit 1 if arXiv fetch fails")
+    args = ap.parse_args()
+
+    papers, err = fetch_arxiv(args.days)
+    x_text, x_err = (run_xsearch(args.days) if args.x else ("", None))
+
+    # Rank, don't hide (explore/exploit). Surface pillar-matched papers first — the known-relevant
+    # frontier (cf. CMTF 2606.06284). But ALWAYS show the uncategorized [general] ones too: for a
+    # *discovery* loop those are candidate NEW pillars our taxonomy doesn't cover yet, not noise —
+    # hiding them by default would be a self-reinforcing blind spot (the loop never flips a flag).
+    matched = [p for p in papers if p["pillars"] != ["general"]]
+    uncat = [p for p in papers if p["pillars"] == ["general"]]
+
+    def _line(p):
+        return f"- {p['date']} [{','.join(p['pillars'])}] {p['title']}\n    {p['link']}"
+
+    if args.json:
+        print(json.dumps({"window_days": args.days, "arxiv_error": err,
+                          "matched": matched, "uncategorized": uncat,
+                          "xsearch_error": x_err, "xsearch": x_text}, indent=2))
+    else:
+        print(f"# harness-scan — external intake, last {args.days}d "
+              f"(triage each vs current doctrine: do we do this? if not & high-value → candidate flaw)")
+        if err:
+            print(f"⚠ {err}")
+        else:
+            print(f"# arXiv: {len(papers)} paper(s) — {len(matched)} pillar-matched, {len(uncat)} uncategorized")
+            for p in matched:
+                print(_line(p))
+            if uncat:
+                print("\n# uncategorized — no pillar match; skim for patterns our taxonomy misses yet (discovery zone)")
+                for p in uncat:
+                    print(_line(p))
+        if args.x:
+            print("\n# X / web (xsearch) — leads, not facts; verify before trusting")
+            print(x_err and f"⚠ {x_err}" or x_text)
+        elif not err:
+            print("\n(add --x to also pull X/web via xsearch)")
+
+    sys.exit(1 if (args.strict and err) else 0)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""Deterministically propose a safe execution/review shape for one ticket."""
+import json
+import sys
+
+SUPPORTED_DOMAINS = {"frontend", "backend", "security", "accessibility"}
+SUPPORTED_RISKS = {"external", "irreversible", "security", "high-impact"}
+SUPPORTED_SCALES = {"trivial", "standard", "deep"}
+
+# --- deterministic risk-tiered review (2026-08-09, Ona pattern) -----------------------
+# gate_cleared makes CLAUDE.md's "risk-route review" computable instead of vibes: ALL of
+# (changed lines <= ceiling) AND (no touched path in the exclusion list) proposes minimal
+# review; an excluded path FORCES human+senior review. Strictly one-directional — a true
+# verdict only ever REDUCES proposed review on the safe case, never bypasses reviews that
+# domains/risks activated, and never the human SELECT gate on doctrine/install.sh.
+# Authoritative input: the caller computes ticket["diff"] = {"changed_lines": int,
+# "files": [repo-relative paths]} from `git diff --numstat` — this tool never guesses;
+# no diff supplied → no verdict emitted. Ceiling is POLICY (Ona shipped 1000):
+# override with TICKET_GATE_MAX_LINES.
+GATE_EXCLUDED_PATHS = (
+    "install.sh", "deploy/", "CLAUDE.md", ".claude/commands/", ".codex/",
+    "bin/drive",  # credential-touching: OAuth store + irreversible share verb
+)
+
+
+def reject(reasons):
+    return {
+        "valid": False,
+        "execution": "reject-contract",
+        "reviews": [],
+        "max_review_rounds": 0,
+        "reasons": sorted(set(reasons)),
+    }
+
+
+def validate(ticket):
+    reasons = []
+    if not isinstance(ticket, dict):
+        return ["ticket must be an object"]
+    for field in ("id", "summary"):
+        if not isinstance(ticket.get(field), str) or not ticket[field].strip():
+            reasons.append(f"{field} must be a non-empty string")
+    criteria = ticket.get("acceptance_criteria")
+    if not isinstance(criteria, list) or not criteria or not all(isinstance(x, str) and x.strip() for x in criteria):
+        reasons.append("acceptance_criteria must contain non-empty strings")
+    for field, allowed in (("review_domains", SUPPORTED_DOMAINS), ("risk_flags", SUPPORTED_RISKS)):
+        values = ticket.get(field, [])
+        if not isinstance(values, list):
+            reasons.append(f"{field} must be a list")
+        else:
+            reasons.extend(f"unknown {field[:-1]}: {x}" for x in values if x not in allowed)
+    diff = ticket.get("diff")
+    if diff is not None:
+        if not isinstance(diff, dict):
+            reasons.append("diff must be an object with changed_lines and files")
+        else:
+            cl = diff.get("changed_lines")
+            if not isinstance(cl, int) or isinstance(cl, bool) or cl < 0:
+                reasons.append("diff.changed_lines must be a non-negative integer")
+            fl = diff.get("files")
+            if not isinstance(fl, list) or not all(isinstance(x, str) and x.strip() for x in fl):
+                reasons.append("diff.files must be a list of non-empty path strings")
+    scale = ticket.get("scale", "standard")
+    if scale not in SUPPORTED_SCALES:
+        reasons.append(f"unknown scale: {scale}")
+    elif scale == "trivial":
+        chunks = ticket.get("chunks", [])
+        if ticket.get("risk_flags") or ticket.get("review_domains") or (isinstance(chunks, list) and len(chunks) >= 2):
+            reasons.append("scale=trivial conflicts with risk flags, review domains, or multi-chunk dispatch")
+    return reasons
+
+
+def fanout_blockers(ticket):
+    """Empty list = fanout-eligible. Each blocker names exactly what the orchestrator must fix."""
+    chunks = ticket.get("chunks", [])
+    if not isinstance(chunks, list) or len(chunks) < 2:
+        return ["fewer than two chunks"]
+    if ticket.get("risk_flags"):
+        return ["risk flags present"]
+    ids = [c.get("id") for c in chunks if isinstance(c, dict)]
+    if len(ids) != len(chunks) or any(not isinstance(x, str) or not x for x in ids) or len(set(ids)) != len(ids):
+        return ["chunk ids missing or duplicated"]
+    blockers = []
+    seen = set()
+    for chunk in chunks:
+        if chunk.get("depends_on"):
+            blockers.append(f"chunk {chunk['id']}: has dependencies")
+        files = chunk.get("files")
+        if not isinstance(files, list) or any(not isinstance(x, str) or not x for x in files):
+            blockers.append(f"chunk {chunk['id']}: files missing or invalid")
+            files = []
+        if seen.intersection(files):
+            blockers.append(f"chunk {chunk['id']}: shares files with another chunk")
+        seen.update(files)
+        # Story-file rule: a dispatched chunk carries its own context — the worker
+        # must never re-derive inputs the orchestrator already has.
+        brief = chunk.get("brief")
+        if not isinstance(brief, str) or not brief.strip():
+            blockers.append(f"chunk {chunk['id']}: missing self-contained brief")
+    return blockers
+
+
+def _touches_excluded(path):
+    for p in GATE_EXCLUDED_PATHS:
+        if path == p or (p.endswith("/") and path.startswith(p)) \
+                or (not p.endswith("/") and path.startswith(p + "/")):
+            return p
+    return None
+
+
+def gate_clearance(ticket):
+    """(verdict None|bool, reasons, forced_reviews). None = no diff supplied — never guess."""
+    import os
+    diff = ticket.get("diff")
+    if diff is None:
+        return None, [], set()
+    ceiling = int(os.environ.get("TICKET_GATE_MAX_LINES", "1000"))
+    excluded = sorted({_touches_excluded(f) for f in diff["files"]} - {None})
+    if excluded:
+        return (False,
+                [f"gate: excluded path touched ({', '.join(excluded)}) — full review + "
+                 f"human SELECT gate forced"],
+                {"human", "senior"})
+    if diff["changed_lines"] > ceiling:
+        return (False,
+                [f"gate: {diff['changed_lines']} changed lines > ceiling {ceiling}"],
+                set())
+    return (True,
+            [f"gate_cleared: {diff['changed_lines']} lines <= {ceiling}, no excluded paths — "
+             f"minimal (Tier-0) review sufficient unless domains/risks say otherwise"],
+            set())
+
+
+def route(ticket):
+    problems = validate(ticket)
+    if problems:
+        return reject(problems)
+    risks = set(ticket.get("risk_flags", []))
+    reviews = set(ticket.get("review_domains", []))
+    gate_verdict, gate_reasons, gate_forced = gate_clearance(ticket)
+    reviews.update(gate_forced)
+    if risks.intersection({"external", "irreversible"}):
+        reviews.update({"human", "senior"})
+    if "security" in risks:
+        reviews.update({"security", "senior"})
+    if "high-impact" in risks:
+        reviews.add("senior")
+    scale = ticket.get("scale", "standard")
+    blockers = fanout_blockers(ticket)
+    if scale == "trivial":
+        execution = "inline"
+    elif not blockers:
+        execution = "fanout"
+    else:
+        execution = "root-direct"
+    reasons = ["acceptance contract present", f"execution={execution}"]
+    if scale == "trivial":
+        reasons.append("scale=trivial: contract-only single shot, no worker dispatch")
+    chunks = ticket.get("chunks", [])
+    if execution != "fanout" and isinstance(chunks, list) and len(chunks) >= 2:
+        reasons.extend(f"fanout blocked: {b}" for b in blockers)
+    if reviews:
+        reasons.append("selective review activated by explicit domain or risk")
+    max_review_rounds = 3 if reviews or risks or scale == "deep" else 1
+    if scale == "deep" and not (reviews or risks):
+        reasons.append("scale=deep: review rounds raised")
+    reasons.extend(gate_reasons)
+    out = {
+        "valid": True,
+        "execution": execution,
+        "reviews": sorted(reviews),
+        "max_review_rounds": max_review_rounds,
+        "reasons": reasons,
+    }
+    if gate_verdict is not None:
+        out["gate_cleared"] = gate_verdict
+    return out
+
+
+def main():
+    try:
+        ticket = json.load(sys.stdin)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        print(f"ticket-route: invalid JSON: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(route(ticket), sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

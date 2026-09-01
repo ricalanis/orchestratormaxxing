@@ -1,0 +1,450 @@
+#!/usr/bin/env python3
+"""win-log — the experience library: a KPI-gated corpus of WINNING orchestration trajectories.
+
+Today the self-improve loop mines FAILURES (backward): self-improve-log.md + loop-queue.jsonl.
+This adds the missing half SiriuS (arXiv:2502.04780) prescribes — a corpus of *successful*
+orchestration trajectories to bootstrap decomposition + model choice FROM EVIDENCE, replacing the
+static delegate/keep table with a learned one (knowledge/hermes-strategic-evolution-plan.md §3;
+council-kpi.md §5). Same backward-audit / forward-state split as loop-queue vs self-improve-log:
+  loop-queue      = what's next        (flaws)
+  self-improve-log = what changed      (rounds, incl. rejected)
+  orchestration-wins = what WORKED     (KPI-gated wins)  ← this file
+
+State: knowledge/orchestration-wins.jsonl (one JSON object per line; commit for durability).
+
+Each record (a single ACCEPTED orchestration whose deterministic gate came back clean):
+  id         win-<8hex(class+shape+workers)>  — content hash → idempotent add
+  ts         ISO8601
+  task_class first-pass-code | review | research-digest | refactor | tests | …
+  shape      single | fanout-N | agent-team
+  workers    ["glm-5.3", "kimi-k3", …]
+  survivors  mutation survivors left by the contract (0 = tight) — the K10 signal
+  delivered  bool (task_ledger.passed / accepted)
+  cost_usd   optional provider $ for the trajectory
+  contract   one-line "what correct meant"
+  assumptions / exceptions / supported_cases
+             finite evidence for comparing equally valid candidates without using code length
+  specificity_complete
+             true only when the recorder supplied the complete finite evidence above
+  note       optional
+
+ANTI-GAMING (consistent with the KPI ratchet): entry is gated by the DETERMINISTIC mut/ledger
+result the caller passes in (survivors / delivered), never a model self-report. `add` REFUSES a
+record that didn't deliver or left survivors unless --force — the library is a corpus of wins, not
+a log of attempts. It biases proposals; it is never itself the verifier (the gate still runs every
+round). A win whose KPI later regresses should be demoted with `demote`.
+
+Commands:
+  win-log add --class first-pass-code --shape fanout-2 --workers glm-5.3,kimi-k3 \
+              --survivors 0 --delivered --cost 0.10 --contract "parser handles empty input" \
+              --specificity-complete --supported-case empty --supported-case populated
+  win-log match --class first-pass-code [--contract "..."] [--json]
+                                               # specificity-ranked wins for one contract
+  win-log list [--class <c>] [--json]
+  win-log demote <id> [--note <text>]              # a win whose KPI later regressed
+"""
+import argparse, hashlib, json, os, sys, tempfile
+from datetime import datetime, timezone
+
+
+def repo_root():
+    import subprocess
+    try:
+        out = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return os.getcwd()
+
+
+def wins_path():
+    return os.path.join(os.environ.get("WIN_LOG_DIR") or os.path.join(repo_root(), "knowledge"),
+                        "orchestration-wins.jsonl")
+
+
+def _norm(text):
+    return " ".join((text or "").lower().split())
+
+
+def _norm_evidence(values):
+    return sorted({_norm(v) for v in (values or []) if _norm(v)})
+
+
+def item_id(task_class, shape, workers):
+    key = f"{_norm(task_class)}\x00{_norm(shape)}\x00{_norm(','.join(sorted(workers)))}"
+    return f"win-{hashlib.sha1(key.encode()).hexdigest()[:8]}"
+
+
+def load(path):
+    items = []
+    if os.path.isfile(path):
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    items.append(json.loads(line))
+                except ValueError:
+                    pass
+    return items
+
+
+def save(path, items):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".win-log.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            for it in items:
+                fh.write(json.dumps(it, ensure_ascii=False) + "\n")
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def now_iso():
+    return os.environ.get("WIN_LOG_TS") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def cmd_add(args, path, items):
+    if not (args.task_class and args.shape and args.workers):
+        print("add: --class, --shape, --workers required", file=sys.stderr)
+        return 2
+    workers = [w.strip() for w in args.workers.split(",") if w.strip()]
+    assumptions = _norm_evidence(args.assumption)
+    exceptions = _norm_evidence(args.exception)
+    supported_cases = _norm_evidence(args.supported_case)
+    if args.specificity_complete and (not _norm(args.contract) or not supported_cases):
+        print("add: --specificity-complete requires a nonempty --contract and at least one "
+              "--supported-case", file=sys.stderr)
+        return 2
+    # KPI gate: refuse a non-win unless forced. This is what makes the file a corpus of WINS.
+    if not args.force:
+        if not args.delivered:
+            print("add: refusing — trajectory did not deliver (task_ledger.passed false). "
+                  "Use --force only to record a deliberate counter-example.", file=sys.stderr)
+            return 3
+        if args.survivors and args.survivors > 0:
+            print(f"add: refusing — {args.survivors} mutation survivor(s) left "
+                  "(contract not tight → not a clean win). Tighten + re-run, or --force.",
+                  file=sys.stderr)
+            return 3
+    iid = item_id(args.task_class, args.shape, workers)
+    for it in items:  # idempotent on the (class, shape, workers) identity
+        if it.get("id") == iid and it.get("status", "active") == "active":
+            print(f"= {iid} already recorded (idempotent)")
+            return 0
+    items.append({
+        "id": iid, "ts": now_iso(), "task_class": args.task_class, "shape": args.shape,
+        "workers": workers, "survivors": args.survivors, "delivered": bool(args.delivered),
+        "cost_usd": args.cost, "contract": args.contract or "", "status": "active",
+        "assumptions": assumptions, "exceptions": exceptions,
+        "supported_cases": supported_cases,
+        "specificity_complete": bool(args.specificity_complete),
+        **({"note": args.note} if args.note else {}),
+    })
+    save(path, items)
+    print(f"+ {iid} [{args.task_class}] {args.shape} {{{', '.join(workers)}}} "
+          f"survivors={args.survivors} cost={args.cost}")
+    return 0
+
+
+def _specificity_signature(it):
+    return (frozenset(_norm_evidence(it.get("assumptions"))),
+            frozenset(_norm_evidence(it.get("exceptions"))),
+            frozenset(_norm_evidence(it.get("supported_cases"))))
+
+
+def _specificity_complete(it):
+    return (bool(it.get("specificity_complete")) and bool(_norm(it.get("contract")))
+            and bool(_norm_evidence(it.get("supported_cases"))))
+
+
+def _dominates(a, b):
+    """True only for literal finite-set dominance; semantic ambiguity abstains upstream."""
+    aa, ae, ac = _specificity_signature(a)
+    ba, be, bc = _specificity_signature(b)
+    no_more_specific = aa <= ba and ae <= be and ac >= bc
+    strictly_weaker = aa < ba or ae < be or ac > bc
+    return no_more_specific and strictly_weaker
+
+
+def _cost_key(it):
+    return (it.get("cost_usd") if it.get("cost_usd") is not None else 9e9,
+            [-ord(c) for c in (it.get("ts") or "")])
+
+
+def _annotate_contract_group(group):
+    """Apply an abstaining partial order to valid wins sharing one exact contract."""
+    complete = [it for it in group if _specificity_complete(it)]
+    incomplete = [it for it in group if not _specificity_complete(it)]
+    for it in incomplete:
+        it["selection_status"] = "review-required"
+        it["selection_reason"] = "specificity evidence missing"
+
+    for it in complete:
+        dominators = [other["id"] for other in complete
+                      if other["id"] != it["id"] and _dominates(other, it)]
+        it["dominated_by"] = dominators
+        if dominators:
+            it["selection_status"] = "dominated"
+            it["selection_reason"] = "another same-contract win is no more specific"
+
+    nondominated = [it for it in complete if not it.get("dominated_by")]
+    if len(nondominated) == 1:
+        nondominated[0]["selection_status"] = "preferred"
+        nondominated[0]["selection_reason"] = "unique least-specific sufficient win"
+    elif nondominated:
+        signatures = {_specificity_signature(it) for it in nondominated}
+        if len(signatures) == 1:
+            nondominated.sort(key=_cost_key)
+            nondominated[0]["selection_status"] = "preferred"
+            nondominated[0]["selection_reason"] = "identical specificity evidence; cost tie-break"
+            for it in nondominated[1:]:
+                it["selection_status"] = "equivalent"
+                it["selection_reason"] = "identical specificity evidence; higher cost"
+        else:
+            for it in nondominated:
+                it["selection_status"] = "incomparable"
+                it["selection_reason"] = "finite evidence does not establish dominance"
+
+    priority = {"preferred": 0, "incomparable": 0, "equivalent": 1,
+                "dominated": 2, "review-required": 3}
+    complete.sort(key=lambda it: priority.get(it.get("selection_status"), 3))
+    return complete + incomplete
+
+
+# --- liveness demotion (2026-08-09, SkillOps arXiv:2605.13716: a corpus that only
+# admits also needs a forgetting function, or "skill technical debt" accrues) -------
+# Pure set + date arithmetic, zero LLM cost. Demoted wins are FILTERED to
+# review-required, never deleted — the record stays as audit history.
+STALE_TTL_DAYS = 30  # reuses the memory protocol's `reference` decay clock
+# Must remain a SUPERSET of harness-verify's RETIRED_MODELS (no import edge —
+# both tools stay standalone; the sync is asserted by tests/weakest-sufficient).
+RETIRED_WORKERS = {"qwen3-coder:480b", "qwen3-coder-next", "qwen3-vl:235b"}
+
+
+def _liveness_demotion(it):
+    """Reason to demote a win to review-required, or None if it may compete."""
+    retired = sorted(set(it.get("workers") or []) & RETIRED_WORKERS)
+    if retired:
+        return f"worker(s) retired ({', '.join(retired)}) — re-validate the shape first"
+    try:
+        then = datetime.strptime(it.get("ts") or "", "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        now = datetime.strptime(now_iso(), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        age_days = (now - then).days
+    except ValueError:
+        return "unparseable ts — cannot compute staleness"
+    if age_days > STALE_TTL_DAYS:
+        return f"stale: {age_days}d old > {STALE_TTL_DAYS}d TTL — re-verify before biasing dispatch"
+    return None
+
+
+def cmd_match(args, path, items):
+    # VALIDITY-FIRST / WEAKEST-SUFFICIENT: contracts establish eligibility. Among
+    # same-contract wins, finite evidence may establish qualitative dominance; missing
+    # or incomparable evidence abstains. Diff/line count, description length, cost, and
+    # fabricated numeric weakness never stand in for Bennett's extension cardinality.
+    wanted_contract = _norm(args.contract)
+    active = [dict(it) for it in items if it.get("status", "active") == "active"
+              and it.get("delivered") is True and it.get("survivors") == 0
+              and (not args.task_class or it.get("task_class") == args.task_class)
+              and (not wanted_contract or _norm(it.get("contract")) == wanted_contract)]
+    # liveness gate BEFORE dominance: a stale or retired-worker win never
+    # competes for `preferred` — it surfaces as review-required with the reason
+    demoted = []
+    live = []
+    for it in active:
+        reason = _liveness_demotion(it)
+        if reason:
+            it["selection_status"] = "review-required"
+            it["selection_reason"] = reason
+            demoted.append(it)
+        else:
+            live.append(it)
+    active = live
+    groups = {}
+    for it in active:
+        groups.setdefault(_norm(it.get("contract")), []).append(it)
+    active = []
+    comparable_contracts = [contract for contract in groups if contract]
+    if not wanted_contract and len(comparable_contracts) > 1:
+        for group in groups.values():
+            for it in group:
+                it["selection_status"] = "review-required"
+                it["selection_reason"] = "multiple contracts; select one with --contract"
+                active.append(it)
+    else:
+        for contract, group in groups.items():
+            if not contract:
+                for it in group:
+                    it["selection_status"] = "review-required"
+                    it["selection_reason"] = "nonempty contract required for comparison"
+                active.extend(group)
+            else:
+                active.extend(_annotate_contract_group(group))
+    active.extend(demoted)  # demoted wins surface last, never as preferred
+    if args.json:
+        print(json.dumps(active, indent=2))
+        return 0
+    if not active:
+        print(f"(no wins recorded for class '{args.task_class}')" if args.task_class
+              else "(no wins recorded yet)")
+        return 0
+    if sum(it.get("selection_status") == "preferred" for it in active) == 1:
+        print(f"# winning shapes for '{args.task_class or 'all'}' (preferred first):")
+    else:
+        print(f"# candidates for '{args.task_class or 'all'}' (abstained — review statuses):")
+    for it in active:
+        print(f"  {it['shape']:10} {{{', '.join(it.get('workers', []))}}}  "
+              f"survivors={it.get('survivors')} cost={it.get('cost_usd')}  "
+              f"[{it.get('selection_status', 'review-required')}] "
+              f"— {it.get('contract','')}")
+    return 0
+
+
+def cmd_list(args, path, items):
+    sel = [it for it in items if not args.task_class or it.get("task_class") == args.task_class]
+    if args.json:
+        print(json.dumps(sel, indent=2))
+        return 0
+    if not sel:
+        print("(no wins recorded yet)")
+        return 0
+    for it in sel:
+        st = it.get("status", "active")
+        print(f"{it['id']}  {st:8} [{it.get('task_class','?')}] {it.get('shape','?')} "
+              f"{{{', '.join(it.get('workers', []))}}} survivors={it.get('survivors')}")
+    return 0
+
+
+def cmd_demote(args, path, items):
+    for it in items:
+        if it.get("id") == args.id or it.get("id") == f"win-{args.id}":
+            it["status"] = "demoted"
+            if args.note:
+                it["note"] = args.note
+            save(path, items)
+            print(f"↓ {it['id']} demoted (KPI regressed)")
+            return 0
+    print(f"demote: no item {args.id}", file=sys.stderr)
+    return 1
+
+
+def cmd_suggest(args, path, items):
+    """Check the orchestrator task ledger for accepted tasks with clean mut scores
+    that haven't been recorded as wins yet. Prints a reminder for each unrecorded win.
+
+    This is the acceptance-path hook: run from session-log check or /wrap-up to
+    remind the orchestrator to record wins before they're lost. Read-only."""
+    import json as _json
+    ledger_db = os.environ.get("HERMES_KANBAN_DB") or os.path.expanduser("~/.hermes/kanban.db")
+    if not os.path.isfile(ledger_db):
+        print("(win-log suggest: no kanban.db found — skip)")
+        return 0
+    try:
+        import sqlite3
+        conn = sqlite3.connect(ledger_db)
+        conn.row_factory = sqlite3.Row
+        # Find tasks with verification ledger entries that passed and have
+        # mutation results (survivors=0) but no corresponding win-log entry.
+        rows = conn.execute("""
+            SELECT t.id, t.title, t.assignee, tl.summary, tl.passed, tl.files_modified
+            FROM task_ledger tl
+            JOIN tasks t ON tl.task_id = t.id
+            WHERE tl.role = 'verification'
+              AND tl.status = 'passed'
+              AND t.status = 'done'
+            ORDER BY tl.created_at DESC
+            LIMIT 20
+        """).fetchall()
+    except Exception as ex:
+        print(f"(win-log suggest: could not read ledger — {ex})")
+        return 0
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    # Already-recorded wins (by task_class heuristic: match on title words)
+    recorded_classes = {it.get("task_class", "") for it in items}
+
+    suggestions = []
+    for row in rows:
+        title = row["title"] or ""
+        # Heuristic: skip tasks whose title already matches a recorded win class
+        title_lower = " ".join(title.lower().split()[:3])
+        if any(title_lower in rc for rc in recorded_classes):
+            continue
+        # Check files_modified for mutation survivor info (best-effort)
+        files_mod = row["files_modified"] or ""
+        suggestions.append({
+            "task_id": row["id"],
+            "title": title,
+            "assignee": row["assignee"] or "",
+            "summary": (row["summary"] or "")[:120],
+        })
+
+    if not suggestions:
+        print("(win-log: no unrecorded wins found — all caught up)")
+        return 0
+
+    print(f"# win-log: {len(suggestions)} unrecorded win(s) — record them with `win-log add`:")
+    for s in suggestions:
+        print(f"  {s['task_id']}  [{s['assignee']}]  {s['title']}")
+        if s["summary"]:
+            print(f"    → {s['summary']}")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description="KPI-gated experience library of winning orchestrations")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    a = sub.add_parser("add")
+    a.add_argument("--class", dest="task_class")
+    a.add_argument("--shape")
+    a.add_argument("--workers")
+    a.add_argument("--survivors", type=int, default=0)
+    a.add_argument("--delivered", action="store_true")
+    a.add_argument("--cost", type=float, default=None)
+    a.add_argument("--contract", default="")
+    a.add_argument("--assumption", action="append", default=[])
+    a.add_argument("--exception", action="append", default=[])
+    a.add_argument("--supported-case", action="append", default=[])
+    a.add_argument("--specificity-complete", action="store_true")
+    a.add_argument("--note")
+    a.add_argument("--force", action="store_true")
+    a.set_defaults(fn=cmd_add)
+
+    m = sub.add_parser("match")
+    m.add_argument("--class", dest="task_class")
+    m.add_argument("--contract", default="")
+    m.add_argument("--json", action="store_true")
+    m.set_defaults(fn=cmd_match)
+
+    l = sub.add_parser("list")
+    l.add_argument("--class", dest="task_class")
+    l.add_argument("--json", action="store_true")
+    l.set_defaults(fn=cmd_list)
+
+    d = sub.add_parser("demote")
+    d.add_argument("id")
+    d.add_argument("--note")
+    d.set_defaults(fn=cmd_demote)
+
+    s = sub.add_parser("suggest", help="check ledger for unrecorded wins (acceptance-path hook)")
+    s.set_defaults(fn=cmd_suggest)
+
+    args = ap.parse_args()
+    path = wins_path()
+    items = load(path)
+    sys.exit(args.fn(args, path, items))
+
+
+if __name__ == "__main__":
+    main()

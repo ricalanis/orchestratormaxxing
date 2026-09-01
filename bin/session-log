@@ -1,0 +1,369 @@
+#!/usr/bin/env python3
+"""session-log — per-project changelog + WIP persistence for every Claude Code session.
+
+The workflow primitive: each session's work is persisted, *scoped to the current project*, into
+two human-facing artifacts under `<project>/docs/` with opposite lifecycles —
+
+  docs/changelog.md   DURABLE, append-then-archive. The backward audit: *what was done & why*.
+                      Newest entries on top; older entries roll to docs/changelog-archive/<YYYY-MM>.md
+                      once the live file exceeds a threshold, so only a recent TAIL is ever loaded.
+  docs/WIP.md         STICKY, overwritten each session. The forward state: *where things stand
+                      right now & next steps* — the resume/handoff note. Small by construction.
+
+Project scope (settled with the user): git repo root FIRST, fall back to the current folder
+(`git rev-parse --show-toplevel` → on failure, `pwd`) — same idiom as bin/loop-queue. One log set
+per project; no global monolith. Override the docs base with $SESSION_LOG_DIR (used by tests).
+
+This tool is DETERMINISTIC (no LLM). The model supplies prose (via /wrap-up); the tool does the
+file writes, the tail load, and the staleness check the Stop/SessionStart hooks read.
+
+Commands:
+  session-log changelog "<text>" [--tag feat|fix|docs|...]   # prepend a timestamped entry
+  session-log wip set [--from <file>]                        # overwrite docs/WIP.md (body on stdin)
+  session-log wip show                                       # print docs/WIP.md
+  session-log wip clear                                      # remove docs/WIP.md
+  session-log tail [--n 10] [--json]                         # recent changelog + current WIP (hook load)
+  session-log check [--json]                                 # staleness gate (Stop-hook primitive)
+
+Env: SESSION_LOG_DIR (docs base override) · SESSION_LOG_KEEP (live changelog entry cap, default 50)
+     SESSION_LOG_TS (frozen "YYYY-MM-DD HH:MM" stamp, for deterministic tests)
+"""
+import argparse, json, os, re, subprocess, sys, tempfile
+from datetime import datetime
+
+
+# ── path resolution (git-root-first, cwd fallback — mirrors bin/loop-queue) ───────────────────
+def git_toplevel():
+    """Absolute repo root, or None if not inside a git work tree."""
+    try:
+        out = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def repo_root():
+    return git_toplevel() or os.getcwd()
+
+
+def docs_dir():
+    return os.environ.get("SESSION_LOG_DIR") or os.path.join(repo_root(), "docs")
+
+
+def changelog_path():
+    return os.path.join(docs_dir(), "changelog.md")
+
+
+def wip_path():
+    return os.path.join(docs_dir(), "WIP.md")
+
+
+def archive_dir():
+    return os.path.join(docs_dir(), "changelog-archive")
+
+
+def disp(path):
+    """Repo-relative path for display, but only when it's actually under the repo."""
+    if git_toplevel():
+        rel = os.path.relpath(path, repo_root())
+        if not rel.startswith(".."):
+            return rel
+    return path
+
+
+def now_stamp():
+    return os.environ.get("SESSION_LOG_TS") or datetime.now().strftime("%Y-%m-%d %H:%M")
+
+
+def keep_count():
+    try:
+        return max(1, int(os.environ.get("SESSION_LOG_KEEP", "50")))
+    except ValueError:
+        return 50
+
+
+# ── atomic write (mirrors bin/loop-queue save) ────────────────────────────────────────────────
+def atomic_write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".session-log.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        os.replace(tmp, path)  # atomic
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+CHANGELOG_HEADER = (
+    "# Changelog\n\n"
+    "<!-- Maintained by `session-log` (claudemaxxing). Newest entries on top; "
+    "older entries roll to changelog-archive/. -->\n\n"
+)
+
+
+def split_changelog(text):
+    """Return (preamble, [entry, ...]) where each entry starts with a '## ' heading (newest first)."""
+    lines = text.splitlines(keepends=True)
+    idxs = [i for i, l in enumerate(lines) if l.startswith("## ")]
+    if not idxs:
+        return text, []
+    preamble = "".join(lines[:idxs[0]])
+    entries = []
+    for j, start in enumerate(idxs):
+        end = idxs[j + 1] if j + 1 < len(idxs) else len(lines)
+        entries.append("".join(lines[start:end]))
+    return preamble, entries
+
+
+def entry_month(entry):
+    m = re.match(r"## (\d{4}-\d{2})-\d{2}", entry)
+    return m.group(1) if m else "undated"
+
+
+def cmd_changelog(args):
+    text = args.text
+    if not text:
+        print("changelog: entry text required", file=sys.stderr)
+        return 2
+    tag = f" — {args.tag}" if args.tag else ""
+    entry = f"## {now_stamp()}{tag}\n{text.strip()}\n\n"
+
+    path = changelog_path()
+    existing = ""
+    if os.path.isfile(path):
+        with open(path) as fh:
+            existing = fh.read()
+    preamble, entries = split_changelog(existing)
+    if not preamble.strip():
+        preamble = CHANGELOG_HEADER
+    entries.insert(0, entry)  # newest on top
+
+    # roll: keep the newest KEEP entries live; archive the rest by month (also newest-first).
+    keep = keep_count()
+    rolled = 0
+    if len(entries) > keep:
+        overflow = entries[keep:]
+        entries = entries[:keep]
+        buckets = {}
+        for e in overflow:
+            buckets.setdefault(entry_month(e), []).append(e)
+        for month, items in buckets.items():
+            ap = os.path.join(archive_dir(), f"{month}.md")
+            prior = ""
+            if os.path.isfile(ap):
+                pre, prior_entries = split_changelog(open(ap).read())
+                prior = "".join(prior_entries)
+            head = f"# Changelog archive — {month}\n\n"
+            atomic_write(ap, head + "".join(items) + prior)
+        rolled = len(overflow)
+
+    atomic_write(path, preamble + "".join(entries))
+    print(f"+ changelog: {disp(path)}" + (f" (rolled {rolled} entry(ies) to archive)" if rolled else ""))
+    return 0
+
+
+def cmd_wip(args):
+    path = wip_path()
+    if args.action == "show":
+        if os.path.isfile(path):
+            sys.stdout.write(open(path).read())
+        else:
+            print("(no WIP — docs/WIP.md does not exist yet)")
+        return 0
+    if args.action == "clear":
+        if os.path.isfile(path):
+            os.remove(path)
+            print("✓ WIP cleared")
+        else:
+            print("(no WIP to clear)")
+        return 0
+    # set
+    if args.from_file:
+        with open(args.from_file) as fh:
+            body = fh.read()
+    elif not sys.stdin.isatty():
+        body = sys.stdin.read()
+    else:
+        print("wip set: provide body on stdin or via --from <file>", file=sys.stderr)
+        return 2
+    project = os.path.basename(repo_root())
+    out = f"# WIP — {project}\n_Updated: {now_stamp()}_\n\n{body.strip()}\n"
+    atomic_write(path, out)
+    print(f"+ wip: {disp(path)}")
+    return 0
+
+
+def cmd_tail(args):
+    cp, wp = changelog_path(), wip_path()
+    recent = []
+    if os.path.isfile(cp):
+        _, entries = split_changelog(open(cp).read())
+        recent = entries[: args.n]
+    wip = open(wp).read().rstrip() if os.path.isfile(wp) else None
+
+    if args.json:
+        # Always emit a parseable object — even in a fresh project. Text mode stays silent there
+        # (the SessionStart hook must not nag), but a machine caller needs JSON either way.
+        print(json.dumps({
+            "changelog": {"path": cp, "requested": args.n, "returned": len(recent),
+                          "entries": [e.rstrip() for e in recent]},
+            "wip": {"path": wp, "body": wip} if wip is not None else None,
+        }))
+        return 0
+
+    parts = []
+    if recent:
+        parts.append(f"## Recent changelog (last {len(recent)})\n" + "".join(recent).rstrip())
+    if wip is not None:
+        parts.append(wip)
+    if parts:
+        print("── Project session log (docs/) " + "─" * 28)
+        print("\n\n".join(parts))
+    return 0  # silent when no log exists yet (SessionStart hook stays quiet in fresh projects)
+
+
+# ── staleness gate (Stop-hook primitive) — deterministic, no LLM ──────────────────────────────
+def _is_log_path(rel):
+    base = os.path.basename(rel)
+    return base in ("changelog.md", "WIP.md") or "changelog-archive/" in rel.replace("\\", "/")
+
+
+def _parse_porcelain(out):
+    paths = []
+    for line in out.splitlines():
+        if len(line) < 4:
+            continue
+        p = line[3:]
+        if " -> " in p:           # rename: take the destination
+            p = p.split(" -> ", 1)[1]
+        paths.append(p.strip().strip('"'))
+    return paths
+
+
+def _check_wip_stale():
+    """Check if WIP.md is older than the newest changelog entry timestamp.
+
+    WIP.md is supposed to be overwritten each session — if it's older than the
+    newest changelog entry, sessions have been logging work without refreshing
+    the handoff note. Returns True if stale, False otherwise.
+    """
+    cp = changelog_path()
+    wp = wip_path()
+    if not (os.path.isfile(wp) and os.path.isfile(cp)):
+        return False
+    _, entries = split_changelog(open(cp).read())
+    if not entries:
+        return False
+    first_entry = entries[0]
+    m = re.match(r"## (\d{4}-\d{2}-\d{2} \d{2}:\d{2})", first_entry)
+    if not m:
+        return False
+    from datetime import datetime as _dt
+    try:
+        entry_dt = _dt.strptime(m.group(1), "%Y-%m-%d %H:%M")
+        entry_mtime = entry_dt.timestamp()
+        wip_mtime = os.path.getmtime(wp)
+        return wip_mtime < entry_mtime
+    except (ValueError, OSError):
+        return False
+
+
+def check(as_json):
+    root = git_toplevel()
+    if not root:
+        result = {"stale": False, "changed": 0, "reason": "not a git repo (no change signal)"}
+        return _emit_check(result, as_json)
+    # Opt-in per project: a repo is "adopted" once it has a docs/ log. Until then `check` stays
+    # silent — so the global Stop hook never nags throwaway/cloned repos that never used /wrap-up.
+    # (Run /wrap-up once to adopt; it creates the files.)
+    if not (os.path.isfile(changelog_path()) or os.path.isfile(wip_path())):
+        return _emit_check({"stale": False, "changed": 0,
+                            "reason": "project has not adopted session-log (no docs/ log yet)"}, as_json)
+    try:
+        out = subprocess.run(["git", "-C", root, "status", "--porcelain"],
+                             capture_output=True, text=True, timeout=15).stdout
+    except Exception as ex:
+        return _emit_check({"stale": False, "changed": 0, "reason": f"git status failed: {ex}"}, as_json)
+
+    changed = _parse_porcelain(out)
+    src = [p for p in changed if not _is_log_path(p)]
+
+    # Check if WIP.md is stale relative to the newest changelog entry.
+    # WIP.md is supposed to be overwritten each session — if it's older than the
+    # newest changelog entry, sessions have been logging work without refreshing
+    # the handoff note. This check runs independently of source-changes.
+    wip_stale = _check_wip_stale()
+
+    if not src:
+        reason = "no uncommitted source changes (logs/clean)"
+        if wip_stale:
+            reason += "; WIP.md is older than the newest changelog entry — run /wrap-up to refresh"
+        return _emit_check({"stale": False, "wip_stale": wip_stale, "changed": 0,
+                            "reason": reason}, as_json)
+
+    newest = 0.0
+    for p in src:
+        fp = os.path.join(root, p)
+        if os.path.isfile(fp):
+            newest = max(newest, os.path.getmtime(fp))
+
+    log_mtime = 0.0
+    for lp in (changelog_path(), wip_path()):
+        if os.path.isfile(lp):
+            log_mtime = max(log_mtime, os.path.getmtime(lp))
+
+    stale = log_mtime < newest
+    reason = ("source changed after the last session-log update"
+              if stale else "session-log is up to date with source changes")
+    if wip_stale:
+        reason += "; WIP.md is older than the newest changelog entry — run /wrap-up to refresh the handoff note"
+    return _emit_check({"stale": stale, "wip_stale": wip_stale, "changed": len(src), "reason": reason}, as_json)
+
+
+def _emit_check(result, as_json):
+    if as_json:
+        print(json.dumps(result))
+    elif result.get("wip_stale"):
+        # WIP is stale even if source hasn't changed — flag it prominently.
+        print(f"⚠ session-log: WIP.md is older than the newest changelog entry — "
+              f"run /wrap-up to refresh the handoff note. ({result['reason']})")
+    elif result["stale"]:
+        # human/Stop-hook mode: print the reminder ONLY when stale; nothing when fresh.
+        print(f"⚠ session-log: {result['changed']} changed file(s) not captured this session — "
+              f"run /wrap-up to update docs/changelog.md + docs/WIP.md before finishing.")
+    return 0  # always exit 0: hook-safe (the reminder is the signal, not the exit code)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="per-project changelog + WIP session log")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    c = sub.add_parser("changelog", help="prepend a timestamped changelog entry")
+    c.add_argument("text", nargs="?")
+    c.add_argument("--tag", help="short kind, e.g. feat|fix|docs|refactor")
+    c.set_defaults(fn=lambda a: cmd_changelog(a))
+
+    w = sub.add_parser("wip", help="manage docs/WIP.md (sticky, overwritten)")
+    w.add_argument("action", choices=["set", "show", "clear"])
+    w.add_argument("--from", dest="from_file", help="read WIP body from this file instead of stdin")
+    w.set_defaults(fn=lambda a: cmd_wip(a))
+
+    t = sub.add_parser("tail", help="recent changelog + current WIP (SessionStart load)")
+    t.add_argument("--n", type=int, default=10)
+    t.add_argument("--json", action="store_true")
+    t.set_defaults(fn=lambda a: cmd_tail(a))
+
+    k = sub.add_parser("check", help="staleness gate (Stop hook): remind if work wasn't logged")
+    k.add_argument("--json", action="store_true")
+    k.set_defaults(fn=lambda a: check(a.json))
+
+    args = ap.parse_args()
+    sys.exit(args.fn(args))
+
+
+if __name__ == "__main__":
+    main()

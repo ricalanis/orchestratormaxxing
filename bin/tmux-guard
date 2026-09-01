@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# PATH guard for the one tmux command that can destroy every agent session.
+# This is an accident barrier, not a same-UID security boundary: an operator can
+# still invoke the real binary by absolute path for deliberate administration.
+set -euo pipefail
+
+die() {
+  printf 'tmux-guard: %s\n' "$*" >&2
+  exit 127
+}
+
+resolve_real_tmux() {
+  local candidate
+  if [[ -n "${TMUX_GUARD_REAL:-}" ]]; then
+    candidate="$TMUX_GUARD_REAL"
+    [[ -x "$candidate" && ! "$candidate" -ef "$0" ]] \
+      || die "real tmux unavailable: $candidate"
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  for candidate in /opt/homebrew/bin/tmux /usr/local/bin/tmux \
+      /home/linuxbrew/.linuxbrew/bin/tmux /usr/bin/tmux /bin/tmux; do
+    if [[ -x "$candidate" && ! "$candidate" -ef "$0" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  die 'real tmux unavailable outside the PATH shim'
+}
+
+is_kill_server_command() {
+  local token expect_command=1 expect_global_value=0
+  for token in "$@"; do
+    if [[ "$expect_global_value" == 1 ]]; then
+      expect_global_value=0
+      continue
+    fi
+    if [[ "$expect_command" == 1 ]]; then
+      case "$token" in
+        --) continue ;;
+        -c|-f|-L|-S|-T) expect_global_value=1; continue ;;
+        -c?*|-f?*|-L?*|-S?*|-T?*|-[2CDlNuVv]*) continue ;;
+        -*) continue ;;
+      esac
+      # tmux accepts unambiguous command prefixes. `kill-ser` is the shortest
+      # prefix that cannot mean kill-session on supported fleet versions.
+      if [[ ${#token} -ge 8 && "kill-server" == "$token"* ]]; then
+        return 0
+      fi
+      expect_command=0
+      continue
+    fi
+    case "$token" in
+      ';'|'\;') expect_command=1 ;;
+    esac
+  done
+  return 1
+}
+
+REAL_TMUX="$(resolve_real_tmux)"
+if is_kill_server_command "$@"; then
+  printf '%s\n' \
+    "tmux-guard: refused kill-server; close only the exact owned session with: tmux kill-session -t '=SESSION'" >&2
+  exit 64
+fi
+exec "$REAL_TMUX" "$@"

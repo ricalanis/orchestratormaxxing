@@ -1,0 +1,21 @@
+# SOURCE OF TRUTH: repo template deploy/cogload-nightly.service. install.sh substitutes
+# __HOME__ and copies this to ~/.config/systemd/user/ (copy, NOT symlink). Edit here,
+# re-run ./install.sh, which reloads the unit IF the timer is already armed (arming stays
+# opt-in).
+#
+# Nightly cogload maintenance: digest -> transcripts --since 45 -> rsync the Claude
+# transcript mirror -> rotate. Paired with cogload-nightly.timer. The script itself checks
+# the DISABLED kill-switch sentinel FIRST and exits 0 without touching ~/.claude/projects
+# or the mirror when cogload is off — so "off" means off even though this timer keeps
+# firing.
+#
+# Nice=10 + IOSchedulingClass=idle: maintenance must never compete with real work.
+[Unit]
+Description=claudemaxxing nightly cogload maintenance (digest + mirror + rotate)
+
+[Service]
+Type=oneshot
+TimeoutStartSec=600
+ExecStart=/bin/bash __HOME__/.config/claudemaxxing/cogload-nightly.sh
+Nice=10
+IOSchedulingClass=idle

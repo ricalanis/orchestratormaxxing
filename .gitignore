@@ -1,0 +1,42 @@
+.env
+__pycache__/
+*.pyc
+.results/
+.gstack/
+# loop-tick run log = noisy append-only runtime telemetry (the queue is the durable state).
+knowledge/loop-tick.log
+orchestrator/.venv/
+orchestrator/__pycache__/
+orchestrator/dashboard/prompt_history.json
+# API request logs (JSONL, daily files) — runtime telemetry, never committed
+orchestrator/logs/
+
+# Task briefs are disposable scratch — written per task, overwritten, then shipped
+# work is recorded in docs/changelog.md instead.
+BRIEF.md
+*_BRIEF.md
+*.mut-lock
+*.mut-orig
+*.mut-orig.tmp
+
+# Runtime + build artifacts. This repo is auto-pushed by the loop cron every
+# day, so anything regenerable stays out: a binary committed here is paid for
+# on every clone, forever. NOTE: gitignore has no trailing comments — a
+# comment after a pattern makes it literal, so the pattern silently matches
+# nothing (that exact mistake was made here once).
+# loop-tick's transient git worktrees
+.loop-worktree-*/
+# Hermes runtime state
+orchestrator/.hermes/
+# playwright output
+test-results/
+# flock sentinels (knowledge/*.jsonl.lock)
+*.lock
+# build output of book/build-pdf.sh — regenerate, don't track
+book/*.pdf
+
+/.quarto/
+**/*.quarto_ipynb
+
+# raw third-party conversation transcripts + analyses — book source material, stays local
+/private-sources/

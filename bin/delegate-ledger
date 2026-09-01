@@ -1,0 +1,634 @@
+#!/usr/bin/env python3
+"""delegate-ledger — the evidence substrate for /cheap-delegate routing.
+
+/cheap-delegate routes a task to the cheapest lane that can clear an acceptance
+contract. Today it routes from prose rules plus bin/win-log (which records ONLY
+wins). This tool is the missing record: task class × lane × verdict × cost, so
+a routing decision can read evidence instead of guessing.
+
+A newborn ledger must not pretend to authority: with under 5 decided rows
+(pass+fail) per lane cell, or rows older than the 30-day TTL, `stats` says
+"advisory" and OMITS preferred_lane entirely (structural, not a caveat). Same
+convention as win-log's STALE_TTL_DAYS and cogload curve's 14-day refusal.
+
+Every field is Root-declared or Root-measured. Nothing in a row comes from a
+worker's self-report — `verdict` is Root's contract run, and the tool never
+reads worker output files (contract.md, brief.md, output.md).
+
+State: knowledge/delegation-ledger.jsonl (one JSON object per line; append-only).
+
+Commands:
+  delegate-ledger receipt --run-dir D --run-id R --class C --lane L --verdict V
+  delegate-ledger record --run-id R --class C --lane L --verdict V [options]
+  delegate-ledger stats --class C [--json]
+  delegate-ledger import [--dir PATH]
+  delegate-ledger list [--class C] [--json]
+
+Exit codes: 0 ok · 1 unexpected error · 2 usage/validation · 3 integrity refusal.
+"""
+import argparse, fcntl, glob, hashlib, json, os, re, sys
+from datetime import datetime, timezone
+
+LANES = ["oll", "o", "codex", "anthropic", "in-session"]
+VERDICTS = ["pass", "fail", "infra"]
+COST_CLASS = {
+    "oll": "included",
+    "o": "included",
+    "codex": "subscription",
+    "anthropic": "subscription",
+    "in-session": "orchestrator",
+}
+STALE_TTL_DAYS = 30  # reuses win-log's reference decay clock
+NOTE_MAX = 200
+
+# The CLOSED receipt field set. Hand-authored receipts drifted to 41 distinct keys
+# across 10 files with task_class in 1 of 10 and the repair count spelled four
+# different ways (measured 2026-08-17, lq-e9b5da07), which is why nothing could
+# aggregate them. Every receipt this tool writes carries EXACTLY these keys —
+# an unknown value has an explicit null, never an omission a reader must guess at.
+RECEIPT_FIELDS = (
+    "schema_version", "ts", "run_id", "task_class", "lane", "model", "attempt",
+    "contract_verdict", "cost_class", "host", "exit_status", "repair_rounds",
+    "duration_s", "survivors", "cost_usd", "override",
+    "output_sha256", "contract_sha256", "brief_sha256", "note",
+)
+RECEIPT_SCHEMA_VERSION = 1
+# Hashed from the run dir, never accepted as an argument: a caller-declared hash
+# would let Root certify a payload it never read.
+RECEIPT_HASHED = (("output_sha256", "output.md"),
+                  ("contract_sha256", "contract.md"),
+                  ("brief_sha256", "brief.md"))
+
+# Credential patterns — a rejected record appends nothing (exit 2).
+SECRET_PATTERNS = [
+    re.compile(r"sk-"),
+    re.compile(r"AIza"),
+    re.compile(r"ghp_"),
+    re.compile(r"xox[baprs]-"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"-----BEGIN"),
+]
+
+EXIT_OK, EXIT_ERR, EXIT_USAGE, EXIT_REFUSAL = 0, 1, 2, 3
+
+
+# ── paths + clock ─────────────────────────────────────────────────────────────
+
+def repo_root():
+    try:
+        import subprocess
+        out = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return os.getcwd()
+
+
+def store_dir():
+    return os.environ.get("DELEGATE_LEDGER_DIR") or os.path.join(repo_root(), "knowledge")
+
+
+def store_path():
+    return os.path.join(store_dir(), "delegation-ledger.jsonl")
+
+
+def now_iso():
+    ts = os.environ.get("DELEGATE_LEDGER_NOW")
+    if ts:
+        return ts
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ── row identity + load ───────────────────────────────────────────────────────
+
+def row_id(run_id, attempt, lane):
+    """Stable short hash of (run_id, attempt, lane) — the idempotency key."""
+    key = f"{run_id}\x00{attempt}\x00{lane}"
+    return f"dl-{hashlib.sha1(key.encode()).hexdigest()[:8]}"
+
+
+def load(path):
+    items = []
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    items.append(json.loads(line))
+                except ValueError:
+                    pass
+    return items
+
+
+def append_row(path, row):
+    """Append a row under an exclusive flock, checking idempotency by id.
+
+    Holds a bounded flock on a sidecar lock file and appends with a single
+    O_APPEND write, so two concurrent `record` calls both land intact.
+    Returns True if appended, False if the id already existed (no-op).
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    lock_path = path + ".lock"
+    with open(lock_path, "w") as lock_fh:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        try:
+            existing_ids = set()
+            if os.path.isfile(path):
+                with open(path, encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            existing_ids.add(json.loads(line).get("id"))
+                        except ValueError:
+                            pass
+            if row["id"] in existing_ids:
+                return False
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            return True
+        finally:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+
+
+# ── normalization (shared by record --run-dir and import) ─────────────────────
+
+def normalize_verdict(raw):
+    """Map a free-form verdict string to the closed enum, or None if unmappable.
+
+    Case-insensitive: starts with pass/ok/green -> pass; starts with fail -> fail;
+    contains infra/transport/timeout -> infra; else None.
+    """
+    if raw is None:
+        return None
+    s = str(raw).lower().strip()
+    if s.startswith("pass") or s.startswith("ok") or s.startswith("green"):
+        return "pass"
+    if s.startswith("fail"):
+        return "fail"
+    if "infra" in s or "transport" in s or "timeout" in s:
+        return "infra"
+    return None
+
+
+def map_lane_import(raw):
+    """Map a free-form lane string to the enum by substring, or None if unmappable."""
+    if raw is None:
+        return None
+    s = str(raw).lower().strip()
+    if s in LANES:
+        # The canonical spelling must win outright. The substring heuristics below
+        # were written for hand-authored receipts and cannot match the enum value
+        # "o" at all, so a receipt this tool wrote was unimportable (caught by C14).
+        return s
+    if "oll" in s or "ollama" in s:
+        return "oll"
+    if "opencode" in s or s.startswith("o/"):
+        return "o"
+    if "codex" in s:
+        return "codex"
+    if "anthropic" in s or "claude" in s:
+        return "anthropic"
+    return None
+
+
+def validate_note(note):
+    """Return None if ok, or an error string if rejected."""
+    if note is None:
+        return None
+    if len(note) > NOTE_MAX:
+        return f"note exceeds {NOTE_MAX} chars"
+    for rx in SECRET_PATTERNS:
+        if rx.search(note):
+            return f"note matches credential pattern ({rx.pattern})"
+    return None
+
+
+# ── stats helpers ────────────────────────────────────────────────────────────
+
+def median(values):
+    if not values:
+        return None
+    s = sorted(values)
+    n = len(s)
+    if n % 2 == 1:
+        return s[n // 2]
+    return (s[n // 2 - 1] + s[n // 2]) / 2
+
+
+def is_fresh(newest_ts, now_str):
+    if not newest_ts:
+        return False
+    try:
+        then = datetime.strptime(newest_ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        now = datetime.strptime(now_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return (now - then).days <= STALE_TTL_DAYS
+
+
+# ── record ────────────────────────────────────────────────────────────────────
+
+def cmd_record(args, path, items):
+    note_err = validate_note(args.note)
+    if note_err:
+        print(f"record: {note_err}", file=sys.stderr)
+        return EXIT_USAGE
+
+    receipt_state = "absent"
+    receipt_schema = None
+    output_sha = None
+    contract_sha = None
+
+    if args.run_dir:
+        receipt_file = os.path.join(args.run_dir, "receipt.json")
+        if os.path.isfile(receipt_file):
+            try:
+                with open(receipt_file, encoding="utf-8") as fh:
+                    receipt = json.load(fh)
+            except (ValueError, OSError):
+                receipt = None
+            if receipt is not None:
+                raw_verdict = receipt.get("contract_verdict")
+                if raw_verdict is None:
+                    raw_verdict = receipt.get("verdict")
+                norm = normalize_verdict(raw_verdict)
+                if norm is None:
+                    receipt_state = "unparsed"
+                elif norm != args.verdict:
+                    print(f"record: receipt verdict {raw_verdict!r} -> {norm!r} "
+                          f"contradicts --verdict {args.verdict!r}", file=sys.stderr)
+                    return EXIT_REFUSAL
+                else:
+                    receipt_state = "checked"
+                    output_sha = receipt.get("output_sha256")
+                    contract_sha = receipt.get("contract_sha256")
+                    # A receipt with no schema_version was hand-authored, which is how
+                    # the corpus drifted to 41 keys in the first place. Say so at the
+                    # ledger boundary: prose in the playbook cannot be read by a tool,
+                    # and BOTH cross-family critics of this change named the absence of
+                    # a machine-readable signal here as the round's real gap. It is a
+                    # warning, not a refusal — legacy receipts must still be ingestible.
+                    receipt_schema = ("closed"
+                                      if isinstance(receipt.get("schema_version"), int)
+                                      else "legacy")
+                    if receipt_schema == "legacy":
+                        print(f"record: {receipt_file} was hand-authored (no "
+                              f"schema_version) — write it with `delegate-ledger receipt`",
+                              file=sys.stderr)
+
+    row = {
+        "id": row_id(args.run_id, args.attempt, args.lane),
+        "ts": now_iso(),
+        "run_id": args.run_id,
+        "task_class": args.task_class,
+        "lane": args.lane,
+        "model": args.model,
+        "attempt": args.attempt,
+        "verdict": args.verdict,
+        "cost_class": COST_CLASS[args.lane],
+        "host": args.host,
+        "source": args.source,
+        "repair_rounds": args.repair_rounds,
+        "duration_s": args.duration_s,
+        "survivors": args.survivors,
+        "cost_usd": args.cost_usd,
+    }
+    if args.run_dir:
+        row["receipt"] = receipt_state
+        if receipt_state == "checked":
+            row["receipt_schema"] = receipt_schema
+            if output_sha is not None:
+                row["output_sha256"] = output_sha
+            if contract_sha is not None:
+                row["contract_sha256"] = contract_sha
+    if args.override:
+        row["override"] = True
+    if args.note:
+        row["note"] = args.note
+
+    appended = append_row(path, row)
+    if appended:
+        print(f"+ {row['id']} [{args.task_class}] {args.lane}/{args.verdict} "
+              f"attempt={args.attempt}")
+    else:
+        print(f"= {row['id']} already recorded (idempotent)")
+    return EXIT_OK
+
+
+# ── receipt ───────────────────────────────────────────────────────────────────
+
+def sha256_file(path):
+    """Hash a run-dir artifact, or None if it is absent — never a guess."""
+    if not os.path.isfile(path):
+        return None
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(65536), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def cmd_receipt(args, path, items):
+    """Emit the run's receipt.json with a closed field set.
+
+    Deliberately does NOT also append a ledger row. `record --run-dir` cross-checks
+    its --verdict against the receipt; if one call wrote both, that cross-check would
+    be comparing a value with itself.
+    """
+    note_err = validate_note(args.note)
+    if note_err:
+        print(f"receipt: {note_err}", file=sys.stderr)
+        return EXIT_USAGE
+
+    if not os.path.isdir(args.run_dir):
+        # A receipt for a run directory that does not exist would be evidence for a
+        # delegation that never had a gate. Refuse rather than create it.
+        print(f"receipt: run dir does not exist: {args.run_dir}", file=sys.stderr)
+        return EXIT_USAGE
+
+    out_path = os.path.join(args.run_dir, "receipt.json")
+    if os.path.exists(out_path) and not args.force:
+        print(f"receipt: {out_path} already exists (use --force to rewrite)",
+              file=sys.stderr)
+        return EXIT_REFUSAL
+
+    receipt = {
+        "schema_version": RECEIPT_SCHEMA_VERSION,
+        "ts": now_iso(),
+        "run_id": args.run_id,
+        "task_class": args.task_class,
+        "lane": args.lane,
+        "model": args.model,
+        "attempt": args.attempt,
+        "contract_verdict": args.verdict,
+        "cost_class": COST_CLASS[args.lane],
+        "host": args.host,
+        "exit_status": args.exit_status,
+        "repair_rounds": args.repair_rounds,
+        "duration_s": args.duration_s,
+        "survivors": args.survivors,
+        "cost_usd": args.cost_usd,
+        "override": bool(args.override),
+        "note": args.note,
+    }
+    for field, fname in RECEIPT_HASHED:
+        receipt[field] = sha256_file(os.path.join(args.run_dir, fname))
+
+    if set(receipt) != set(RECEIPT_FIELDS):
+        print("receipt: internal schema drift — refusing to write", file=sys.stderr)
+        return EXIT_ERR
+
+    ordered = {k: receipt[k] for k in RECEIPT_FIELDS}
+    tmp_path = out_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        json.dump(ordered, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp_path, out_path)
+
+    missing = [f for f, _ in RECEIPT_HASHED if ordered[f] is None]
+    print(f"> {out_path} [{args.task_class}] {args.lane}/{args.verdict}"
+          + (f"  (absent: {', '.join(m.replace('_sha256', '.md') for m in missing)})"
+             if missing else ""))
+    return EXIT_OK
+
+
+# ── stats ─────────────────────────────────────────────────────────────────────
+
+def cmd_stats(args, path, items):
+    klass = args.task_class
+    rows = [r for r in items if r.get("task_class") == klass]
+    lanes = {}
+    for lane in LANES:
+        lane_rows = [r for r in rows if r.get("lane") == lane]
+        if not lane_rows:
+            continue
+        p = sum(1 for r in lane_rows if r.get("verdict") == "pass")
+        f = sum(1 for r in lane_rows if r.get("verdict") == "fail")
+        i = sum(1 for r in lane_rows if r.get("verdict") == "infra")
+        decided = p + f
+        pass_rate = (p / decided) if decided > 0 else None  # infra excluded from denominator
+        durations = [r.get("duration_s") for r in lane_rows
+                     if isinstance(r.get("duration_s"), (int, float))]
+        newest = max((r.get("ts") for r in lane_rows if r.get("ts")), default=None)
+        lanes[lane] = {
+            "n": len(lane_rows),
+            "pass": p,
+            "fail": f,
+            "infra": i,
+            "pass_rate": pass_rate,
+            "median_duration_s": median(durations),
+            "newest_ts": newest,
+            "cost_class": COST_CLASS[lane],
+        }
+
+    now = now_iso()
+    sufficient_cells = [
+        (lane, cell) for lane, cell in lanes.items()
+        if cell["pass"] + cell["fail"] >= 5 and is_fresh(cell["newest_ts"], now)
+    ]
+    authority = "sufficient" if sufficient_cells else "advisory"
+
+    result = {"class": klass, "authority": authority, "lanes": lanes}
+    if authority == "sufficient":
+        # Rank sufficient lanes: higher pass_rate, more decided, faster, then name.
+        sufficient_cells.sort(key=lambda lc: (
+            -(lc[1]["pass_rate"] or 0),
+            -(lc[1]["pass"] + lc[1]["fail"]),
+            lc[1]["median_duration_s"] if lc[1]["median_duration_s"] is not None else float("inf"),
+            lc[0],
+        ))
+        result["preferred_lane"] = sufficient_cells[0][0]
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return EXIT_OK
+
+    header = f"# stats for class '{klass}' ({authority})"
+    if "preferred_lane" in result:
+        header += f"  preferred: {result['preferred_lane']}"
+    print(header)
+    for lane in LANES:
+        cell = lanes.get(lane)
+        if not cell:
+            continue
+        pr = cell["pass_rate"]
+        pr_s = f"{pr:.3f}" if pr is not None else "n/a"
+        med = cell["median_duration_s"]
+        med_s = f"{med:g}s" if med is not None else "n/a"
+        print(f"  {lane:12} n={cell['n']:3}  pass={cell['pass']}  fail={cell['fail']}  "
+              f"infra={cell['infra']}  pass_rate={pr_s}  median={med_s}  "
+              f"newest={cell['newest_ts']}")
+    return EXIT_OK
+
+
+# ── import ─────────────────────────────────────────────────────────────────────
+
+def cmd_import(args, path, items):
+    dir_path = args.dir or os.path.join(repo_root(), ".results", "delegation")
+    if not os.path.isdir(dir_path):
+        print(f"import: {dir_path} is not a directory", file=sys.stderr)
+        return EXIT_USAGE
+
+    receipts = sorted(glob.glob(os.path.join(dir_path, "*/receipt.json")))
+    if not receipts:
+        print(f"(no receipts found in {dir_path})")
+        return EXIT_OK
+
+    imported = 0
+    skipped = 0
+    for receipt_file in receipts:
+        run_dir = os.path.dirname(receipt_file)
+        name = os.path.basename(run_dir)
+        try:
+            with open(receipt_file, encoding="utf-8") as fh:
+                receipt = json.load(fh)
+        except (ValueError, OSError):
+            print(f"skip {name}: receipt.json unparseable")
+            skipped += 1
+            continue
+
+        run_id_val = receipt.get("run_id")
+        task_class = receipt.get("task_class")
+        lane_raw = receipt.get("lane")
+        verdict_raw = receipt.get("contract_verdict")
+        if verdict_raw is None:
+            verdict_raw = receipt.get("verdict")
+
+        # SKIP LOUDLY — never guess a value.
+        if not run_id_val:
+            print(f"skip {name}: run_id missing")
+            skipped += 1
+            continue
+        if not task_class:
+            print(f"skip {name}: task_class missing")
+            skipped += 1
+            continue
+        lane = map_lane_import(lane_raw)
+        if lane is None:
+            print(f"skip {name}: lane unmappable ({lane_raw!r})")
+            skipped += 1
+            continue
+        verdict = normalize_verdict(verdict_raw)
+        if verdict is None:
+            print(f"skip {name}: verdict unmappable ({verdict_raw!r})")
+            skipped += 1
+            continue
+
+        row = {
+            "id": row_id(str(run_id_val), 1, lane),
+            "ts": now_iso(),
+            "run_id": str(run_id_val),
+            "task_class": str(task_class),
+            "lane": lane,
+            "model": receipt.get("model"),
+            "attempt": 1,
+            "verdict": verdict,
+            "cost_class": COST_CLASS[lane],
+            "host": receipt.get("host"),
+            "source": "import",
+            "repair_rounds": None,
+            "duration_s": receipt.get("duration_s") if isinstance(receipt.get("duration_s"), (int, float)) else None,
+            "survivors": receipt.get("survivors") if isinstance(receipt.get("survivors"), int) else None,
+            "cost_usd": receipt.get("cost_usd") if isinstance(receipt.get("cost_usd"), (int, float)) else None,
+        }
+        appended = append_row(path, row)
+        if appended:
+            print(f"+ {row['id']} [{task_class}] {lane}/{verdict}  (from {name})")
+            imported += 1
+        else:
+            print(f"= {row['id']} already recorded (from {name})")
+
+    print(f"# imported {imported}, skipped {skipped}")
+    return EXIT_OK
+
+
+# ── list ──────────────────────────────────────────────────────────────────────
+
+def cmd_list(args, path, items):
+    sel = [r for r in items if not args.task_class or r.get("task_class") == args.task_class]
+    sel.sort(key=lambda r: r.get("ts") or "")  # newest last
+    if args.json:
+        print(json.dumps(sel, indent=2))
+        return EXIT_OK
+    if not sel:
+        print("(no rows recorded yet)")
+        return EXIT_OK
+    for r in sel:
+        print(f"{r.get('id')}  [{r.get('task_class','?')}] {r.get('lane')} "
+              f"{r.get('verdict')}  attempt={r.get('attempt')}  "
+              f"cost={r.get('cost_class')}  {r.get('ts')}")
+    return EXIT_OK
+
+
+# ── main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Evidence substrate for /cheap-delegate routing")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    r = sub.add_parser("record")
+    r.add_argument("--run-id", required=True)
+    r.add_argument("--class", dest="task_class", required=True)
+    r.add_argument("--lane", choices=LANES, required=True)
+    r.add_argument("--verdict", choices=VERDICTS, required=True)
+    r.add_argument("--model")
+    r.add_argument("--attempt", type=int, default=1)
+    r.add_argument("--repair-rounds", type=int, default=None)
+    r.add_argument("--duration-s", type=int, default=None)
+    r.add_argument("--survivors", type=int, default=None)
+    r.add_argument("--cost-usd", type=float, default=None)
+    r.add_argument("--override", action="store_true")
+    r.add_argument("--host")
+    r.add_argument("--run-dir")
+    r.add_argument("--source", default="record")
+    r.add_argument("--note")
+    r.set_defaults(fn=cmd_record)
+
+    rc = sub.add_parser("receipt")
+    rc.add_argument("--run-dir", required=True)
+    rc.add_argument("--run-id", required=True)
+    rc.add_argument("--class", dest="task_class", required=True)
+    rc.add_argument("--lane", choices=LANES, required=True)
+    rc.add_argument("--verdict", choices=VERDICTS, required=True)
+    rc.add_argument("--model")
+    rc.add_argument("--host")
+    rc.add_argument("--attempt", type=int, default=1)
+    rc.add_argument("--exit-status", type=int, default=None)
+    rc.add_argument("--repair-rounds", type=int, default=None)
+    rc.add_argument("--duration-s", type=int, default=None)
+    rc.add_argument("--survivors", type=int, default=None)
+    rc.add_argument("--cost-usd", type=float, default=None)
+    rc.add_argument("--override", action="store_true")
+    rc.add_argument("--note")
+    rc.add_argument("--force", action="store_true")
+    rc.set_defaults(fn=cmd_receipt)
+
+    s = sub.add_parser("stats")
+    s.add_argument("--class", dest="task_class", required=True)
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_stats)
+
+    i = sub.add_parser("import")
+    i.add_argument("--dir")
+    i.set_defaults(fn=cmd_import)
+
+    l = sub.add_parser("list")
+    l.add_argument("--class", dest="task_class")
+    l.add_argument("--json", action="store_true")
+    l.set_defaults(fn=cmd_list)
+
+    args = ap.parse_args()
+    path = store_path()
+    items = load(path)
+    sys.exit(args.fn(args, path, items))
+
+
+if __name__ == "__main__":
+    main()

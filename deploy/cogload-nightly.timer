@@ -1,0 +1,21 @@
+# SOURCE OF TRUTH: repo template deploy/cogload-nightly.timer. install.sh copies this to
+# ~/.config/systemd/user/ (copy, NOT symlink; no substitution needed). Edit here, re-run
+# ./install.sh.
+#
+# Fires the nightly cogload maintenance at 23:57 local — late enough that the day's
+# collection is essentially complete, early enough that rotate runs before the next
+# session's SessionStart load. Persistent=true → a missed run (machine off/asleep) fires
+# on wake.
+#
+# Arming is opt-in (install.sh only re-syncs an already-enabled timer):
+#   systemctl --user enable --now cogload-nightly.timer
+#   sudo loginctl enable-linger "$USER"   # once: so it fires without an active login
+[Unit]
+Description=claudemaxxing nightly cogload maintenance timer (23:57 local)
+
+[Timer]
+OnCalendar=*-*-* 23:57:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# cross-review — send a diff (or a file) to several providers for code review,
+# collect their findings side by side, optionally merge into one deduped list.
+#
+# Cross-provider review lowers correlated blind spots: two reviewers from the
+# same model family share failure modes (see CLAUDE.md Tier-2), so agreement is
+# not two independent votes. Different labs → less-correlated findings. This is
+# corroboration, NOT proof — the deterministic gates (harness-verify / mut) and
+# Opus stay the real verifier; treat agreeing LLM reviewers as signal, not sign-off.
+#
+#   cross-review                       # reviews `git diff` (unstaged) in cwd
+#   cross-review --staged              # reviews `git diff --staged`
+#   cross-review path/to/file.py       # reviews a whole file
+#   cross-review --providers ollama,openai --merge
+#
+# --merge runs ONE extra synthesizer pass (default: ollama) that dedupes the
+# collected findings into a unified severity-ranked list. Without it you get
+# each provider's raw findings for the orchestrator to merge (doctrine default).
+#
+# Flags: --providers a,b,c · --staged · --merge · --merge-with P · --timeout S
+set -uo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ASK="$REPO/bin/provider-ask"
+
+PROVIDERS="ollama,openai"   # active task default; xAI may be selected explicitly
+STAGED=0; MERGE=0; MERGE_WITH="ollama"; TIMEOUT=300; TARGET=""
+die() { echo "cross-review: $*" >&2; exit 1; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
+    --providers) PROVIDERS="$2"; shift 2;;
+    --staged) STAGED=1; shift;;
+    --merge) MERGE=1; shift;;
+    --merge-with) MERGE_WITH="$2"; MERGE=1; shift 2;;
+    --timeout) TIMEOUT="$2"; shift 2;;
+    -*) die "unknown flag $1";;
+    *) TARGET="$1"; shift;;
+  esac
+done
+
+# ---- gather the material to review ---------------------------------------
+if [ -n "$TARGET" ]; then
+  [ -f "$TARGET" ] || die "no such file: $TARGET"
+  KIND="file $TARGET"
+  MATERIAL="$(printf '### FILE: %s\n\n```\n' "$TARGET"; cat "$TARGET"; printf '\n```\n')"
+else
+  if [ "$STAGED" = 1 ]; then DIFF="$(git diff --staged 2>/dev/null)"; KIND="git diff --staged"
+  else DIFF="$(git diff 2>/dev/null)"; KIND="git diff"; fi
+  [ -z "$DIFF" ] && die "$KIND is empty — nothing to review (try --staged, or pass a file)"
+  MATERIAL="$(printf '### %s\n\n```diff\n%s\n```\n' "$KIND" "$DIFF")"
+fi
+
+REVIEW_SYS="You are a senior code reviewer. Review the code/diff below. Report ONLY real problems as a numbered list; for each: [SEVERITY high|med|low] file:line — the issue, then a one-line fix. Focus on correctness bugs, security, edge cases, and clear simplifications. If you find nothing substantive, say 'No substantive issues found.' Be terse; do not restate the code."
+
+IFS=',' read -r -a PLIST <<< "$PROVIDERS"
+WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+
+for p in "${PLIST[@]}"; do
+  p="$(echo "$p" | tr -d ' ')"; [ -z "$p" ] && continue
+  (
+    if out="$(printf '%s' "$MATERIAL" | "$ASK" "$p" --system "$REVIEW_SYS" \
+                --max-tokens 8192 --timeout "$TIMEOUT" 2>"$WORK/$p.err")"; then
+      printf '%s' "$out" > "$WORK/$p.out"
+    else
+      printf '(down: %s)' "$(tr '\n' ' ' < "$WORK/$p.err" | head -c 160)" > "$WORK/$p.out"
+    fi
+  ) &
+done
+wait
+
+REPORT="$WORK/report.md"
+{
+  echo "# Cross-provider review — $KIND"
+  echo
+  UP=0
+  for p in "${PLIST[@]}"; do
+    p="$(echo "$p" | tr -d ' ')"; [ -z "$p" ] && continue
+    echo "## $p"
+    body="$(cat "$WORK/$p.out" 2>/dev/null)"
+    echo "${body:-(no output)}"
+    case "$body" in "(down:"*) ;; *) UP=$((UP+1));; esac
+    echo
+  done
+  echo "_reviewers up: $UP / ${#PLIST[@]}_"
+} > "$REPORT"
+cat "$REPORT"
+
+# ---- optional merge pass --------------------------------------------------
+if [ "$MERGE" = 1 ]; then
+  echo; echo "---"; echo
+  MERGE_SYS="You are merging several code reviews of the SAME code into ONE unified list. Deduplicate findings that describe the same problem (keep the clearest wording, note if multiple reviewers agreed — agreement raises confidence). Output a single severity-ranked numbered list: [SEVERITY][agreed-by N] file:line — issue — fix. Drop anything that is not a real defect."
+  if merged="$(printf '%s' "$(cat "$REPORT")" | "$ASK" "$MERGE_WITH" \
+                --system "$MERGE_SYS" --max-tokens 8192 --timeout "$TIMEOUT" 2>/dev/null)"; then
+    echo "# Unified findings (merged by $MERGE_WITH — corroboration, not sign-off)"
+    echo; printf '%s\n' "$merged"
+  else
+    echo "(merge pass unavailable via $MERGE_WITH — read per-provider findings above)"
+  fi
+fi

@@ -1,0 +1,1241 @@
+{
+  "file_count": 244,
+  "files": [
+    {
+      "mode": "file",
+      "path": ".agents/plugins/marketplace.json",
+      "sha256": "6a279f5ec6565d9643565b1aec6e1f09ac293d33d1f1a22c22dddfc31b5671c5"
+    },
+    {
+      "mode": "file",
+      "path": ".claude/agents/fable-planner.md",
+      "sha256": "ce9ee6f16c9ec68ce5a1a783e1e9135fc381cfc46b82e12025553e5d373c357e"
+    },
+    {
+      "mode": "file",
+      "path": ".claude/agents/ollama-worker.md",
+      "sha256": "4c8459b90be15a5d7d60811541df04dfba539f4e4b24914fae75b6eb6a1e48ac"
+    },
+    {
+      "mode": "file",
+      "path": ".claude/commands/cheap-delegate.md",
+      "sha256": "7a1b6f6b4010e63bcd9932312d944a92da63c2d3d207daadaa1476696879d20d"
+    },
+    {
+      "mode": "file",
+      "path": ".claude/commands/fableplan.md",
+      "sha256": "47e2913690b95ebca733dab554682ba4051526b81eb0f2fb0dec62d32601906a"
+    },
+    {
+      "mode": "file",
+      "path": ".claude/commands/fanout.md",
+      "sha256": "1988d0482b2d11494ab6ffa937176ab968d38e60d5f852c58737aa1369902074"
+    },
+    {
+      "mode": "file",
+      "path": ".claude/commands/gauntlet.md",
+      "sha256": "551f446971d6e4073c19d94f36edbc85a23f070ec3d375896ec8a914b8513ca4"
+    },
+    {
+      "mode": "file",
+      "path": ".claude/commands/graduate.md",
+      "sha256": "ba09747aa7d95711d0ff0e19409b2397977a90c22712737926257f10c58339f7"
+    },
+    {
+      "mode": "file",
+      "path": ".claude/commands/ideas.md",
+      "sha256": "65a25f6a90103a577aa31fa5ab5bbcfb7019cb71ae79282761afd4ecc200160e"
+    },
+    {
+      "mode": "file",
+      "path": ".claude/commands/self-improve.md",
+      "sha256": "db80a4df88ab8a5e5512f5f5e253a79ce8f308c5a5f64e0914e140360f28e625"
+    },
+    {
+      "mode": "file",
+      "path": ".claude/commands/wrap-up.md",
+      "sha256": "51b51b7862719fb363d610e33716607e8f2161aed1f58a0cfadcfd3e75df0a5a"
+    },
+    {
+      "mode": "file",
+      "path": ".claude/settings.json",
+      "sha256": "59386edbfd058ef4a179432ff64ed84de20f9bdaf4068d335c86e059a52ce6cf"
+    },
+    {
+      "mode": "file",
+      "path": ".codex/agents/ollama-worker.toml",
+      "sha256": "0b61a1dd70ed097e3122e40a4529521cb995bbd9b1981af5d3bb1cbd12fcf422"
+    },
+    {
+      "mode": "file",
+      "path": ".codex/agents/sol-planner.toml",
+      "sha256": "7ad56f847c55904288d6a56fd950bed2ec9c4445460f381aca6db525ee9eb1e0"
+    },
+    {
+      "mode": "file",
+      "path": ".codex/config.toml",
+      "sha256": "122b69193d85b93a854635cc37f5cd121cc40c34278b0be648d02d7c417261b7"
+    },
+    {
+      "mode": "file",
+      "path": ".gitignore",
+      "sha256": "1357436bc814deef744e42b012436f9ea9da0926c77df7d76e88065124d6be3e"
+    },
+    {
+      "mode": "symlink",
+      "path": "AGENTS.md",
+      "sha256": "6ebdb617a8104a7756d0cf36578ab01103dc9f07e4dc6feb751296b9c402faf7"
+    },
+    {
+      "mode": "file",
+      "path": "CLAUDE.md",
+      "sha256": "964f1fbde8d96daf064e498cc79fcdb9657ee4e1b74bd514b71b6b65a093e4db"
+    },
+    {
+      "mode": "file",
+      "path": "LICENSE",
+      "sha256": "2f064129f6035deda553ed1b5fc5a4a3a1c7317c0939c7d57ce43f72e45071e0"
+    },
+    {
+      "mode": "file",
+      "path": "README.md",
+      "sha256": "3929c5d0fba1ba11f4f574bd14c288f2a2c77ccc6337d92f88b0e7704508c9aa"
+    },
+    {
+      "mode": "file",
+      "path": "SETUP.md",
+      "sha256": "53357f4bc7c9c23d640054952928dad2ed5d8a35709f6e532871927faf23a350"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/agent-done-notify",
+      "sha256": "a9ac96e3414a82aa0d038c07cd561defd41fd380bd64bb9f22d1517ae8a04ced"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/agent-tab-status",
+      "sha256": "3bfc531031cb64a96a67e2e672c926a243ab432c3af9dc07aa4fd59346d7b55f"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/browser-mcp-contract",
+      "sha256": "e7805b2a6cf93833d594c2e638fa42b0b0fdbc447e484b4cede6cbd099686e64"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/chrome-debug",
+      "sha256": "de7f390808dfab98a581315455ea0e2b38a77f7dd0a33ba22dcd74a8d7a9c125"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/chrome-debug-wayland-shim",
+      "sha256": "107b600c41354223a8123a1f193c98e54d195c15db3dca74e758ab512cf0c620"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/codex-stop-hook",
+      "sha256": "f37104592f187526e9ec1fc9d86e48ca155c4a95a5fc771fd8d6067d2a17c42e"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/cogload",
+      "sha256": "2cf173be340ca963987bff31358cd3a190ead86b334d0f85a411d48a4c3e4101"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/core-export",
+      "sha256": "193165b682fe9ee91281a08b78b77e89c6ea9291e76de722c84f8dfdb9d56c76"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/cross-review",
+      "sha256": "b77a8d7011ceb101b4383ee9d3428ae04b253ae045a003fe441aadd21d5d74ff"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/delegate-ledger",
+      "sha256": "22d45f6c308ee151a058a1b5c8be4f8aa3be58e703d3cb8b4714f9e1152994a6"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/gauntlet-judge",
+      "sha256": "6d8f2d45a2c1cb758a104aed046d0ea446f7d661db322f5be0fe08716c880d9e"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/harness-agent-run",
+      "sha256": "b8124a543a5c1a8b4b5573331ff8879022f4a66ae013e95e1eb6ce907e6dca5c"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/harness-scan",
+      "sha256": "dce3b1dc76a8344f5bd25a6fcc736aec442caddaa8b546ae6848a9560f1fbe06"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/harness-sync",
+      "sha256": "07af29357f33270df2a05277db388e4c96aeef5a0048c339ea0ed79ce32bea0d"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/harness-verify",
+      "sha256": "6bd8aeefa0d8ff9c30be2e9e3f8733c90cd848163f507a91d6e91f27e3d0902b"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/intent-queue",
+      "sha256": "438d1f4d737ea9b15ea2ecc22b18d949c4766b3284f10e916e0f4212685433ce"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/loop-queue",
+      "sha256": "be102bae55cb5e54a1666faa9615a086c21055ebbaff5e898d65d93a69c93341"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/loop-tick",
+      "sha256": "bbe02a5d227341a125a876ea2bc05376778a0692f69f5dfde59b3eead3a1c8d0"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/mem-audit",
+      "sha256": "4bfcad64b2c7f83bfabb5eb1bb465481d67799aa0ab5b946ee1ed9e0ac1597a3"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/memoryctl",
+      "sha256": "0d3567fc47c580b5ea4f04b51fbe3feec1703e7eb1ab0b26409e8e205d882f8d"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/model-bench",
+      "sha256": "c502fe2dfcee28fb37a03a7ba4135c537a210079e64644d52118ae48daf200eb"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/model-catalog",
+      "sha256": "16a6465b4c0dc505078dfccafc90f7ce18f3909097958bdeafab320b036d1e21"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/model-eval",
+      "sha256": "facf9c914469ebee996dec64feea8fe699e606d5b630ec9628a782440072c79c"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/multi-council",
+      "sha256": "a5b6b7538d9351099c876e8c0b9fc458ca7aaa00db06789eb101650385c2f03b"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/mut",
+      "sha256": "4b9ecda1e0b3ec233b06a8fdd234d23698f63eb1245a08f64f8bc9189ea46e36"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/o",
+      "sha256": "a7254949071a6e6d607d09cce19c5dc8fc865e8d603dc65aa6c7c325a7a3d249"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/occ",
+      "sha256": "4c5cad056ec7b579f44322ff2e774bfe5bc3a0e32f87bfb3110cc2982acff2a8"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/oll",
+      "sha256": "222bd06511e63f37179e92f86439fa5382e29292c7ca7a0cd4772c851633f74d"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/oll-council",
+      "sha256": "bc0d6a3afbdc4c92516d56dd435058d66f419a05f9138dd1fa4847b05ed95bf4"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/oll-sync",
+      "sha256": "eb37404fbba243c6a3b2941e21c9d73622e10e16785268d5a9dfe52f6b6f9165"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/opencode-browser-mcp",
+      "sha256": "ca7e7903454034ad8ee2a98fbfa7ec5a6802ed726201d9807812f889f73ab145"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/orchestration-practice",
+      "sha256": "b60e7d8526127de725ed4649b22d7ad35d63037bd0b86d85fd1a7c8015eecc90"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/provider-ask",
+      "sha256": "cad985d1f7c95eac5183eaf1a898c070040faf440598ac98006eacac02a0021a"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/session-log",
+      "sha256": "ee62e3dc7ccd60e0c596935b44906a63ecdf4dfb8e91cd9c2e1b9ceca1034359"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/sync-agent-skills",
+      "sha256": "58cdf858618a971d3528caa1167ddee062ffeefbb9c32fd75e4d9454319c27c6"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/ticket-route",
+      "sha256": "dfb353eae02e05931f200f7c119413195e1927eb2a56699bd9bfec31af507cb3"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/tmux-guard",
+      "sha256": "d776c1f958f1f5eeae835448f3a4c6f31b9ae3bf91f7fb323ce789c01e07542d"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/tmux-send",
+      "sha256": "98b66b8ad827ee2859edabba4980d1f3211a9c5192eb735e5fe3840ec14e7f72"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/token-ledger",
+      "sha256": "0268939584a74334b30e15e4bbcbd60b1e23e864639a3eacc890a7a4680670e7"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/warp-agent-event",
+      "sha256": "830a34596295dc1a2cd634fe146b77a8845aa60dd742d61d136fb6e9d90adaf0"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/warp-agent-recovery",
+      "sha256": "275f1deb20b5cd72350d0a5501935ca84edc804597efb87364ff50aef3098248"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/warp-model-pin",
+      "sha256": "4f4a3dd5fb1cca26e1bbed5a381d4ba99ab4887c9e19e6f60b8706bf22ab6ad6"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/warp-ollama",
+      "sha256": "6ca673e610264fd7f3671ce6c04543d9bbdd5bccf26bf466faadb4e437000fa4"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/win-log",
+      "sha256": "efbb8ac1b9e4888d9c716c2bf76a6259c1940a3d7f924682babadb84af0f8955"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/zed-setup",
+      "sha256": "a1a01fcb1be3bdf5764a2bd53f176b69346ced07811505c2b3d309dcb705cf79"
+    },
+    {
+      "mode": "exec",
+      "path": "bootstrap.sh",
+      "sha256": "45331b3e826f15a474fdd48def2398dfa5816d0328063c268a5f9aabe562ed1d"
+    },
+    {
+      "mode": "file",
+      "path": "claudemaxxing-architecture.png",
+      "sha256": "d1d23bf6f4aba34742149292fedb9d23c7b58b83d76aaf229aa15593ec3daec9"
+    },
+    {
+      "mode": "file",
+      "path": "claudemaxxing-architecture.svg",
+      "sha256": "2a52d74d98dbbd5e564ff175f8e0016a66e5b4945b6807716c6b5a00306be4e4"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/chrome-cdp.service",
+      "sha256": "1478a915ac829fda7177bcbb5912601060190ab7077de6f7823e1a7b2765e7d9"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/claudemaxxing-doctrine-audit.service",
+      "sha256": "8629ebd775ef4d85e1a7798f0af3dfc05fd892da2c98c39ddf35aa69c3986d78"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/claudemaxxing-doctrine-audit.sh",
+      "sha256": "c07860ab53e05640c6bb49816b5a5b13b87a5bc9e64e6a93fcbe4c1ef6d1ac28"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/claudemaxxing-doctrine-audit.timer",
+      "sha256": "e7824d173ece18df5548f3ca21df3cb6f48351bb5782c3a1950f8f90efe7339e"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/claudemaxxing-loop.service",
+      "sha256": "ff6c8b81b6109c19bf808f03167efd62fbeb5923139cd47ea1a61baa76f45783"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/claudemaxxing-loop.timer",
+      "sha256": "c52fe718c23fb9667b2848bdc78a34b681116e4fc8c59f0d3e7fd46e21fa2915"
+    },
+    {
+      "mode": "exec",
+      "path": "deploy/cogload-catchup.sh",
+      "sha256": "d247a8444ac8c57555ca0f62061fa08c0bb7d8ba521b229d99b30bb95b53e61f"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/cogload-keys.service",
+      "sha256": "54ef49f9eef7a22ce89eae2a43d39cc328ac2b6e8fe16a7941680c8c3ef2c77b"
+    },
+    {
+      "mode": "exec",
+      "path": "deploy/cogload-mac-setup.sh",
+      "sha256": "87a9c197ec652fb34ff324822385786e11d86647ae72793e16202b9556543ee2"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/cogload-nightly.service",
+      "sha256": "e2d2e862a7d7c78c1c9141c4febb60e0629f321e3a87f3aec696a4fe2b93e042"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/cogload-nightly.sh",
+      "sha256": "b97a35cdca5989f7bee9e0609401fbae455fc7272f42b6b0a758bbdecebc283c"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/cogload-nightly.timer",
+      "sha256": "d0a38f614d06ad8d41804dce9a83acc6c86c31263f7a06e6880023e1c63896bf"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/com.claudemaxxing.cogload-catchup.plist",
+      "sha256": "42065c27833608f93285a86fd82369e57fbf874b793bf779e49fee874e1d59b8"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/com.claudemaxxing.cogload-keys.plist",
+      "sha256": "94e4befb3bc517dd93980a838f021e152b560d34b36bc25093ddd4d69b8ee21d"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/com.claudemaxxing.cogload-nightly.plist",
+      "sha256": "f77181beaeca20e31f2bc7a320e26791022bf226b3e40a0e67ff14713e202e57"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/com.claudemaxxing.loop.plist",
+      "sha256": "bac41d359094a179e4706a53b2c062557052363023a9f34ff9b8eff18ca95234"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/fleet.env.example",
+      "sha256": "600140e9d2402504c02904e6371e9ed372adffbf1dbbab2f8b80eebcc14afae5"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/gnome-cogload-extension/README.md",
+      "sha256": "7cddc2c109517d2adbec40f2edd6e9e18aae0e8cff54ba68dd05b837546d1017"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/gnome-cogload-extension/extension.js",
+      "sha256": "d2747eea069a23337dfdf6c07224472e6a57cc8fc3afce7201e3577044564276"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/gnome-cogload-extension/metadata.json",
+      "sha256": "5cd2c8378fb4dffd94852e1887a8dffd7d3956977d4f8f5719de429d9a78be42"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/loop-cron.sh",
+      "sha256": "3ba5817166adab8f04a85e3fc293c13e273cd76b820b61cf64e84a4dcc8d9fd2"
+    },
+    {
+      "mode": "file",
+      "path": "docs/skill-style-guide.md",
+      "sha256": "54ff00ae9def748e4c942b155d0ad81f882b052ab0237fb9603fe38df17c87d1"
+    },
+    {
+      "mode": "exec",
+      "path": "install.sh",
+      "sha256": "4cd4c0d7a6205e5356e4513ce216421480b83e2f6464a374d76671553e64f103"
+    },
+    {
+      "mode": "file",
+      "path": "knowledge/codex-harness-design.md",
+      "sha256": "3c297ba1aa2e4febbb83c16d7753ee016132f5908af6e60b0f34dfc0ba19f31d"
+    },
+    {
+      "mode": "file",
+      "path": "knowledge/context-lifecycle.md",
+      "sha256": "418733238eec2ed4538a7f26321824f012bcec29aacdd5f04e989a82025d8cb9"
+    },
+    {
+      "mode": "file",
+      "path": "knowledge/delegation-playbook.md",
+      "sha256": "bf8052670714dbc6cb5bb6e23c1cc8c0d5d124b2aa786e4a924d78d636c3cd18"
+    },
+    {
+      "mode": "file",
+      "path": "knowledge/delegation-science-2026-08-12.md",
+      "sha256": "a7c5e5cab35e684a68f3c523d91bb4c78a70d8e2e32c55fb887899474b81895f"
+    },
+    {
+      "mode": "file",
+      "path": "knowledge/doctrine-audit-2026-08-16.md",
+      "sha256": "1883dece2e59f6dfa8fd1f9c14046c17459b142b98e34fff3438b835700a537a"
+    },
+    {
+      "mode": "file",
+      "path": "knowledge/etclovg-harness-audit.md",
+      "sha256": "9e200f5a3687c96dce4e24336a25a982add39a996fe54eea079e83616d2e653e"
+    },
+    {
+      "mode": "file",
+      "path": "knowledge/fableplan-rollback-2026-07-13.md",
+      "sha256": "dea638558b5a36d1704732d65181540a80fd23ab05f5ca59f0f16c685d3e8c25"
+    },
+    {
+      "mode": "file",
+      "path": "knowledge/gauntlet-loop-design.md",
+      "sha256": "f521cdaa3b0b0ace054d3cf2e9811699287aaeaf8ea23590b6bca34867dfbfd2"
+    },
+    {
+      "mode": "file",
+      "path": "knowledge/harness-improvements-from-x-arxiv-2026-06-06.md",
+      "sha256": "bb817a93b1f5bd7108b000a009ed59f595741c12e2be83bd0d5fb0522d614239"
+    },
+    {
+      "mode": "file",
+      "path": "knowledge/hermes-strategic-evolution-plan.md",
+      "sha256": "1049d76ab674624cbd6df141ff31b498d61f66b105520fbffa308d9b5a84ecf9"
+    },
+    {
+      "mode": "file",
+      "path": "knowledge/loop-engineering-2026-06-10.md",
+      "sha256": "3dee00695513b4374f7a83b3b0de66dc357aed14e5bc4da8c3aee8616ea9882d"
+    },
+    {
+      "mode": "file",
+      "path": "knowledge/memory-protocol-upgrade.md",
+      "sha256": "72e03c73e56fbafabe7f9b169d0c860a4e81a57b16f297cf8b962a2af91b717e"
+    },
+    {
+      "mode": "file",
+      "path": "knowledge/model-catalog.json",
+      "sha256": "c12a1a19295bac467b1212a528cd7ec627ca1d35b783eba29a4cf8a916bda633"
+    },
+    {
+      "mode": "file",
+      "path": "knowledge/plugin-first-integration-gate-2026-07-19.md",
+      "sha256": "4b1404b5f01ebf9a48842af39e53e96c28d48ef39404bb7d78a27123b99575cd"
+    },
+    {
+      "mode": "file",
+      "path": "knowledge/provider-routing.md",
+      "sha256": "1b08cb1ad5ab1f1c4bbe3bfb9b46977bd157777f000dc2cf05b74b1076056a74"
+    },
+    {
+      "mode": "file",
+      "path": "knowledge/signal-vs-artifact-2026-07-19.md",
+      "sha256": "2502c172f7048bf686ec3c65af7f6ed8ae528dceb1ecadc4b905973176a8695c"
+    },
+    {
+      "mode": "file",
+      "path": "knowledge/tool-inventory.md",
+      "sha256": "61d242b9940cdba1ce05447140bfdf5213cd36d57a1d5d41679cb52b3b675949"
+    },
+    {
+      "mode": "file",
+      "path": "knowledge/warp-ollama-provider.md",
+      "sha256": "0a16fb583d40e158ab3f4a3eb3fd681057b71fcc877371196fe7aa57646daabd"
+    },
+    {
+      "mode": "file",
+      "path": "knowledge/zed-warp-first-class-2026-08-24.md",
+      "sha256": "230c82124fd6985812aa61000b7510211f773a91db6f7a59c3e937f769ab20fe"
+    },
+    {
+      "mode": "file",
+      "path": "opencode/agents/deep-researcher.md",
+      "sha256": "54d5919858d2303834e1aa6cc6622c839e2f428f31d78f760ccbfdfee2e87e55"
+    },
+    {
+      "mode": "file",
+      "path": "opencode/agents/kimiplan.md",
+      "sha256": "2909c52d0e58a4b675564b5ffaccf21aa17bb1538f847a6251fbccdc780f0d2d"
+    },
+    {
+      "mode": "file",
+      "path": "opencode/agents/oplanner.md",
+      "sha256": "b269aa9f90267e623d188be058954b2517fb00cb1ee6ccef91f7ff4660a498f8"
+    },
+    {
+      "mode": "file",
+      "path": "opencode/commands/codex.md",
+      "sha256": "50f0ceefb9ec051ba4135822856864ea17a57297c25628e85d7d9b2324a94d55"
+    },
+    {
+      "mode": "file",
+      "path": "opencode/commands/kimiplan.md",
+      "sha256": "c7cfa88601bcf461255145c49be27f35245f292a5dfa1229a06328584a090d11"
+    },
+    {
+      "mode": "file",
+      "path": "opencode/commands/oplan.md",
+      "sha256": "55e2c3f53c58cf548ec5e23c4a4b3b225a41983df34d12d9b112fd24b85fd29c"
+    },
+    {
+      "mode": "file",
+      "path": "opencode/commands/opus.md",
+      "sha256": "0df11cd3d8a4734f99e92f15bd5783205b0f1adca0d34fe551a5eac7db1eeb8e"
+    },
+    {
+      "mode": "file",
+      "path": "opencode/commands/research.md",
+      "sha256": "074f72d48f7dd5928ee92e1b754b5d4a9585771ce7b666f9a4f8a04d749dd75f"
+    },
+    {
+      "mode": "file",
+      "path": "opencode/commands/sonnet.md",
+      "sha256": "091e237d333ddbc09e090edad6b848913a26e7cf8a8981737fd1f9e881ec7b1c"
+    },
+    {
+      "mode": "file",
+      "path": "opencode/plugins/claudemaxxing-notify.js",
+      "sha256": "bb09a29fa243a5292a8f09477ef985ea605cbd7cebaaccb31cf47c855be59c9d"
+    },
+    {
+      "mode": "file",
+      "path": "orchestration_practices/__init__.py",
+      "sha256": "95f237667ab306b62621ee9bffa13e0683b00218237d7e9eb36c186ed93de0a5"
+    },
+    {
+      "mode": "file",
+      "path": "orchestration_practices/catalog.json",
+      "sha256": "46af3d7c8e41fa8dbb5d6e6b95f584b838fb4f433a71ba206ca183f15b00fc97"
+    },
+    {
+      "mode": "file",
+      "path": "orchestrator/tests/test_solplan_runner.py",
+      "sha256": "5e8a87b945521d014d88a39ac9530b18464ba0c7c2f73a7ec697144417af7412"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/.codex-plugin/plugin.json",
+      "sha256": "1e09efe95ef0901a81facc0c31012ef8292a334569ea90988ee60f2e7cec91cc"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/hooks/hooks.json",
+      "sha256": "a47ca41352063e39d2a2bde9a513a443fa458e622c70b5a07ebaa62365972e3e"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/skills/cheap-delegate/SKILL.md",
+      "sha256": "4557f814aad8cc97c7e1464d0fcefd9bf927b1c87222b70975e4cf70d1bb9dcd"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/skills/fanout/SKILL.md",
+      "sha256": "fce0913710d49dfc5bab9dcb0415ce6055f5a5771bb5965119974536c050fdac"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/skills/fanout/agents/openai.yaml",
+      "sha256": "d2e7825b1a818c3fcd2fba551cb164bd1a52144cd23ee6d5475519067c963799"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/skills/gauntlet/SKILL.md",
+      "sha256": "0326a9b60b9dd21da80d2e7a574a0130cfdb29c0df485d67c972eb023041bd89"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/skills/gauntlet/agents/openai.yaml",
+      "sha256": "8904b335cc6f5d8913f99ab8492eacaba6c6a39c957d8392ca2c84d5850be4a0"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/skills/graduate/SKILL.md",
+      "sha256": "7a29312ae4aa07d96e6f39b86fb0e13d12f3239dd39f4d8ef86cdd99165cca23"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/skills/graduate/agents/openai.yaml",
+      "sha256": "22920d26de8a2dee24ac5de5dc71a400144e5386b9d7a4cd2138aa0fbbc351f0"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/skills/i-have-adhd/SKILL.md",
+      "sha256": "5409c825084114ab5e9727670c233ab919d88d50f72772ae03c8dd3914bab30a"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/skills/i-have-adhd/references/examples.md",
+      "sha256": "3c8c8e0df764f6d4118a2bcd44791979bfbad9673c08da9ea5dd5f3b02db36ef"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/skills/i-have-adhd/references/rationale.md",
+      "sha256": "7243fca979340fe054c5fbb72d679da7b88c007dea70462aa63453d93a2805d4"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/skills/ideas/SKILL.md",
+      "sha256": "485da9eb0b12dcda950851a49d957a486e15268e551d58b843a2331d452127a3"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/skills/ideas/agents/openai.yaml",
+      "sha256": "36905fc2e8d610eadeaf2ccd93eee224446482bc2cd20893c801dd650d157293"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/skills/memory/SKILL.md",
+      "sha256": "2c3f4a40de8b320c99657f81a27f08ed94b4a0976f6ded5ae96af158fe336a68"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/skills/memory/agents/openai.yaml",
+      "sha256": "74e7d23835a2f8273988777fde2758d64dd38b41245ea83071f3a74642f35208"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/skills/self-improve/SKILL.md",
+      "sha256": "9dba712495851083e9875c0a002b64265b3a317b987571397ad515d7ad78068f"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/skills/self-improve/agents/openai.yaml",
+      "sha256": "c954b04dcf5db66b12428dabcc96276b5aa3a0527de06f70e74530c419eff7bc"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/skills/solplan/SKILL.md",
+      "sha256": "9f714ba2a9fa9495671e5ee9deb24940c172a3c48a603789b4ee005d501af713"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/skills/solplan/agents/openai.yaml",
+      "sha256": "3ab906e2358e813bbcc84942f2dc7a25b3a7793273394052be48e7a4fafd2887"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/skills/solplan/scripts/run_solplan.py",
+      "sha256": "38b5f954061e94b66f01431e0ada9114a7181713a436b8a8f5ee260b86779a4a"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/skills/wrap-up/SKILL.md",
+      "sha256": "270840d582434eca58227ba3f5f036f7cd6e325d9d7c3bc5bc2339208179549d"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/claudemaxxing/skills/wrap-up/agents/openai.yaml",
+      "sha256": "b7f7495f464e8e6e622b868425e087ccb696665125d65d02144891c83e39b1d4"
+    },
+    {
+      "mode": "file",
+      "path": "prompts/context/compact.md",
+      "sha256": "ec8f02ee84ce8b8a8df93a43788082c9de5a69ddfaad3899015910b3f836bd3e"
+    },
+    {
+      "mode": "file",
+      "path": "shell/claude-c.sh",
+      "sha256": "2dacfa6ffe5241ed91840752a822381c246079bfaaef59bf63c5257336c0badb"
+    },
+    {
+      "mode": "file",
+      "path": "shell/codex-g.sh",
+      "sha256": "f6f93be6d95ff972a98e742e3059a33a30c56c3618c06cbdb63ff8525cff8cdf"
+    },
+    {
+      "mode": "file",
+      "path": "shell/opencode-o.sh",
+      "sha256": "a82ee92c70cb09637c33f98ff1980177634747a81e0093e83d01d175eab32089"
+    },
+    {
+      "mode": "file",
+      "path": "shell/tmux.conf",
+      "sha256": "19b592f59cf84e3172a7af03bb7c1aa3bb1d4f949074706196b57ddd4692db91"
+    },
+    {
+      "mode": "file",
+      "path": "shell/warp-recovery.sh",
+      "sha256": "31bc56dd45935f8ec9b894cfb2476443f678e6398f6c79dc11147ba4049c05c4"
+    },
+    {
+      "mode": "file",
+      "path": "skills/anti-slop-design/SKILL.md",
+      "sha256": "cf651eb674412e9c968aa4dd40a7c1777918179da073bc9f02f6cc5b8d4e72d1"
+    },
+    {
+      "mode": "file",
+      "path": "skills/external-stack.json",
+      "sha256": "c51bb710a070aeb73f36ad28e75c0dab00242fde222e73e6d19e39235d096c8d"
+    },
+    {
+      "mode": "file",
+      "path": "skills/orchestration-practices/SKILL.md",
+      "sha256": "b4a5f2b41192e9d7743e5a74f817ab9aca14ff819d3d4c75e5754cf2894f807b"
+    },
+    {
+      "mode": "file",
+      "path": "skills/orchestration-practices/agents/openai.yaml",
+      "sha256": "cbf02260234e7fbf98931de4330de930a12954aeb2e8f4890e7f14c89f6f4d8a"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/agent-done-notify/run.sh",
+      "sha256": "83c83363d1dc13c73c7e0e626ef270c2d17d8381832747c92a5db9577798c678"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/agent-scrollback/run.sh",
+      "sha256": "2359026a46f98e2cdb2d5228f5b7dd2722dbd0772cedec1236e9ca52da7c0ba9"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/agent-tab-status/run.sh",
+      "sha256": "14ca5515195397b5e2352b98856e5b7313cc78324fa9e487825347b36f1024a8"
+    },
+    {
+      "mode": "file",
+      "path": "tests/cheap-delegate/fixtures.tsv",
+      "sha256": "96fb657b1d309ffbb2066e79e44ae9020c9a2cea5ba2ebc84d0ba42aa599bd42"
+    },
+    {
+      "mode": "file",
+      "path": "tests/cheap-delegate/fixtures/claude-no-attribution.md",
+      "sha256": "79ea4af64125eb41fd006a179981dad8952e2e3924ef938e1d4ee1451ed1f95f"
+    },
+    {
+      "mode": "file",
+      "path": "tests/cheap-delegate/fixtures/claude-no-durable.md",
+      "sha256": "51c3e0d9592db1612cd56dd5c65a821a51d89f1e146f1bcf77d9199e2557d9a1"
+    },
+    {
+      "mode": "file",
+      "path": "tests/cheap-delegate/fixtures/claude-no-sigil.md",
+      "sha256": "f08ad1d396f99d7f9362d4548d6293871d6567e5770822e2850777530ec859d2"
+    },
+    {
+      "mode": "file",
+      "path": "tests/cheap-delegate/fixtures/codex-no-attribution.md",
+      "sha256": "8827670149448b4c1badbfbd582d392dcda7a06f42141c30c96c397dab71c27b"
+    },
+    {
+      "mode": "file",
+      "path": "tests/cheap-delegate/fixtures/codex-no-durable.md",
+      "sha256": "68445453c752a53e37e3d4eac8766725e45f27eb6334e1af483e75eee77c6ef0"
+    },
+    {
+      "mode": "file",
+      "path": "tests/cheap-delegate/fixtures/codex-no-ledger.md",
+      "sha256": "08df954d275f0c4211fdbe5f9824221685d60371eb646fa12b92b41709396c6d"
+    },
+    {
+      "mode": "file",
+      "path": "tests/cheap-delegate/fixtures/deferred-turn1.md",
+      "sha256": "acd90d3ebd9dc1aa005cacc8d4d197f8c5490634f664165bfb39dea0c7224db8"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/cheap-delegate/run.sh",
+      "sha256": "60a96961cc29d6cb89a95c3f45abda10fa6ed1f8aa076f63c0624b098e1fb1e3"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/codex-stop-hook/run.sh",
+      "sha256": "11da1df3ec94259c6c995e04700385237a5a63081517b48ff8cb014bbbdcc706"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/cogload-nightly/run.sh",
+      "sha256": "3e976d2730941a067bb4fa6273cc472524444813f3ae3d69bc737399ebcf36bb"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/cogload-schedule/run.sh",
+      "sha256": "d5047c00d4a0d49397b0054e6beb2314504ddd2d834c396e3ead4bd81b8b3299"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/cogload/run.sh",
+      "sha256": "e479af70da7a4d2ac21e51793bc22e2067c48919fc176c2538d9931a5c0a2f46"
+    },
+    {
+      "mode": "file",
+      "path": "tests/cogload/test_contract.py",
+      "sha256": "1567dacaf4655e9f359ba35b01a3c2cf1f3c584b74bdab1feff01ec387ecd881"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/context-stateless/run.sh",
+      "sha256": "bf416967f25e5dbbfc299b7a2da6a39b72f325af73e3fdec22aad648abd1e647"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/core-export/run.sh",
+      "sha256": "7f042dd8bc3b5fa845e287050face25298abaec4fe4b3c9ac7d3bb04e89adeec"
+    },
+    {
+      "mode": "file",
+      "path": "tests/delegate-ledger/run.py",
+      "sha256": "759f36e5f89af098e63f8814469025db23675620228f6c7ce3dbdf7997d377de"
+    },
+    {
+      "mode": "file",
+      "path": "tests/delegate-ledger/run.sh",
+      "sha256": "4d73a10abdccc3c007baafd6b83034b59c43a4f1b523e0995b14e0742aadc2cb"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/deployed-host-state/run.sh",
+      "sha256": "f1ced297f6f735ae6db07e32415d1927207edbc41f70b0e40d55e38f038e963a"
+    },
+    {
+      "mode": "file",
+      "path": "tests/fableplan-eval/README.md",
+      "sha256": "af4ff26cf6d3195669c5250ed73b528d2fe29fd094a3c85bb23bfd2e685dbbc9"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/gauntlet-judge/judge-stub.py",
+      "sha256": "9804457572fdd61b10c6661d7dbf4c83e2a686c3b3c58d75a2a7d1d407118d2c"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/gauntlet-judge/run.sh",
+      "sha256": "6adf920a63620458a983adaa6a54cd21dfea6abb44a320acfe11707711721afb"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/harness-mut-liveness/run.sh",
+      "sha256": "94b0fc07d4d0ab5bbb5027f972cc73fde7a7dfea652c77bfb612ee1ede1d66eb"
+    },
+    {
+      "mode": "file",
+      "path": "tests/harness-observation/fixture.py",
+      "sha256": "60e450838e6a05dbd6a44eb6b9ef2fbac98f2a6cf881a97b0476f7d699c0db63"
+    },
+    {
+      "mode": "file",
+      "path": "tests/harness-observation/run.sh",
+      "sha256": "7762d6847657bcfa00921d261dcbfc7712cefa33432cd52f1974e3370ae6bf56"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/harness-observer-diagnostics/run.sh",
+      "sha256": "6adc9485b5a2cc63b6e17e6b3912d4ca4dd11622ef8b3e436c532168ac7c7a7a"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/harness-reentrancy/run.sh",
+      "sha256": "f9c37c4ba2b2470a35907778585a8a3cd5b7f7032ee6413f9608a9c06875286a"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/harness-skip-protocol/run.sh",
+      "sha256": "e1eb14626d7ab15b48ee2a6d124d3b889fb5c4ff98c33bcd79a82bdebcc780c5"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/harness-sync/run.sh",
+      "sha256": "08c3eb387a86256130dd21caaa8d8794a39fa0c59931a9a0e4591ed5f65570a9"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/harness-timeout/run.sh",
+      "sha256": "28b0052326d1d2cc71929b52b5fb7b7f3b31b001a4488535db5ba8828a45445d"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/harness-verify-selfconsistency/run.sh",
+      "sha256": "2f58df671f54d955f0d1d3142bca0ffe1c82ab19a2f8bda985eb0d14daba9dc9"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/harness-watch-cadence/run.sh",
+      "sha256": "5c390a6e2df98a649bafc84f76374fccd6f953862f2073697e8829261b489464"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/install-opencode-agents/run.sh",
+      "sha256": "d15aeae6c3581ee42b5435956dd2386861d99b22ec572a79be4cb9213f124b3a"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/kimi-k3-routing/run.sh",
+      "sha256": "44c0b853373ef3c0ca127dcd21751725fcf76774be852ebb37d938334cc1ce81"
+    },
+    {
+      "mode": "file",
+      "path": "tests/lib/precondition.sh",
+      "sha256": "6e0fecafe8ead90bd6fc5bb31a0941740e03ab16255d96662417ace3b54a0373"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/loop-claim/run.sh",
+      "sha256": "445214ae8f0839a05436dbaf16ab634b4448938ac453f1d026d4c68dea57b82c"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/loop-queue-release/run.sh",
+      "sha256": "bf51e2a72740c5822c226a3d0e968fc7d4c7cfb5b1e2a3d8b1a5db8308a74ecf"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/mem-audit/run.sh",
+      "sha256": "867be4967c8e758b278208a32ae00d7bac1a2043937487d37af96a74f2667279"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/memory-bridge-hermes/run.sh",
+      "sha256": "9e5a6cbf272d225b9da62043f840878a0d004c2590248df3b2b5d0ba7838e79c"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/memoryctl-consolidate/run.sh",
+      "sha256": "0fcfbbed0c5abfe0827aee349eccb05a8eee6a14a7c1de81df08792254ec639d"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/memoryctl-supersede-recall/run.sh",
+      "sha256": "f45e37177f8bf4f0274c0c1b9619bb02c763afc7e0cbb000d9d0ad644f36da48"
+    },
+    {
+      "mode": "file",
+      "path": "tests/model-catalog/fixtures/deepseek-v4-pro.html",
+      "sha256": "8daa3df0d381905bbfdba8ca430f8b3e47517327dc35905a2c9865dd8cba5b0c"
+    },
+    {
+      "mode": "file",
+      "path": "tests/model-catalog/fixtures/glm-5.3-flash.html",
+      "sha256": "739f792f54a02a0fa2b505e6b391109ce4a69076747e9cd634babcc9cbbfcc35"
+    },
+    {
+      "mode": "file",
+      "path": "tests/model-catalog/fixtures/qwen3.5.html",
+      "sha256": "7f159ef14ef920ae036f2e6060585e38665484249cb30e610edb70e61527e0f1"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/model-catalog/run.sh",
+      "sha256": "b92cc68dc1ddc34bee84609f52a5087bbc85fd9a5489fd22b7d08f4d7c94e948"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/model-eval/run.sh",
+      "sha256": "6356b8c087e301dbb58f240d526adbd9a716878b382d533ef43a00c7fe156edd"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/model-routing-consistency/run.sh",
+      "sha256": "38f6991b974b4acee6cb055f9d36042b935d21ef98fc30492791bb4cdf76319c"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/mut-process-cleanup/run.sh",
+      "sha256": "1866191d622f1bc8c9e1fe52c61582ccbfbaa0e33473a120cde3dd955594403b"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/mut-safety/run.sh",
+      "sha256": "62ee14ecaddfffac5956060514d2ce3e429358cbff7abd22136aab32e07543c9"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/mut-scope-guard/run.sh",
+      "sha256": "00909e810f2f5cb23fb05caa20c129dc89881c65c5bf340201a95da0b855530d"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/o/fake-opencode.py",
+      "sha256": "ee21fd6de686167f23b49ef8d7206d0919a2cedf7a794569556615b873973c75"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/o/run.sh",
+      "sha256": "93fde1f7fb8e6d404451411068067465613c6658411be5f0584c4c18dd6efa68"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/occ/fake-opencode.py",
+      "sha256": "761b96b8af2ad2da3a66e9b4ade4e4c9d0a1d1e6603b8d19dd4785691be17f8e"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/occ/run.sh",
+      "sha256": "6044bf2bfb53e935ffb1f1261f9ad5eecfb2c7604d46fde2685c6dc94a0e5e54"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/oll-council-effort/run.sh",
+      "sha256": "22a388e4fbf0d1d0e5cf4c2f1da41918aba2a1f209e75c397fba19d39fd8503e"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/oll-reasoning-effort/run.sh",
+      "sha256": "63fbe87176a0a0ebb3c27b564726284bb8eed0707893346fdec16c5a0ac994e6"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/oll-stdin-guard/run.sh",
+      "sha256": "035bf478d53ba5184ae9559723c667698ba1183ac42438def620aa245269ea6d"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/oll-sync/run.sh",
+      "sha256": "8fdf2527378ef1c6065807f17bb26f916adac129ff0d8170b4cb6b830752e6ae"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/opencode-event-plugin/run.sh",
+      "sha256": "b4a51d17ea59a770c0b595f9f4695e648fae5d3235c2e8e3a3ef733b62c111f2"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/opencode-install/run.sh",
+      "sha256": "567c4c23dad20dfea27a4c6a2ceccce99d151feff5d8cc10e226fead003467f3"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/orchestration-practice-cli/run.sh",
+      "sha256": "c297d1ec1f7af70dee6654f8bf4ce353bf1a0127e794aaf959f7c044d32df07d"
+    },
+    {
+      "mode": "file",
+      "path": "tests/orchestration-practices/fixtures/spanish_cases.json",
+      "sha256": "deec6e6fa1b1599368c0ba37d239e08075a15486ccc1b1ebbe4a17de8c0ce25b"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/orchestration-practices/run.sh",
+      "sha256": "9f11b7900925e821b4ac9d5b792b33ed0164d4ffe9cd526e3bf301d21d5d7a51"
+    },
+    {
+      "mode": "file",
+      "path": "tests/orchestration-practices/test_contract.py",
+      "sha256": "15f9dd4de1151c2d8326f0fedbe817f77dbc6541a9e98deeafa7177730cc35e8"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/pipefail-lint/run.sh",
+      "sha256": "1ccdac7228375027648ce80fddab64f8e5963bc852e3f86a5b2b9d714bfa115c"
+    },
+    {
+      "mode": "file",
+      "path": "tests/queue-concurrency/run.py",
+      "sha256": "bed840a36e32e82876bb36924fdd503b18c4c8a48f27862bef6b889857bdbf2f"
+    },
+    {
+      "mode": "file",
+      "path": "tests/round-usage-ledger/run.py",
+      "sha256": "d9779ea367f8235f9663267985052cbb86cfc988c0e211401c1d76bb85062021"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/skill-manifest-hash/run.sh",
+      "sha256": "52a74200b30516f97b315e748c728afb45825e0fc9b1af78ebb5af7eca1e748b"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/skill-stack-install/run.sh",
+      "sha256": "23da84ac41d3e38b8494715ed4a8ff20ee4eec475d1e675fbf35cc8bb127bae6"
+    },
+    {
+      "mode": "file",
+      "path": "tests/ticket-route/cases.jsonl",
+      "sha256": "1f6fed98c5cf8ddba4ebab0cb21c0dcedaaabd01d5ff59e09c79e21283105254"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/ticket-route/run.sh",
+      "sha256": "ffb2f9c9936e58f4158409dd208c4d44533b8bfb8c35feba2054d0e549d460f9"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/tmux-guard/run.sh",
+      "sha256": "badf2de3ec76d17864872eb55066850a1b8f63a65cd4bf1903c53de569a56494"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/tmux-send/run.sh",
+      "sha256": "4e2958f9a53796c0c2b331749dedd165954be4a22a4cfb2c0d32614112562e2d"
+    },
+    {
+      "mode": "file",
+      "path": "tests/token-ledger/run.py",
+      "sha256": "5f1a5e3d11800ca7894d1880cb81c689e9fc64b4536944ff6680aa08e741e330"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/token-ledger/run.sh",
+      "sha256": "c71cddd0a93349cd883314d3ad0c4ce7187f3afaae5c9ba01ebfd26ada5cc113"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/warp-agent-event/run.sh",
+      "sha256": "5c44875c8af6e45dcd0cac1d253747dd8ac72275901692ba5d6a5d44c2a2f4bb"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/warp-agent-install/run.sh",
+      "sha256": "5e0e731d0180c61d480a8ec30f93a353d71561498c025a3da2c7e1afa1e65c06"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/warp-agent-recovery/run.sh",
+      "sha256": "807d8d02d013254d6774adeb16f2de3c5ae689ad4b80d4d7f050794669f55938"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/warp-agent-transport/run.sh",
+      "sha256": "adc74e9a874b28503036a705aa51e4846772d35e14e3a0213f68d35dfcac0446"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/warp-model-pin/run.sh",
+      "sha256": "63ad22c2f2c57df170f8d3bb9ed4a6300ac1eb09dbf32d349c59e65932b9dbda"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/warp-recovery-shell/run.sh",
+      "sha256": "7a538321990c3d51d1ea5572985db7290f785115f474cca1bc0d326ad48bd061"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/weakest-sufficient/run.sh",
+      "sha256": "4b852e925c9795919334a793fe81441955e59620cec04966e600ffb3e5a6c19f"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/zed-setup/run.sh",
+      "sha256": "8e9273365339c4e38bac39706b427c1a213b200ff7097d61aa46867c1b161132"
+    },
+    {
+      "mode": "exec",
+      "path": "xsearch.py",
+      "sha256": "334c9d33c785f259a1ea13064c2e76c9ea0d23a0997959bf3b264fcacc02bb55"
+    }
+  ],
+  "gate": {
+    "gitleaks": "clean",
+    "gitleaks_findings": 0,
+    "literal_hits": 0
+  },
+  "manifest": "deploy/graduation.manifest",
+  "manifest_sha256": "7e5df7f3666bd19d0e9660c2ce8c484dcfceb0407e382ea8f3a210088588704f",
+  "source_commit": "46b8c2f4aebae2c67e57f4c3210e0696dffed54c",
+  "source_tree_ish": "HEAD",
+  "stripped": {
+    "CLAUDE.md": 4,
+    "README.md": 3,
+    "knowledge/delegation-playbook.md": 7,
+    "knowledge/tool-inventory.md": 1
+  },
+  "tool": "core-export"
+}

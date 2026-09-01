@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# multi-council — the SAME prompt to ONE model from EACH provider, in parallel.
+#
+# oll-council gives diversity WITHIN Ollama Cloud (several open models); this
+# gives diversity ACROSS labs+training regimes (Ollama / OpenAI / xAI),
+# which is the stronger de-correlation for a second opinion. Claude (the
+# orchestrator) reads all answers and synthesizes — grafting the best of each.
+#
+#   multi-council "How should I design X? Best approach + tradeoffs."
+#   multi-council "approach for Y" --providers ollama,openai
+#   cat spec.md | multi-council "Propose an implementation approach."
+#
+# Unavailable providers (bad key / no credits) render as a clear (down) note
+# instead of failing the run — same tolerance as oll-council's per-model errors.
+#
+# Flags: --providers a,b,c (default all active routes) · --max-tokens N · --timeout S · --system S
+set -uo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ASK="$REPO/bin/provider-ask"
+
+PROVIDERS="ollama,openai,xai"
+SYSTEM="You are an expert proposing ONE concrete approach to the problem. Be specific and opinionated. Give your approach, then 2-3 key tradeoffs/risks. Keep it under ~250 words. Commit to one approach; do not hedge or enumerate every option."
+MAXTOK=8192
+TIMEOUT=300
+PROMPT=""
+# Ollama Max allows 10 concurrent models. Default to 5 so Hermes, crons, and
+# interactive tmux sessions retain headroom; OLL_MAX_PARALLEL may override it.
+MAX_PARALLEL="${OLL_MAX_PARALLEL:-5}"
+
+die() { echo "multi-council: $*" >&2; exit 1; }
+case "$MAX_PARALLEL" in
+  ''|*[!0-9]*) die "OLL_MAX_PARALLEL must be a positive integer (got '$MAX_PARALLEL')";;
+esac
+[ "$MAX_PARALLEL" -ge 1 ] || die "OLL_MAX_PARALLEL must be a positive integer (got '$MAX_PARALLEL')"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
+    --providers) PROVIDERS="$2"; shift 2;;
+    --system) SYSTEM="$2"; shift 2;;
+    --max-tokens) MAXTOK="$2"; shift 2;;
+    --timeout) TIMEOUT="$2"; shift 2;;
+    -*) die "unknown flag $1";;
+    *) PROMPT="$1"; shift;;
+  esac
+done
+
+STDIN=""; [ ! -t 0 ] && STDIN="$(cat)"
+if [ -n "$PROMPT" ] && [ -n "$STDIN" ]; then FULL="$PROMPT"$'\n\n--- CONTEXT ---\n'"$STDIN"
+elif [ -n "$PROMPT" ]; then FULL="$PROMPT"
+elif [ -n "$STDIN" ]; then FULL="$STDIN"
+else die "no prompt (pass an argument and/or pipe stdin)"; fi
+
+IFS=',' read -r -a PLIST <<< "$PROVIDERS"
+WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+
+# Fan out with a portable Bash 3-compatible cap (no `wait -n`).
+PIDS=()
+for p in "${PLIST[@]}"; do
+  p="$(echo "$p" | tr -d ' ')"; [ -z "$p" ] && continue
+  (
+    if out="$(printf '%s' "$FULL" | "$ASK" "$p" --system "$SYSTEM" \
+                --max-tokens "$MAXTOK" --timeout "$TIMEOUT" 2>"$WORK/$p.err")"; then
+      printf '%s' "$out" > "$WORK/$p.out"
+    else
+      printf '(down: %s)' "$(tr '\n' ' ' < "$WORK/$p.err" | head -c 160)" > "$WORK/$p.out"
+    fi
+  ) &
+  PIDS+=("$!")
+  if [ "${#PIDS[@]}" -ge "$MAX_PARALLEL" ]; then
+    wait "${PIDS[0]}" || true
+    PIDS=("${PIDS[@]:1}")
+  fi
+done
+for pid in "${PIDS[@]}"; do wait "$pid" || true; done
+
+echo "# Multi-provider council — same prompt, ${#PLIST[@]} providers, parallel"
+echo
+for p in "${PLIST[@]}"; do
+  p="$(echo "$p" | tr -d ' ')"; [ -z "$p" ] && continue
+  echo "## $p"
+  cat "$WORK/$p.out" 2>/dev/null || echo "(no output)"
+  echo; echo
+done
+echo "> Synthesis is the orchestrator's job: read all answers, graft the best of each, note where they disagree." >&2

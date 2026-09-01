@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# tmux-send: Deterministic tmux command sender with execution validation
+#
+# Sends a command to a tmux session and VERIFIES it was actually submitted
+# and started executing. Retries if the text sits idle in the prompt.
+#
+# Usage: tmux-send <session> "<command text>"
+# Exit: 0 = confirmed executing, 1 = failed after retries
+#
+# How it works:
+# 1. Capture BEFORE snapshot of the pane
+# 2. Send text literally, then submit with C-m (tmux's `Enter` alias is NOT
+#    accepted as submit by the Codex TUI — it inserts a newline instead)
+# 3. Wait 3 seconds
+# 4. Capture AFTER snapshot
+# 5. Check for signs of execution (Claude, Codex or OpenCode activity markers)
+# 6. Check for signs of idle (text still sitting in prompt, "shift+tab to cycle")
+# 7. If not executing, re-submit (C-m) up to 3 times
+# 8. Report deterministic pass/fail
+
+set -euo pipefail
+
+SESSION="${1:?Usage: tmux-send <session> <command>}"
+COMMAND="${2:?Usage: tmux-send <session> <command>}"
+MAX_RETRIES=3
+WAIT_SECS=3
+
+# Verify session exists. The leading '=' pins an exact name (no tmux prefix matching),
+# so `codex-app` can never be driven by a request for `codex-a`.
+TARGET="=$SESSION"
+if ! tmux has-session -t "$TARGET" 2>/dev/null; then
+  echo "ERROR: tmux session '$SESSION' does not exist" >&2
+  exit 1
+fi
+
+# Resolve the session to a concrete pane id (%N) BEFORE any pane-scoped command.
+# has-session accepts a bare session target, but send-keys/capture-pane do NOT resolve
+# '=name' to a pane — they fail with "can't find pane: =name". Every capture below used
+# `2>/dev/null || echo ""`, so that failure degraded to an empty pane snapshot: the send
+# silently went nowhere while the retry loop compared empty strings. A pane id is
+# unambiguous everywhere, so resolve once here and use it for every pane operation.
+PANE="$(tmux display-message -p -t "$TARGET:" '#{pane_id}' 2>/dev/null || true)"
+if [ -z "$PANE" ]; then
+  echo "ERROR: session '$SESSION' exists but no pane could be resolved" >&2
+  exit 1
+fi
+
+# --- Helper: check if pane shows signs of active execution ---
+is_executing() {
+  local pane="$1"
+  # Signs the command was submitted and Claude Code or Codex is working:
+  # - Present continuous verbs: Discombobulating, Fermenting, Grooving, Churning,
+  #   Cogitating, Baking, Crunched, Germinating, etc. (but NOT "Baked for Xm" = past = idle)
+  # - Spinner character: ✻ ✢ ✽
+  # - "thinking with" 
+  # - "tokens ·" with a spinner
+  # - "↓ Xk tokens" (downloading context)
+  # - "Ran X shell command" / "Read X file" (action in progress)
+  # - Codex: "Working (12s • esc to interrupt)", reasoning/action verbs, or
+  #   a completed turn marker (stronger evidence that submission happened).
+  # - OpenCode: a ⬝-dot spinner + "esc interrupt" (NOT "esc to interrupt" —
+  #   OpenCode drops the "to"). Captured empirically from a live 1.17.9
+  #   opencode-* TUI pane 2026-08-11 (lq-ab9f9bb5).
+  echo "$pane" | grep -qE '(Discombobulating|Fermenting|Grooving|Churning|Cogitating|Baking|Germinating|Synthesizing|Pondering|Percolating|Marinating|Crystallizing|✻|✢|✽|thinking with|↓ [0-9]+k? tokens|Ran [0-9]+ shell|Read [0-9]+ file|Working on|Working \([0-9]+s|esc to interrupt|ctrl-c to interrupt|⬝⬝⬝|esc interrupt|• (Exploring|Reading|Running|Thinking|Searching|Reviewing)|tokens used)'
+}
+
+# --- Helper: check if pane shows signs of idle (text not submitted) ---
+is_idle_prompt() {
+  local pane="$1"
+  # Signs the text is sitting in the prompt WITHOUT being submitted:
+  # - The Claude ❯ or Codex › prompt shows text but no working indicator
+  # - "shift+tab to cycle" at the bottom (idle TUI state)
+  # - "← for agents" at the bottom (idle TUI state)
+  # - "Press up to edit queued messages" (text queued, not sent)
+  # - OpenCode: "Ask anything" composer placeholder (empty-idle only; the
+  #   bottom hint bar persists DURING execution, so it is not an idle marker)
+  # - No present-continuous verb after the prompt
+  echo "$pane" | grep -qE '(shift-?tab to cycle|Press up to edit queued messages|\? for shortcuts|Ask anything)'
+}
+
+# --- Helper: check if a survey/feedback dialog is blocking ---
+has_blocking_dialog() {
+  local pane="$1"
+  echo "$pane" | grep -qE '(How is Claude doing|Bad.*Fine.*Good|Press up to edit)'
+}
+
+# --- Main ---
+
+# Capture BEFORE state
+BEFORE=$(tmux capture-pane -t "$PANE" -p 2>/dev/null || echo "")
+
+# If there's a blocking dialog (survey), dismiss it first
+if echo "$BEFORE" | grep -q "How is Claude doing"; then
+  # Send "0" to dismiss survey
+  tmux send-keys -t "$PANE" "0" C-m
+  sleep 2
+  BEFORE=$(tmux capture-pane -t "$PANE" -p 2>/dev/null || echo "")
+fi
+
+# Send text literally so a prompt equal to a tmux key name (for example `Enter`)
+# cannot be interpreted as that key. Submit with a separate C-m keystroke: verified live
+# that tmux's `Enter` alias inserts a newline in the Codex composer instead of submitting.
+tmux send-keys -t "$PANE" -l "$COMMAND"
+tmux send-keys -t "$PANE" C-m
+
+# Wait and validate
+sleep "$WAIT_SECS"
+
+AFTER=$(tmux capture-pane -t "$PANE" -p 2>/dev/null || echo "")
+
+# Check: is it executing?
+if is_executing "$AFTER"; then
+  echo "✅ CONFIRMED executing — session '$SESSION' started processing command"
+  exit 0
+fi
+
+# Check: is it idle (text sitting in prompt)?
+RETRY=1
+while [ "$RETRY" -le "$MAX_RETRIES" ]; do
+  # If text is sitting in prompt, send Enter to submit
+  if is_idle_prompt "$AFTER"; then
+    echo "⚠️  Retry $RETRY: text appears idle in prompt, sending Enter..." >&2
+    tmux send-keys -t "$PANE" C-m
+    sleep "$WAIT_SECS"
+    AFTER=$(tmux capture-pane -t "$PANE" -p 2>/dev/null || echo "")
+    
+    if is_executing "$AFTER"; then
+      echo "✅ CONFIRMED executing on retry $RETRY — session '$SESSION'"
+      exit 0
+    fi
+  else
+    # Neither executing nor clearly idle. Do NOT just wait: the dominant real failure is a
+    # swallowed submit, and idle markers are host-specific (Claude shows "shift+tab to
+    # cycle"; Codex shows "<model> · <cwd>"). Re-submitting is safe — we already know the
+    # pane is not executing — so repair rather than sleep on an unrecognized idle state.
+    tmux send-keys -t "$PANE" C-m
+    sleep 2
+    AFTER=$(tmux capture-pane -t "$PANE" -p 2>/dev/null || echo "")
+    if is_executing "$AFTER"; then
+      echo "✅ CONFIRMED executing after extended wait — session '$SESSION'"
+      exit 0
+    fi
+  fi
+  
+  RETRY=$((RETRY + 1))
+done
+
+# Final check: dump the pane for debugging
+echo "❌ FAILED: could not confirm execution after $MAX_RETRIES retries" >&2
+echo "--- Current pane state ---" >&2
+echo "$AFTER" | tail -20 >&2
+exit 1

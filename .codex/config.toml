@@ -1,0 +1,11 @@
+# Codex project adapter. Model/provider/auth remain user choices; this file only
+# protects instruction completeness and bounds local multi-agent fan-out.
+project_doc_max_bytes = 98304
+
+[agents]
+max_threads = 4
+max_depth = 1
+
+[features]
+hooks = true
+multi_agent = true

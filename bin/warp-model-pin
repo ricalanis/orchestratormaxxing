@@ -1,0 +1,446 @@
+#!/usr/bin/env python3
+"""warp-model-pin — hold Warp's agent model on the harness endpoint.
+
+Warp splits model state across two files with **opposite persistence**, and only one
+of them is durable:
+
+  * `~/.config/warp-terminal/user_preferences.json` holds `AvailableLLMs`, a ~166KB
+    catalog blob Warp **re-fetches from its own servers on every start** (measured:
+    prefs rewritten at launch, `default_id` re-seeded to `auto-genius`). Writing a
+    default here is futile — Warp clobbers it seconds later. Do not target it.
+  * `~/.config/warp-terminal/settings.toml` holds
+    `[agents.execution_profiles.<profile>] base_model = "<id>"`. This file is
+    user-owned: Warp does not rewrite it on update or launch (measured: untouched
+    across an app update and a restart that rewrote the prefs blob). This is the
+    durable lever, and it is what makes the pin survive updates.
+
+The id is a custom inference endpoint's model, which never appears in Warp's
+server catalog and is not stored on disk anywhere (the key lives in the OS keychain,
+the endpoint definition in the account). So it is resolved from Warp's own history:
+the most recent `ai_queries.model_id` that is neither a catalog entry nor an `auto*`
+router. That self-heals the id when the endpoint is re-added under a new UUID.
+
+Resolution order: `~/.config/claudemaxxing/warp-model.conf` → discovered from history
+→ refuse (exit 2). It never falls back to a catalog id such as `glm-5.2-fireworks`:
+same model family, opposite billing, so a silent fallback would undo the point.
+
+The TOML is edited as a **targeted line replacement**, never re-serialized — Warp's
+settings.toml carries comment-free but quote-sensitive regex tables that a
+round-trip would mangle. The result is parsed back with tomllib before it is kept.
+
+Exit codes: 0 ok/pinned · 1 drift (with --check) · 2 refusal (unresolvable/unparseable)
+· 3 Warp is running.
+"""
+import argparse
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+
+PREFS = os.path.expanduser("~/.config/warp-terminal/user_preferences.json")
+SETTINGS = os.path.expanduser("~/.config/warp-terminal/settings.toml")
+DB = os.path.expanduser("~/.local/state/warp-terminal/warp.sqlite")
+CONF = os.path.expanduser("~/.config/claudemaxxing/warp-model.conf")
+
+# Warp's own routers; their ids are prefixes, not exact values.
+ROUTER_PREFIXES = ("auto", "cli-agent", "computer-use-agent")
+
+PROFILE_SECTION = re.compile(r"^\[agents\.execution_profiles\.([^\]]+)\]\s*$")
+BASE_MODEL_LINE = re.compile(r'^(\s*base_model\s*=\s*)"([^"]*)"(\s*)$')
+
+EXIT_OK, EXIT_DRIFT, EXIT_REFUSE, EXIT_RUNNING = 0, 1, 2, 3
+
+
+def warp_running():
+    """True when Warp holds its config in memory (it rewrites on exit)."""
+    fake = os.environ.get("WARP_MODEL_PIN_FAKE_RUNNING")
+    if fake in ("0", "1"):
+        return fake == "1"
+    try:
+        return subprocess.run(["pgrep", "-x", "warp-terminal"],
+                              capture_output=True, timeout=5).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False  # cannot measure is not the same as running
+
+
+def catalog_ids():
+    """Ids Warp itself offers. Read-only: the prefs blob is server-owned."""
+    import json
+    if not os.path.exists(PREFS):
+        return set()
+    try:
+        with open(PREFS, encoding="utf-8") as fh:
+            prefs = json.load(fh)["prefs"]
+        blob = prefs.get("AvailableLLMs")
+        llms = json.loads(blob) if isinstance(blob, str) else (blob or {})
+    except (ValueError, KeyError, OSError):
+        return set()
+    return {c.get("id") for m in llms.values() if isinstance(m, dict)
+            for c in m.get("choices", []) if isinstance(c, dict)}
+
+
+def discover_endpoint_model(catalog):
+    """Most recent model id that is neither a catalog entry nor a Warp router.
+
+    A custom inference endpoint's models are the only ids satisfying both, so
+    "used it, but Warp does not list it" identifies the endpoint without needing the
+    endpoint config, which lives in the OS keychain and the account, never on disk.
+    """
+    if not os.path.exists(DB):
+        return None
+    try:
+        con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        rows = con.execute(
+            "select model_id from ai_queries "
+            "where model_id is not null and model_id != '' order by start_ts desc"
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+    for (mid,) in rows:
+        if mid in catalog or any(mid.startswith(p) for p in ROUTER_PREFIXES):
+            continue
+        return mid
+    return None
+
+
+def policy_default():
+    """The harness's canonical default model, read from bin/oll — the single matrix.
+
+    Same source `zed-setup` reads, so Warp and Zed cannot drift apart: changing
+    DEFAULT_MODEL in one place re-aims both hosts on their next pin.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in (os.path.join(here, "oll"), os.path.expanduser("~/.local/bin/oll")):
+        if os.path.exists(cand):
+            import runpy
+            try:
+                return runpy.run_path(cand).get("DEFAULT_MODEL")
+            except Exception:
+                continue
+    return None
+
+
+def endpoint_uuid_map():
+    """{warp_uuid: {harness model names}} recovered from Warp's own database.
+
+    Warp never exposes which model an endpoint id refers to — the picker shows a
+    name, the config stores an opaque UUID, and the endpoint definition lives in the
+    account, not on disk. But `agent_conversations` records the readable `model_id`
+    and `ai_queries` records the UUID for the same conversation, so joining them
+    recovers the mapping. Names are filtered against the harness policy so Warp's
+    auxiliary models (summarizer Haiku, GPT-5 Nano) cannot pollute it, and router
+    ids are excluded so an `auto-genius` conversation that merely mentions a model
+    is never mistaken for an endpoint binding.
+    """
+    import json as _json
+    if not os.path.exists(DB):
+        return {}
+    known = set()
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in (os.path.join(here, "oll"), os.path.expanduser("~/.local/bin/oll")):
+        if os.path.exists(cand):
+            import runpy
+            try:
+                pol = runpy.run_path(cand)
+                known = set(pol.get("NORMAL_WORKER_MODELS", ()))
+                known |= {r["model"] for r in pol.get("STATEFUL_ROUTES", {}).values()}
+                break
+            except Exception:
+                continue
+    if not known:
+        return {}
+    try:
+        con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return {}
+    try:
+        names = {}
+        for cid, data in con.execute(
+                "select conversation_id, conversation_data from agent_conversations"):
+            blob = data if isinstance(data, str) else bytes(data).decode("utf-8", "replace")
+            found = set()
+
+            def walk(o):
+                if isinstance(o, dict):
+                    for k, v in o.items():
+                        if k == "model_id" and isinstance(v, str) and v in known:
+                            found.add(v)
+                        walk(v)
+                elif isinstance(o, list):
+                    for i in o:
+                        walk(i)
+            try:
+                walk(_json.loads(blob))
+            except Exception:
+                continue
+            if found:
+                names[cid] = found
+        out = {}
+        for cid, uuid in con.execute(
+                "select conversation_id, model_id from ai_queries where model_id is not null"):
+            if not uuid or any(uuid.startswith(p) for p in ROUTER_PREFIXES):
+                continue      # a router conversation that merely mentions a model
+            for n in names.get(cid, ()):
+                out.setdefault(uuid, set()).add(n)
+        return out
+    except sqlite3.Error:
+        return {}
+    finally:
+        con.close()
+
+
+def resolve_target():
+    """(warp_model_id, source) or (None, reason).
+
+    Order: explicit conf → the Warp UUID bound to the harness DEFAULT_MODEL →
+    refuse. It resolves the POLICY model, not "whatever was used last": aligning
+    Warp with Zed is the point, and "last used" would silently keep whatever the
+    picker happened to be on.
+    """
+    if os.path.exists(CONF):
+        with open(CONF, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    return line, f"config ({CONF})"
+
+    want = policy_default()
+    if not want:
+        return None, "could not read DEFAULT_MODEL from bin/oll"
+
+    uuids = endpoint_uuid_map()
+    matches = sorted(u for u, names in uuids.items() if want in names)
+    if len(matches) == 1:
+        return matches[0], f"harness DEFAULT_MODEL {want} (Warp id {matches[0][:8]})"
+    if len(matches) > 1:
+        return None, (f"{want} maps to several Warp ids {matches!r} — ambiguous, "
+                      f"pin one explicitly in {CONF}")
+    known = sorted({n for names in uuids.values() for n in names})
+    return None, (
+        f"the harness default {want!r} has no Warp model id yet.\n"
+        "  Warp mints an id for a custom-endpoint model only once you select it, and\n"
+        f"  this one never has been. Warp currently knows: {known or 'nothing'}.\n"
+        "  Fix once, then this self-heals: open Warp -> model picker -> select\n"
+        f"  '{want}' (add it to the inference endpoint first if it is not listed;\n"
+        "  run `warp-ollama` for the endpoint values). Re-run afterwards.")
+
+
+def read_profiles(text):
+    """{profile_name: current_base_model} for every execution profile declaring one."""
+    out, current = {}, None
+    for line in text.splitlines():
+        m = PROFILE_SECTION.match(line)
+        if m:
+            current = m.group(1)
+            continue
+        if line.startswith("[") and not PROFILE_SECTION.match(line):
+            current = None
+            continue
+        if current:
+            bm = BASE_MODEL_LINE.match(line)
+            if bm:
+                out[current] = bm.group(2)
+    return out
+
+
+def rewrite(text, target):
+    """Targeted line replacement — never a TOML round-trip (it would mangle the
+    quote-sensitive secret-regex tables Warp writes)."""
+    lines, current, changed = text.splitlines(keepends=True), None, 0
+    for i, line in enumerate(lines):
+        stripped = line.rstrip("\n")
+        m = PROFILE_SECTION.match(stripped)
+        if m:
+            current = m.group(1)
+            continue
+        if stripped.startswith("[") and not m:
+            current = None
+            continue
+        if current:
+            bm = BASE_MODEL_LINE.match(stripped)
+            if bm and bm.group(2) != target:
+                nl = "\n" if line.endswith("\n") else ""
+                lines[i] = f'{bm.group(1)}"{target}"{bm.group(3)}{nl}'
+                changed += 1
+    return "".join(lines), changed
+
+
+def write_settings(path, text, original):
+    """Structurally verify, then atomically replace, preserving mode.
+
+    Deliberately NOT validated with tomllib: Warp's own writer emits multi-line
+    inline tables with trailing commas in `custom_secret_regex_list`, which TOML 1.0
+    forbids and stdlib tomllib rejects — validating with a stricter parser than the
+    producer uses would refuse every real Warp config. The guard that actually
+    matters is tighter anyway: assert the ONLY lines that changed are base_model
+    lines now holding the target. Anything else differing means the rewrite touched
+    something it had no business touching, and we refuse.
+    """
+    old_lines, new_lines = original.splitlines(), text.splitlines()
+    if len(old_lines) != len(new_lines):
+        raise ValueError("rewrite changed the line count")
+    for a, b in zip(old_lines, new_lines):
+        if a == b:
+            continue
+        mb = BASE_MODEL_LINE.match(b)
+        if not BASE_MODEL_LINE.match(a) or not mb:
+            raise ValueError(f"rewrite touched a non-base_model line: {a!r} -> {b!r}")
+    mode_bits = os.stat(path).st_mode & 0o777
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".settings.toml.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp, mode_bits)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def _env_secs(name, default):
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+def _pin_after_startup(wait_up=None, settle=None, window=None, interval=None):
+    """Wait for Warp to start and finish rewriting settings, then hold the pin.
+
+    Bounded and self-correcting: Warp's startup write lands at an unpredictable
+    moment, so a single delayed write can still lose the race. This re-asserts the
+    pin across a short window and stops after two consecutive confirmations, then
+    exits. It never loops forever and never touches anything once the value sticks.
+    """
+    import time
+    # Injectable so the contract can exercise the real path without a 40s startup wait.
+    wait_up = int(_env_secs("WARP_MODEL_PIN_WAIT_UP", 40 if wait_up is None else wait_up))
+    settle = _env_secs("WARP_MODEL_PIN_SETTLE", 12 if settle is None else settle)
+    window = _env_secs("WARP_MODEL_PIN_WINDOW", 90 if window is None else window)
+    interval = _env_secs("WARP_MODEL_PIN_INTERVAL", 6 if interval is None else interval)
+    for _ in range(wait_up):
+        if warp_running():
+            break
+        time.sleep(1)
+    time.sleep(settle)
+
+    target, _src = resolve_target()
+    if target is None or not os.path.exists(SETTINGS):
+        return
+    confirmed, waited = 0, 0
+    while waited < window and confirmed < 2:
+        try:
+            text = open(SETTINGS, encoding="utf-8").read()
+            new, changed = rewrite(text, target)
+            if changed:
+                # Warp is running by design here: it does NOT rewrite settings.toml
+                # mid-session, so this write survives (measured).
+                write_settings(SETTINGS, new, text)
+                confirmed = 0
+            else:
+                confirmed += 1
+        except Exception:
+            return
+        time.sleep(interval)
+        waited += interval
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Hold Warp's agent model on the harness endpoint")
+    ap.add_argument("--check", action="store_true",
+                    help="report drift without writing (exit 1 when drifted)")
+    ap.add_argument("--resolve", action="store_true",
+                    help="print the model id that would be pinned, then exit")
+    ap.add_argument("--backup", metavar="PATH",
+                    help="copy settings.toml here before writing")
+    ap.add_argument("--launch", action="store_true",
+                    help="pin, then exec warp-terminal (for the .desktop Exec line; "
+                         "the desktop spec forbids ';' and '>' so the shell form is "
+                         "not expressible there). Never blocks the launch.")
+    args, passthrough = ap.parse_known_args()
+
+    if args.launch:
+        # Pin AFTER startup, never before. Measured 2026-08-24: Warp rewrites
+        # settings.toml from its ACCOUNT at startup — it restored both base_model and
+        # is_settings_sync_enabled over local edits — so a pre-launch pin is erased
+        # seconds later. A write while Warp is already running is not reverted, and
+        # Warp honours it live (the agent served on the pinned model without a
+        # restart). So: fork a child that waits out startup and pins, then exec Warp.
+        if os.fork() == 0:
+            os.setsid()
+            try:
+                _pin_after_startup()
+            except Exception:
+                pass
+            os._exit(0)
+        os.execvp("warp-terminal", ["warp-terminal", *passthrough])
+
+    if not os.path.exists(SETTINGS):
+        print(f"warp-model-pin: no Warp settings at {SETTINGS}", file=sys.stderr)
+        return EXIT_REFUSE
+
+    try:
+        text = open(SETTINGS, encoding="utf-8").read()
+    except OSError as exc:
+        print(f"warp-model-pin: refusing, settings.toml unreadable ({exc}); "
+              "file left byte-untouched", file=sys.stderr)
+        return EXIT_REFUSE
+
+    target, source = resolve_target()
+    if target is None:
+        print(f"warp-model-pin: refusing, {source}", file=sys.stderr)
+        return EXIT_REFUSE
+
+    if args.resolve:
+        print(target)
+        return EXIT_OK
+
+    profiles = read_profiles(text)
+    if not profiles:
+        print("warp-model-pin: refusing, no [agents.execution_profiles.*] section "
+              "declares base_model — not inventing one.", file=sys.stderr)
+        return EXIT_REFUSE
+
+    drifted = [k for k, v in profiles.items() if v != target]
+
+    if args.check:
+        for name, cur in profiles.items():
+            print(f"  {name}: {cur}" + ("" if cur == target else f"  -> want {target}"))
+        if drifted:
+            print(f"warp-model-pin: drifted ({', '.join(drifted)}); "
+                  f"target {target} via {source}")
+            return EXIT_DRIFT
+        print(f"warp-model-pin: pinned to {target} ({source})")
+        return EXIT_OK
+
+    if not drifted:
+        print(f"warp-model-pin: already pinned to {target} ({source})")
+        return EXIT_OK
+
+    if warp_running():
+        print("warp-model-pin: refusing, Warp is running — it rewrites settings from "
+              "memory on exit, so this write would be discarded.\n"
+              "  Quit Warp and re-run (the launcher wrapper does this automatically).",
+              file=sys.stderr)
+        return EXIT_RUNNING
+
+    if args.backup:
+        shutil.copy2(SETTINGS, args.backup)
+    new, changed = rewrite(text, target)
+    write_settings(SETTINGS, new, text)
+    print(f"warp-model-pin: pinned {changed} profile(s) "
+          f"({', '.join(drifted)}) -> {target} ({source})")
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

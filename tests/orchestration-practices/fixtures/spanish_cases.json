@@ -1,0 +1,39 @@
+{
+  "reported_prompt": {
+    "text": "Delega dos analisis independientes, con contrato antes del dispatch, presupuesto de 5 minutos y freno despues de 2 pasos sin progreso.",
+    "practice_ids": ["prompt.contract-first", "loop.four-brakes"]
+  },
+  "positive": [
+    {"practice_id": "prompt.contract-first", "text": "Escribe el contrato antes de delegar."},
+    {"practice_id": "prompt.external-critic", "text": "Pide una revisión a un crítico externo."},
+    {"practice_id": "prompt.checklist-grade", "text": "Hay que calificar contra una lista de verificación."},
+    {"practice_id": "context.minimal-frontier", "text": "Usa una frontera mínima de herramientas."},
+    {"practice_id": "context.checkpoint-not-memory", "text": "Continúa desde el punto de control, no desde memoria."},
+    {"practice_id": "context.fresh-window", "text": "Abre una ventana de contexto nueva."},
+    {"practice_id": "context.governed-memory", "text": "Guarda el hecho en memoria gobernada."},
+    {"practice_id": "harness.etclovg-attribution", "text": "Haz la atribución ETCLOVG antes de culpar al modelo."},
+    {"practice_id": "harness.deterministic-verifier", "text": "La aceptación requiere un verificador determinista."},
+    {"practice_id": "harness.untrusted-tools", "text": "Trata la salida de herramientas como entrada no confiable."},
+    {"practice_id": "harness.data-contracts", "text": "Define un contrato de datos para la frontera."},
+    {"practice_id": "loop.four-brakes", "text": "Configura cuatro frenos de ejecución."},
+    {"practice_id": "loop.event-driven", "text": "Elige un bucle dirigido por eventos."},
+    {"practice_id": "loop.warranted-ratchet", "text": "Aplica un ratchet sustentado por evidencia."},
+    {"practice_id": "loop.repeat-safe-writes", "text": "Exige escrituras seguras al repetir."},
+    {"practice_id": "loop.operator-ledger", "text": "Conserva un registro del operador."},
+    {"practice_id": "graph.node-collapse", "text": "Conviene colapsar nodos equivalentes."},
+    {"practice_id": "graph.typed-state-single-writer", "text": "El estado tipado necesita un solo escritor."},
+    {"practice_id": "graph.code-first-routing", "text": "Usa enrutamiento primero por código."},
+    {"practice_id": "graph.correlated-agreement", "text": "Recuerda que el acuerdo entre modelos está correlacionado."}
+  ],
+  "negative": [
+    "El contrato de renta se firma mañana.",
+    "Compré cuatro frenos para la bicicleta.",
+    "La caminata terminó sin progreso visible.",
+    "Esta escritora publicó una novela.",
+    "Necesito papel cuadriculado para la escuela.",
+    "xcontrato antes de delegary",
+    "metadata contract should remain unrelated",
+    "stone writer remains unrelated",
+    "prevent driven systems from drifting"
+  ]
+}

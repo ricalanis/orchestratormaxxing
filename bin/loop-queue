@@ -1,0 +1,416 @@
+#!/usr/bin/env python3
+"""loop-queue — the forward-looking flaw queue for the self-improvement loop.
+
+Loop engineering (Osmani/steipete/Huntley, June 2026) names the piece our harness lacked:
+a *forward* state file a fresh-context iteration reads FIRST, distinct from the *backward*
+audit (`knowledge/self-improve-log.md`). The Ralph lesson — "the repo remembers, not the
+conversation" — applied to self-improvement: flaws are captured continuously (deterministic
+watchers, free) and drained event-driven (a round fires only when the queue is non-empty),
+so rounds stay proportional to real signal instead of a fixed clock manufacturing dry rounds.
+
+This tool is the QUEUE STATE. It is deterministic (no LLM), append-idempotent (the same
+harness-verify red enqueued every session does NOT duplicate), and inspectable (`list`).
+
+State: knowledge/loop-queue.jsonl  (one JSON object per line; repo-local so it survives across
+sessions — commit it for cloud/cross-machine durability, which a /self-improve round does anyway).
+
+Each item:
+  id      lq-<8hex(layer+flaw)>  — content hash → idempotent add + recurrence detection
+  ts      ISO8601 capture time
+  layer   ETCLOVG layer (E/T/C/L/O/V/G) — same taxonomy as harness-verify & the log
+  source  who captured it: harness-verify | mem-audit | research | delegation | manual
+  flaw    one-line statement of the flaw (the MINE input)
+  status  open | claimed | resolved
+  round   resolving round ref (date or log line), set on resolve
+  diag    optional bounded attribution payload (exit code / stderr tail / measured state).
+          NOT part of the content hash: the same flaw stays ONE idempotent item however its
+          diagnostics differ run to run. It exists because the queue is the only artifact
+          that crosses machines — .results/ is gitignored, so a flaw enqueued on the Mac
+          arrived here with nothing to diagnose (lq-0fafcc65, 2026-08-17).
+
+Commands:
+  loop-queue add --layer V --source harness-verify "flaw text" [--diag "rc=1 stderr_tail=<…>"]
+  loop-queue list [--status open|claimed|resolved|all] [--json]
+  loop-queue status [--json] [--gate]   # --gate: exit 0 if actionable (open>0), 1 if idle
+  loop-queue claim <id>
+  loop-queue resolve <id> [--round <ref>] [--note <text>]
+  loop-queue reopen <id>                # a resolved flaw recurred / its fix regressed
+  loop-queue expire [--source research] [--days 30] [--dry-run] [--json]   # TTL sweep
+
+Iron-rule note: this captures and routes flaws deterministically; it never judges whether a
+flaw is real or a fix is good — that stays with the verifier + cross-model critic in the round.
+"""
+import argparse, fcntl, hashlib, json, os, socket, sys, tempfile, time
+from datetime import datetime, timezone
+
+# --- consume-once under concurrency (2026-08-09) --------------------------------------------
+# save() is an atomic os.replace, but the TRANSACTION (load → mutate → save) never was: two
+# concurrent `add`s lose one item, and two concurrent `claim`s both "win" the same flaw. Three
+# real writers exist today — the SessionStart hook across concurrent sessions plus the daily
+# loop-cron tick — and arXiv:2608.03836 measured this exact shape firing k× under k concurrent
+# resumers in 36/40 cells across shipping frameworks. Every MUTATING verb therefore runs under
+# a bounded sidecar flock (the same fcntl pattern as bin/memoryctl), and `claim` is a
+# compare-and-swap. The wait is BOUNDED (never an indefinite block): loop-tick kills its
+# subprocesses at 30s, so an unbounded lock wait would convert contention into a watcher error.
+MUTATING_CMDS = {"add", "claim", "resolve", "reopen", "expire"}
+
+
+def acquire_lock(path):
+    """Bounded exclusive flock on a sidecar <queue>.lock. Returns the open file
+    (closing it releases the lock); exits 1 cleanly on deadline."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    deadline = time.monotonic() + float(os.environ.get("LOOP_QUEUE_LOCK_TIMEOUT", "10"))
+    fh = open(path + ".lock", "a+")
+    while True:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fh
+        except OSError:
+            if time.monotonic() >= deadline:
+                fh.close()
+                print("loop-queue: queue lock busy (another writer holds it) — "
+                      "gave up after the bounded wait", file=sys.stderr)
+                sys.exit(1)
+            time.sleep(0.05)
+
+# --- TTL sweep (`expire`) -------------------------------------------------------------------
+# `loop-tick`'s RESEARCH_OPEN_CAP bounds research INFLOW; nothing bounded a lead's RESIDENCE
+# time, so untriaged leads accumulate until `slots = cap - open` pins at 0 and intake silently
+# stops (observed: 20 open leads from 2026-06-19..2026-07-17 killed intake for three weeks).
+# TTL is the drain-side complement.
+#
+# Only these sources may EVER be swept. A real-signal flaw (harness-verify red, mem-audit drift,
+# manual, session, night-research, usage) must never auto-vanish — losing one silently is exactly
+# the signal loss this queue exists to prevent. A research lead is speculative and cheap to
+# re-surface (harness-scan re-fetches), so it is the only safe thing to age out.
+EXPIRABLE_SOURCES = {"research"}
+# 30d reuses the memory protocol's `reference` decay: a research lead is an external pointer,
+# not a measured flaw, so it decays on the harness's existing clock for external pointers
+# rather than a new invented constant.
+DEFAULT_TTL_DAYS = 30
+
+
+def repo_root():
+    import subprocess
+    try:
+        out = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return os.getcwd()
+
+
+def queue_path():
+    return os.path.join(os.environ.get("LOOP_QUEUE_DIR") or os.path.join(repo_root(), "knowledge"),
+                        "loop-queue.jsonl")
+
+
+def _norm(text):
+    return " ".join((text or "").lower().split())
+
+
+def item_id(layer, flaw):
+    h = hashlib.sha1(f"{(layer or '').upper()}\x00{_norm(flaw)}".encode()).hexdigest()[:8]
+    return f"lq-{h}"
+
+
+def load(path):
+    items = []
+    if os.path.isfile(path):
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    items.append(json.loads(line))
+                except ValueError:
+                    pass  # tolerate a corrupt line rather than lose the queue
+    return items
+
+
+def save(path, items):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".loop-queue.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            for it in items:
+                fh.write(json.dumps(it, ensure_ascii=False) + "\n")
+        os.replace(tmp, path)  # atomic
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def now_iso():
+    return os.environ.get("LOOP_QUEUE_TS") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def host_name():
+    """Which machine observed this flaw. PROVENANCE, never identity or routing.
+
+    The queue is synced across machines by git, so a flaw can be enqueued on one
+    host and read on another. A red is not always portable — bin/memory-bridge-hermes.sh's
+    contract fails on macOS (BSD sed) and passes on Linux — so an automated releaser
+    must be able to tell "this red is gone" from "this red was never mine to see".
+    Item ids stay content-hashed (layer+flaw), so stamping the host does NOT change
+    identity or weaken cross-machine idempotency.
+    """
+    return os.environ.get("LOOP_QUEUE_HOST") or socket.gethostname()
+
+
+DIAG_MAX = 1200
+
+
+def _bound_diag(text):
+    """One line, capped. Keeps the tail — a traceback's cause is its last line."""
+    text = " ".join((text or "").split())
+    return text[-DIAG_MAX:] if len(text) > DIAG_MAX else text
+
+
+def cmd_add(args, path, items):
+    flaw = args.flaw
+    if not flaw:
+        print("add: flaw text required", file=sys.stderr)
+        return 2
+    iid = item_id(args.layer, flaw)
+    # idempotent: an OPEN/CLAIMED item with this content hash already covers it.
+    for it in items:
+        if it.get("id") == iid and it.get("status") in ("open", "claimed"):
+            print(f"= {iid} already {it['status']} (idempotent, not re-added)")
+            return 0
+    # a previously RESOLVED item with this hash means the flaw RECURRED — re-surface it loudly.
+    # TTL-EXPIRED items are excluded: they were swept for AGE, never fixed, so re-surfacing one
+    # is ordinary intake — not a regressed fix. ⚠RECURRED must keep meaning "a fix regressed",
+    # else the loop's one loud signal gets diluted by routine research churn.
+    recurred = any(it.get("id") == iid and it.get("status") == "resolved" and not it.get("expired")
+                   for it in items)
+    items.append({
+        "id": iid, "ts": now_iso(), "layer": (args.layer or "?").upper(),
+        "source": args.source or "manual", "flaw": flaw, "status": "open",
+        "round": None, "host": host_name(),
+        **({"recurred": True} if recurred else {}),
+        # provenance STRING only — recorded so a round can re-run the exact
+        # command that surfaced the flaw (Ollie's rerun-the-failing-input step);
+        # this tool NEVER executes it ("never judges flaws" stands).
+        **({"repro": args.repro} if getattr(args, "repro", None) else {}),
+        # bounded here too, not only at the caller: this file is committed and synced,
+        # so an unbounded diagnostic would be a caller's bug written into shared state.
+        **({"diag": _bound_diag(args.diag)} if getattr(args, "diag", None) else {}),
+    })
+    save(path, items)
+    print(f"+ {iid} [{(args.layer or '?').upper()}] ({args.source or 'manual'})"
+          f"{' RECURRED' if recurred else ''}: {flaw}")
+    return 0
+
+
+def _find(items, iid):
+    matches = [it for it in items if it.get("id") == iid or it.get("id") == f"lq-{iid}"]
+    return matches[-1] if matches else None
+
+
+def cmd_claim(args, path, items):
+    it = _find(items, args.id)
+    if not it:
+        print(f"claim: no item {args.id}", file=sys.stderr)
+        return 1
+    # compare-and-swap: only an OPEN item is claimable. Under the main() lock the
+    # load→check→save is atomic, so concurrent claimers get exactly one winner —
+    # a nonzero exit here means "another round holds it; pick a different item",
+    # not a tool failure.
+    if it.get("status") != "open":
+        print(f"claim: {it['id']} is {it.get('status')} — not claimable "
+              f"(another round may hold it)", file=sys.stderr)
+        return 1
+    it["status"] = "claimed"
+    save(path, items)
+    print(f"→ {it['id']} claimed")
+    return 0
+
+
+def cmd_resolve(args, path, items):
+    it = _find(items, args.id)
+    if not it:
+        print(f"resolve: no item {args.id}", file=sys.stderr)
+        return 1
+    it["status"] = "resolved"
+    it["round"] = args.round or now_iso()[:10]
+    if args.note:
+        it["note"] = args.note
+    save(path, items)
+    print(f"✓ {it['id']} resolved (round {it['round']})")
+    return 0
+
+
+def cmd_reopen(args, path, items):
+    it = _find(items, args.id)
+    if not it:
+        print(f"reopen: no item {args.id}", file=sys.stderr)
+        return 1
+    it["status"] = "open"
+    it["round"] = None
+    # a reopen must be COUNTABLE (it is the rework numerator): stamp when and
+    # how often — before this, a reopened flaw was indistinguishable from a
+    # never-resolved one.
+    it["reopened_at"] = now_iso()
+    it["reopen_count"] = int(it.get("reopen_count") or 0) + 1
+    save(path, items)
+    print(f"↺ {it['id']} reopened (reopen #{it['reopen_count']})")
+    return 0
+
+
+def _parse_ts(ts):
+    try:
+        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def cmd_expire(args, path, items):
+    """Age out untriaged leads of an EXPIRABLE source. Deterministic; never touches real flaws."""
+    src = args.source
+    if src not in EXPIRABLE_SOURCES:
+        print(f"expire: refusing source '{src}' — only {sorted(EXPIRABLE_SOURCES)} may be swept; "
+              f"real-signal flaws never auto-vanish", file=sys.stderr)
+        return 2
+    if args.days <= 0:
+        print("expire: --days must be > 0", file=sys.stderr)
+        return 2
+    now = _parse_ts(now_iso())
+    if now is None:
+        print("expire: unparseable current timestamp", file=sys.stderr)
+        return 2
+    hits = []
+    for it in items:
+        # `claimed` is deliberately excluded: someone/some round is holding it.
+        if it.get("status") != "open" or it.get("source") != src:
+            continue
+        t = _parse_ts(it.get("ts"))
+        if t is None:  # unparseable stamp → keep (fail safe toward retaining signal)
+            continue
+        if (now - t).total_seconds() < args.days * 86400:
+            continue
+        hits.append(it)
+    if not args.dry_run and hits:
+        for it in hits:
+            it["status"] = "resolved"
+            it["round"] = "ttl"
+            it["expired"] = True
+            it["note"] = f"auto-expired: untriaged {src} lead older than {args.days}d TTL"
+        save(path, items)
+    if args.json:
+        print(json.dumps({"source": src, "days": args.days, "dry_run": bool(args.dry_run),
+                          "expired": [it.get("id") for it in hits], "count": len(hits)}))
+    else:
+        print(f"{'would expire' if args.dry_run else 'expired'} {len(hits)} open {src} "
+              f"lead(s) older than {args.days}d")
+        for it in hits:
+            print(f"  - {it.get('id')} {it.get('ts','?')}  {str(it.get('flaw',''))[:70]}")
+    return 0
+
+
+def cmd_list(args, path, items):
+    want = args.status
+    sel = [it for it in items if want == "all" or it.get("status") == want]
+    if args.json:
+        print(json.dumps(sel, indent=2))
+        return 0
+    if not sel:
+        print(f"(no {want} items)")
+        return 0
+    for it in sel:
+        flag = " ⚠RECURRED" if it.get("recurred") and it.get("status") != "resolved" else ""
+        rnd = f" → {it['round']}" if it.get("round") else ""
+        print(f"{it['id']}  [{it.get('layer','?')}] {it.get('status','?'):8} "
+              f"{it.get('source','?'):14}{flag}{rnd}  {it.get('flaw','')}")
+        if it.get("repro"):
+            print(f"      repro: {it['repro']}")
+        if it.get("diag"):
+            print(f"      diag:  {it['diag']}")
+    return 0
+
+
+def cmd_status(args, path, items):
+    counts = {"open": 0, "claimed": 0, "resolved": 0}
+    for it in items:
+        counts[it.get("status", "open")] = counts.get(it.get("status", "open"), 0) + 1
+    # Actionable = open flaws from a REAL signal (harness-verify red, mem-audit drift,
+    # delegation failure, manual). Speculative `research` leads sit in the queue to be
+    # triaged opportunistically when a real round fires — they must NOT fire a round on
+    # their own, else a sparse real-flaw signal gets drowned by research noise and the
+    # loop manufactures dry, reward-hack-prone rounds (loop-engineering doctrine).
+    actionable = sum(1 for it in items
+                     if it.get("status") == "open" and it.get("source") != "research")
+    reopen_events = sum(int(it.get("reopen_count") or 0) for it in items)
+    reopened_items = sum(1 for it in items if it.get("reopen_count"))
+    if args.json:
+        print(json.dumps({**counts, "total": len(items), "actionable": actionable,
+                          "reopened_items": reopened_items, "reopen_events": reopen_events}))
+    elif not args.gate:
+        print(f"open={counts['open']} claimed={counts['claimed']} "
+              f"resolved={counts['resolved']} total={len(items)} actionable={actionable} "
+              f"reopened={reopened_items}({reopen_events}x)")
+    if args.gate:
+        return 0 if actionable > 0 else 1
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description="forward-looking flaw queue for the self-improve loop")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    a = sub.add_parser("add")
+    a.add_argument("flaw", nargs="?")
+    a.add_argument("--layer", default="?")
+    a.add_argument("--source", default="manual")
+    a.add_argument("--diag", help="bounded attribution payload (exit code, stderr tail, "
+                                  "measured state). Does NOT participate in the content "
+                                  "hash, so it never splits one flaw into many items.")
+    a.add_argument("--repro", help="provenance: the exact command that surfaced "
+                                   "the flaw (recorded, never executed)")
+    a.set_defaults(fn=cmd_add)
+
+    l = sub.add_parser("list")
+    l.add_argument("--status", choices=["open", "claimed", "resolved", "all"], default="open")
+    l.add_argument("--json", action="store_true")
+    l.set_defaults(fn=cmd_list)
+
+    x = sub.add_parser("expire")
+    x.add_argument("--source", default="research")
+    x.add_argument("--days", type=int, default=DEFAULT_TTL_DAYS)
+    x.add_argument("--dry-run", action="store_true")
+    x.add_argument("--json", action="store_true")
+    x.set_defaults(fn=cmd_expire)
+
+    s = sub.add_parser("status")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--gate", action="store_true")
+    s.set_defaults(fn=cmd_status)
+
+    for name, fn in (("claim", cmd_claim), ("resolve", cmd_resolve), ("reopen", cmd_reopen)):
+        p = sub.add_parser(name)
+        p.add_argument("id")
+        if name == "resolve":
+            p.add_argument("--round")
+            p.add_argument("--note")
+        p.set_defaults(fn=fn)
+
+    args = ap.parse_args()
+    path = queue_path()
+    # mutating verbs run the whole load→mutate→save transaction under the
+    # bounded sidecar lock; reads stay lock-free (save() is an atomic replace,
+    # so a reader can never see a torn file).
+    lock = acquire_lock(path) if args.cmd in MUTATING_CMDS else None
+    try:
+        items = load(path)
+        rc = args.fn(args, path, items)
+    finally:
+        if lock is not None:
+            lock.close()
+    sys.exit(rc)
+
+
+if __name__ == "__main__":
+    main()

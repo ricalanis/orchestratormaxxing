@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# chrome-debug-wayland-shim — PATH shim installed as ~/.local/bin/google-chrome
+# (and google-chrome-stable) on Linux by install.sh.
+#
+# Why: on this stack (Chrome 149 + mutter 48, GNOME Wayland) Chromium's
+# X11/XWayland backend never gains keyboard focus — a human can click but not
+# type into any Chrome running with --ozone-platform=x11 (measured 2026-07-13;
+# see knowledge/opencode-browser-connector.md). Agent/CDP browsers are exactly
+# the windows the operator also types into, so every debug-port launch must be
+# native Wayland.
+#
+# What it does: pure passthrough UNLESS the launch (a) has --remote-debugging-port
+# and (b) a Wayland session is present — then it injects --ozone-platform=wayland,
+# rewriting an explicit x11 request (loudly, on stderr; call /usr/bin/google-chrome
+# directly if you truly want the keyboard-dead X11 backend).
+#
+# Limits: only covers PATH-based launches. Tools that exec /opt/google/chrome/chrome
+# or /usr/bin/google-chrome by absolute path (e.g. puppeteer executablePath) bypass
+# this — fix those launchers individually.
+set -u
+set -o pipefail
+
+# real binary (never resolve back into ~/.local/bin → no self-recursion)
+REAL=""
+for c in /usr/bin/google-chrome-stable /usr/bin/google-chrome /opt/google/chrome/chrome; do
+  [ -x "$c" ] && REAL="$c" && break
+done
+if [ -z "$REAL" ]; then
+  echo "chrome-debug-wayland-shim: no real google-chrome found" >&2
+  exit 127
+fi
+
+has_debug=no
+for a in "$@"; do
+  case "$a" in
+    --remote-debugging-port*) has_debug=yes ;;
+  esac
+done
+
+# Wayland present? env var, or the socket itself (env is often stripped in cron)
+wayland=no
+if [ -n "${WAYLAND_DISPLAY:-}" ] || [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/${WAYLAND_DISPLAY:-wayland-0}" ]; then
+  wayland=yes
+fi
+
+if [ "$has_debug" = yes ] && [ "$wayland" = yes ]; then
+  args=()
+  for a in "$@"; do
+    case "$a" in
+      --ozone-platform=wayland) ;;              # keep once, re-added below
+      --ozone-platform=*|--ozone-platform-hint*)
+        echo "chrome-debug-wayland-shim: rewriting '$a' → --ozone-platform=wayland (X11 Chrome is keyboard-dead on this stack)" >&2 ;;
+      *) args+=("$a") ;;
+    esac
+  done
+  exec "$REAL" --ozone-platform=wayland "${args[@]}"
+fi
+
+exec "$REAL" "$@"

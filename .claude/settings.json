@@ -1,0 +1,4 @@
+{
+  "_comment": "Intentionally no hooks. install.sh deploys mem-audit + session-log (SessionStart) and session-log check + mem-audit (Stop) into the GLOBAL ~/.claude/settings.json, which fires in every project including this one. Duplicating them here ran each twice per session and printed the memory audit and session log twice at startup. If you add a hook here, it must be one that is genuinely project-only.",
+  "hooks": {}
+}
