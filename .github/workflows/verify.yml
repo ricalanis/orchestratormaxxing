@@ -19,6 +19,8 @@ jobs:
       ORCHESTRATORMAXXING_SKIP_EXTERNAL_SKILLS: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # deployed-host-state scans git history for retired tools; a shallow clone reads as 'cannot measure'
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

@@ -138,7 +138,22 @@ with tempfile.TemporaryDirectory(prefix="harness-observation-test-") as td:
     real_snapshot = contract_globals["_process_snapshot"]
 
     def waiting_snapshot(pid):
-        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+        if hasattr(os, "waitid"):
+            os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+        else:
+            # macOS CPython < 3.13 ships no os.waitid (caught live on the macOS CI
+            # runner, Python 3.12). Wait for the child to become a zombie WITHOUT
+            # reaping it — the same observable point as WEXITED|WNOWAIT.
+            import subprocess as _sp
+            import time as _t
+            deadline = _t.time() + 30
+            while _t.time() < deadline:
+                r = _sp.run(["ps", "-o", "stat=", "-p", str(pid)],
+                            capture_output=True, text=True, timeout=5)
+                st = r.stdout.strip()
+                if not st or st.startswith("Z"):
+                    break
+                _t.sleep(0.01)
         return real_snapshot(pid)
 
     raced_state = base / "late-clean-exit"

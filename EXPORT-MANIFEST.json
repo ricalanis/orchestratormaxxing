@@ -79,7 +79,7 @@
     {
       "mode": "file",
       "path": ".github/workflows/verify.yml",
-      "sha256": "4f4273c1f269c7660b80d375367505ecbb0e4183898efa45440c183d5c800f80"
+      "sha256": "36dd67949b915f0db5da7760dba20ad1c9c1463c15b30dc769d5e992a7c2ce80"
     },
     {
       "mode": "file",
@@ -799,7 +799,7 @@
     {
       "mode": "exec",
       "path": "tests/agent-scrollback/run.sh",
-      "sha256": "2359026a46f98e2cdb2d5228f5b7dd2722dbd0772cedec1236e9ca52da7c0ba9"
+      "sha256": "71748aa6d6708d2b51e57c56a8d87e44f179522d1d348c1e0c6bca7895379755"
     },
     {
       "mode": "exec",
@@ -929,7 +929,7 @@
     {
       "mode": "file",
       "path": "tests/harness-observation/run.sh",
-      "sha256": "7762d6847657bcfa00921d261dcbfc7712cefa33432cd52f1974e3370ae6bf56"
+      "sha256": "aa525c802d8bcac22d80b8ba4ce9d6f3edd50bb1389e71afb82902d926351579"
     },
     {
       "mode": "exec",
@@ -1234,7 +1234,7 @@
   },
   "manifest": "deploy/graduation.manifest",
   "manifest_sha256": "247a5f20532b32cb354bcbc20c133f0c95ccf96e00fc5bcf78e162b10ecac380",
-  "source_commit": "f6dd54219eec93fc645423fd17975a7df0c1df5d",
+  "source_commit": "1be7710f65671048f17c4514ea9d309e1d87a38f",
   "source_tree_ish": "HEAD",
   "stripped": {
     "CLAUDE.md": 4,
