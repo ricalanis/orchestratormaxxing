@@ -1,5 +1,5 @@
 {
-  "file_count": 244,
+  "file_count": 245,
   "files": [
     {
       "mode": "file",
@@ -75,6 +75,11 @@
       "mode": "file",
       "path": ".codex/config.toml",
       "sha256": "122b69193d85b93a854635cc37f5cd121cc40c34278b0be648d02d7c417261b7"
+    },
+    {
+      "mode": "file",
+      "path": ".github/workflows/verify.yml",
+      "sha256": "4f4273c1f269c7660b80d375367505ecbb0e4183898efa45440c183d5c800f80"
     },
     {
       "mode": "file",
@@ -1228,8 +1233,8 @@
     "literal_hits": 0
   },
   "manifest": "deploy/graduation.manifest",
-  "manifest_sha256": "88d04717a2f91b6a378299fe16bdef2587e04686e65a5d6177cbe9b5d5e79c85",
-  "source_commit": "a500a43061ab3c77f7aa6374abf7e45464cf00fd",
+  "manifest_sha256": "247a5f20532b32cb354bcbc20c133f0c95ccf96e00fc5bcf78e162b10ecac380",
+  "source_commit": "f6dd54219eec93fc645423fd17975a7df0c1df5d",
   "source_tree_ish": "HEAD",
   "stripped": {
     "CLAUDE.md": 4,
