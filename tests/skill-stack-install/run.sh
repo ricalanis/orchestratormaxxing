@@ -25,13 +25,13 @@ expected = {
     "anti-slop-design", "humanizer", "creator", "filler", "improver",
     "reviewer", "hallmark", "unslop-ui", "avoid-ai-design",
     "orchestration-practices",
-    "cheap-delegate", "fanout", "gauntlet", "graduate", "i-have-adhd",
+    "cheap-delegate", "fanout", "gauntlet", "i-have-adhd",
     "ideas", "memory", "self-improve", "solplan", "wrap-up",
 }
 assert {item["name"] for item in data["skills"]} == expected
 assert all(re.fullmatch(r"[0-9a-f]{40}", item["commit"]) for item in data["skills"])
 workflow = {
-    "cheap-delegate", "fanout", "gauntlet", "graduate", "i-have-adhd",
+    "cheap-delegate", "fanout", "gauntlet", "i-have-adhd",
     "ideas", "memory", "self-improve", "solplan", "wrap-up",
 }
 for item in data["skills"]:
@@ -47,12 +47,12 @@ if os.path.exists(fleet_p):
     fleet = json.load(open(fleet_p, encoding="utf-8"))
     fleet_names = {item["name"] for item in fleet["skills"]}
     assert fleet_names == {"propuesta", "opportunity-to-project", "fleet-service",
-                           "open-design", "plan-to-repo", "product-manager"}, fleet_names
+                           "open-design", "plan-to-repo", "product-manager", "graduate"}, fleet_names
     assert not (fleet_names & expected)
     for item in fleet["skills"]:
         if item["name"] == "plan-to-repo":
             assert item["targets"] == ["OpenCode"], item
-        elif item["name"] in {"fleet-service", "open-design", "product-manager"}:
+        elif item["name"] in {"fleet-service", "open-design", "product-manager", "graduate"}:
             assert item["targets"] == ["OpenCode", "Hermes"], item
         else:
             assert "targets" not in item, item

@@ -442,6 +442,11 @@ evidence (a shipped public headless CLI or BYOK Oz), logged first.
   for itself as the Tier-0 spec gate. [E3]
 
 ## Evidence log (newest first)
+### 2026-09-01 — orchestrator-test-fix: workflow diagnosis fan-out, Root applies
+- Class `orchestrator-test-fix` (42 pytest failures, 8 buckets). Ledger advisory/no rows; o live lane down (lq-d6806487, opencode CLI hang); `oll` inadequate (needs workspace reads). Routed: **diagnosis** to an 8-agent Claude workflow (session model, ~900k worker tokens, 10.7 min wall), **application kept in session** (cross-file + tenant/personal data + shared tree = hard keep).
+- Outcome: all 42 specs landed with verbatim OLD/NEW snippets; Root applied 40+ edits across 14 files with zero re-derivation; suite 42 failed → 0 failed (2006 passed). Two agent claims needed Root correction at apply time: none — but two *diagnoses corrected the parent's own beliefs* (sse-cors: the test never set the env var; cash_flow: not reproducible, transient). Verification stayed the deterministic pytest run.
+- Lesson: for read-heavy multi-bucket diagnosis with exact-edit deliverables, schema-forced workflow agents + keep-application-in-Root beats both a monolithic Root read (context) and worker-applied edits (shared-tree risk). Bucket prompts carrying the doctrine paragraph (values→config, tests pin behavior) produced tenant-neutral fixes without a review round.
+
 
 ### [E30] 2026-08-31 — `o delegate` not_ready is transport warm-up, not a lane failure (operator-directed)
 - Context: several cheap-delegate runs on 2026-08-30/31 were logged as OpenCode lane failures when the

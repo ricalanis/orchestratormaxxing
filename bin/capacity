@@ -1,0 +1,606 @@
+#!/usr/bin/env python3
+"""Compact Claude, Ollama Cloud, and Codex rate-limit status.
+
+Integration decision: ADOPT Codex app-server's structured rate-limit method and
+EXTEND Hermes's existing usage API; do not scrape terminal text or duplicate
+provider credentials here.
+
+Hermes runs on Ubuntu loopback. On macOS, the Hermes read re-executes a hidden
+JSON verb of this same tool on Ubuntu over Tailscale SSH; Codex stays local to
+the caller. ``--local`` is the recursion guard. An explicit ``--url`` or
+``CAPACITY_HERMES_URL`` keeps execution local for custom and test endpoints.
+No dashboard port is published to the tailnet.
+"""
+
+from __future__ import annotations
+
+import argparse
+from datetime import datetime
+import json
+import os
+from pathlib import Path
+import select
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from typing import Any
+import urllib.error
+import urllib.request
+from zoneinfo import ZoneInfo
+
+
+DEFAULT_HERMES_URL = "http://127.0.0.1:3000"
+def _fleet_default_ssh():
+    """Tenant identity lives in fleet.env, never in code (env > fleet.env > empty)."""
+    import os as _os
+    path = _os.environ.get("ORCHESTRATORMAXXING_FLEET_ENV") or _os.path.expanduser("~/.config/orchestratormaxxing/fleet.env")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.removeprefix("export ").strip()
+                if key == "ORCHESTRATORMAXXING_SERVER_SSH":
+                    return val.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+DEFAULT_SSH_TARGET = os.environ.get("ORCHESTRATORMAXXING_SERVER_SSH") or _fleet_default_ssh()
+LOCAL_TZ = ZoneInfo("America/Monterrey")
+MAX_HTTP_BYTES = 4 * 1024 * 1024
+
+
+class CapacityError(RuntimeError):
+    pass
+
+
+def _url_is_explicit(argv: list[str]) -> bool:
+    return "CAPACITY_HERMES_URL" in os.environ or any(
+        item == "--url" or item.startswith("--url=") for item in argv
+    )
+
+
+def _should_route_remote(local: bool, explicit_url: bool) -> bool:
+    if local or explicit_url:
+        return False
+    mode = os.environ.get("CAPACITY_REMOTE", "auto").strip().lower()
+    if mode not in {"auto", "always", "never"}:
+        raise CapacityError("CAPACITY_REMOTE must be auto, always, or never")
+    return mode == "always" or (mode == "auto" and sys.platform == "darwin")
+
+
+def _remote_hermes(args: argparse.Namespace):
+    ssh = shutil.which("ssh")
+    if not ssh:
+        return {}, {}, "Hermes usage unavailable: ssh not found"
+    target = os.environ.get("CAPACITY_SSH_TARGET", DEFAULT_SSH_TARGET)
+    identity = Path(os.path.expanduser(
+        os.environ.get("CAPACITY_SSH_IDENTITY", "~/.ssh/id_ed25519")
+    ))
+    remote_args = ["--local", "--hermes-json"]
+    if args.refresh:
+        remote_args.append("--refresh")
+    remote_args.extend(["--timeout", str(args.timeout)])
+    remote = "exec $HOME/.local/bin/capacity " + " ".join(
+        shlex.quote(item) for item in remote_args
+    )
+    command = [ssh, "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8"]
+    if identity.is_file():
+        command.extend(["-o", "IdentitiesOnly=yes", "-i", str(identity)])
+    command.extend([target, remote])
+    try:
+        result = subprocess.run(
+            command, text=True, capture_output=True,
+            timeout=max(10.0, args.timeout * 3 + 5),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {}, {}, "Hermes usage unavailable: service unreachable"
+    if result.returncode != 0:
+        return {}, {}, "Hermes usage unavailable: service unreachable"
+    if len(result.stdout.encode("utf-8")) > MAX_HTTP_BYTES:
+        return {}, {}, "Hermes usage unavailable: response exceeds 4 MiB"
+    try:
+        payload = json.loads(result.stdout)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {}, {}, "Hermes usage unavailable: invalid remote response"
+    if not isinstance(payload, dict):
+        return {}, {}, "Hermes usage unavailable: invalid remote response"
+    usage = payload.get("usage")
+    refresh_errors = payload.get("refresh_errors")
+    shared_error = payload.get("shared_error")
+    if not isinstance(usage, dict) or not isinstance(refresh_errors, dict):
+        return {}, {}, "Hermes usage unavailable: invalid remote response"
+    if shared_error is not None and not isinstance(shared_error, str):
+        return {}, {}, "Hermes usage unavailable: invalid remote response"
+    return usage, refresh_errors, shared_error
+
+
+def _number(value: Any) -> float | int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _window(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"used_percent": None, "resets_at": None}
+    return {
+        "used_percent": _number(value.get("pct", value.get("usedPercent"))),
+        "resets_at": value.get("resets_at", value.get("resetsAt")),
+    }
+
+
+def _status(values: list[Any]) -> str:
+    numbers = [float(v) for v in values if _number(v) is not None]
+    if not numbers:
+        return "unavailable"
+    peak = max(numbers)
+    if peak >= 90:
+        return "critical"
+    if peak >= 70:
+        return "warning"
+    return "ok"
+
+
+def _unavailable(error: str) -> dict[str, Any]:
+    return {"available": False, "status": "unavailable", "error": error[:160]}
+
+
+def _http_error(exc: Exception) -> str:
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"HTTP {exc.code}"
+    if isinstance(exc, urllib.error.URLError):
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, TimeoutError):
+            return "request timed out"
+        return "service unreachable"
+    if isinstance(exc, TimeoutError):
+        return "request timed out"
+    if isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError)):
+        return "invalid JSON response"
+    if isinstance(exc, CapacityError):
+        return str(exc)
+    return type(exc).__name__
+
+
+def _http_json(base_url: str, path: str, method: str, timeout: float) -> dict[str, Any]:
+    url = base_url.rstrip("/") + path
+    headers = {"Accept": "application/json"}
+    if method == "POST":
+        token = os.environ.get("HERMES_DASHBOARD_TOKEN", "").strip()
+        if not token:
+            token_file = Path.home() / ".config" / "orchestratormaxxing" / "dashboard-token"
+            try:
+                token = token_file.read_text(encoding="utf-8").strip()
+            except OSError:
+                token = ""
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(
+        url,
+        data=b"" if method == "POST" else None,
+        method=method,
+        headers=headers,
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        body = response.read(MAX_HTTP_BYTES + 1)
+    if len(body) > MAX_HTTP_BYTES:
+        raise CapacityError("response exceeds 4 MiB")
+    value = json.loads(body.decode("utf-8"))
+    if not isinstance(value, dict):
+        raise CapacityError("JSON response is not an object")
+    return value
+
+
+def _fetch_hermes(base_url: str, refresh: bool, timeout: float):
+    refresh_errors: dict[str, str] = {}
+    if refresh:
+        for provider in ("claude", "ollama"):
+            try:
+                result = _http_json(
+                    base_url, f"/api/usage/refresh-{provider}", "POST", timeout,
+                )
+                if result.get("ok") is False:
+                    refresh_errors[provider] = str(result.get("error") or "refresh failed")[:160]
+            except Exception as exc:  # each refresh degrades independently
+                refresh_errors[provider] = _http_error(exc)
+    try:
+        return _http_json(base_url, "/api/usage", "GET", timeout), refresh_errors, None
+    except Exception as exc:
+        return {}, refresh_errors, f"Hermes usage unavailable: {_http_error(exc)}"
+
+
+def _normalize_claude(payload: Any, shared_error: str | None,
+                      refresh_error: str | None) -> dict[str, Any]:
+    if shared_error:
+        return _unavailable(shared_error)
+    if not isinstance(payload, dict) or payload.get("available") is False:
+        return _unavailable("Claude limits unavailable from Hermes")
+    limits = payload.get("limits")
+    if not isinstance(limits, dict):
+        return _unavailable("Claude limits missing from Hermes")
+    weekly = _window(limits.get("weekly"))
+    session = _window(limits.get("session"))
+    scoped = {"label": "Fable", "used_percent": None, "resets_at": None}
+    raw = limits.get("raw")
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict) or item.get("kind") != "weekly_scoped":
+                continue
+            scope = item.get("scope") or {}
+            model = scope.get("model") if isinstance(scope, dict) else {}
+            if not isinstance(model, dict):
+                model = {}
+            scoped = {
+                "label": model.get("display_name") or "Fable",
+                "used_percent": _number(item.get("percent")),
+                "resets_at": item.get("resets_at"),
+            }
+            break
+    if weekly["used_percent"] is None and session["used_percent"] is None:
+        return _unavailable("Claude percentages missing from Hermes")
+    result = {
+        "available": True,
+        "status": _status([
+            weekly["used_percent"], session["used_percent"], scoped["used_percent"],
+        ]),
+        "weekly": weekly,
+        "session": session,
+        "scoped": scoped,
+        "source": limits.get("source"),
+        "refresh_error": refresh_error,
+        "error": None,
+    }
+    return result
+
+
+def _normalize_ollama(payload: Any, shared_error: str | None,
+                      refresh_error: str | None) -> dict[str, Any]:
+    if shared_error:
+        return _unavailable(shared_error)
+    if not isinstance(payload, dict) or payload.get("available") is False:
+        return _unavailable("Ollama limits unavailable from Hermes")
+    capacity = payload.get("capacity")
+    if not isinstance(capacity, dict):
+        return _unavailable("Ollama capacity missing from Hermes")
+    weekly = _window(capacity.get("weekly"))
+    session = _window(capacity.get("session"))
+    if weekly["used_percent"] is None and session["used_percent"] is None:
+        return _unavailable("Ollama percentages missing from Hermes")
+    return {
+        "available": True,
+        "status": _status([weekly["used_percent"], session["used_percent"]]),
+        "weekly": weekly,
+        "session": session,
+        "source": capacity.get("source"),
+        "tier": capacity.get("tier"),
+        "refresh_error": refresh_error or capacity.get("refresh_error"),
+        "error": None,
+    }
+
+
+def _send_json(process: subprocess.Popen, value: dict[str, Any]) -> None:
+    assert process.stdin is not None
+    process.stdin.write(json.dumps(value, separators=(",", ":")) + "\n")
+    process.stdin.flush()
+
+
+def _read_rpc(process: subprocess.Popen, request_id: int, deadline: float) -> dict[str, Any]:
+    assert process.stdout is not None
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CapacityError("Codex app-server timed out")
+        ready, _, _ = select.select([process.stdout], [], [], remaining)
+        if not ready:
+            raise CapacityError("Codex app-server timed out")
+        line = process.stdout.readline()
+        if not line:
+            raise CapacityError("Codex app-server closed early")
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(message, dict) and message.get("id") == request_id:
+            if "error" in message:
+                raise CapacityError("Codex app-server returned an error")
+            return message
+
+
+def _stop_process(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=2)
+    except (ProcessLookupError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def _fetch_codex(executable: str, timeout: float) -> dict[str, Any]:
+    try:
+        process = subprocess.Popen(
+            [executable, "app-server", "--listen", "stdio://"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+    except FileNotFoundError:
+        return _unavailable("codex executable not found")
+    except OSError:
+        return _unavailable("codex app-server could not start")
+
+    deadline = time.monotonic() + timeout
+    try:
+        _send_json(process, {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"clientInfo": {"name": "orchestratormaxxing-capacity", "version": "1"}},
+        })
+        _read_rpc(process, 1, deadline)
+        _send_json(process, {"jsonrpc": "2.0", "method": "initialized", "params": {}})
+        _send_json(process, {
+            "jsonrpc": "2.0", "id": 2,
+            "method": "account/rateLimits/read", "params": None,
+        })
+        response = _read_rpc(process, 2, deadline)
+    except (CapacityError, BrokenPipeError, OSError) as exc:
+        return _unavailable(str(exc) if isinstance(exc, CapacityError)
+                            else "Codex app-server communication failed")
+    finally:
+        _stop_process(process)
+
+    result = response.get("result")
+    if not isinstance(result, dict):
+        return _unavailable("Codex rate-limit response is malformed")
+    buckets = result.get("rateLimitsByLimitId")
+    snapshot = buckets.get("codex") if isinstance(buckets, dict) else None
+    if not isinstance(snapshot, dict):
+        snapshot = result.get("rateLimits")
+    if not isinstance(snapshot, dict):
+        return _unavailable("Codex rate-limit response is malformed")
+
+    candidates = []
+    for key in ("primary", "secondary"):
+        value = snapshot.get(key)
+        if isinstance(value, dict) and _number(value.get("usedPercent")) is not None:
+            candidates.append(value)
+    if not candidates:
+        return _unavailable("Codex weekly limit is missing")
+    weekly_raw = max(candidates, key=lambda item: _number(item.get("windowDurationMins")) or 0)
+    weekly = _window(weekly_raw)
+    session_raw = next((item for item in candidates if item is not weekly_raw), None)
+    session = _window(session_raw)
+    credits = snapshot.get("credits")
+    if not isinstance(credits, dict):
+        credits = {"hasCredits": False, "unlimited": False, "balance": None}
+    reset_summary = result.get("rateLimitResetCredits")
+    reset_count = reset_summary.get("availableCount") if isinstance(reset_summary, dict) else None
+    return {
+        "available": True,
+        "status": _status([weekly["used_percent"], session["used_percent"]]),
+        "weekly": weekly,
+        "session": session,
+        "credits": {
+            "has_credits": bool(credits.get("hasCredits")),
+            "unlimited": bool(credits.get("unlimited")),
+            "balance": credits.get("balance"),
+        },
+        "reset_credits": reset_count,
+        "plan": snapshot.get("planType"),
+        "source": "codex-app-server",
+        "error": None,
+    }
+
+
+def _pct(value: Any) -> str:
+    number = _number(value)
+    if number is None:
+        return "—"
+    if float(number).is_integer():
+        return str(int(number))
+    return f"{float(number):.1f}".rstrip("0").rstrip(".")
+
+
+def _bar(value: Any) -> str:
+    number = _number(value)
+    if number is None:
+        return "░" * 10
+    filled = max(0, min(10, int(float(number) / 10 + 0.5)))
+    return "█" * filled + "░" * (10 - filled)
+
+
+def _reset(value: Any) -> str:
+    if value is None:
+        return "—"
+    parsed = None
+    if isinstance(value, (int, float)):
+        try:
+            parsed = datetime.fromtimestamp(value, LOCAL_TZ)
+        except (ValueError, OSError, OverflowError):
+            pass
+    elif isinstance(value, str) and "T" in value:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(LOCAL_TZ)
+        except ValueError:
+            pass
+    if parsed is not None:
+        return parsed.strftime("%b %-d %H:%M")
+    return str(value).strip().rstrip(".") or "—"
+
+
+def _provider_icon(status: str) -> str:
+    return {"ok": "✅", "warning": "⚠️", "critical": "🔴"}.get(status, "⚪")
+
+
+def _refresh_note(provider: dict[str, Any]) -> str:
+    return " · refresh failed" if provider.get("refresh_error") else ""
+
+
+def _render_text(report: dict[str, Any]) -> str:
+    providers = report["providers"]
+    critical = any(item.get("status") == "critical" for item in providers.values())
+    prefix = "🚨" if critical else "⚡"
+    generated = datetime.fromisoformat(report["generated_at"])
+    lines = [f"{prefix} Capacity — {generated.strftime('%H:%M')} MT", ""]
+
+    claude = providers["claude"]
+    if claude["available"]:
+        scoped = claude["scoped"]
+        lines.append(
+            f"{_provider_icon(claude['status'])} Claude  {_bar(claude['weekly']['used_percent'])}  "
+            f"{_pct(claude['weekly']['used_percent'])}% weekly · "
+            f"{_pct(claude['session']['used_percent'])}% session · "
+            f"{_pct(scoped['used_percent'])}% {scoped['label']}"
+            f"{_refresh_note(claude)}"
+        )
+    else:
+        lines.append(f"⚪ Claude  unavailable — {claude['error']}")
+
+    ollama = providers["ollama"]
+    if ollama["available"]:
+        lines.append(
+            f"{_provider_icon(ollama['status'])} Ollama  {_bar(ollama['weekly']['used_percent'])}  "
+            f"{_pct(ollama['weekly']['used_percent'])}% weekly · "
+            f"{_pct(ollama['session']['used_percent'])}% session"
+            f"{_refresh_note(ollama)}"
+        )
+    else:
+        lines.append(f"⚪ Ollama  unavailable — {ollama['error']}")
+
+    codex = providers["codex"]
+    if codex["available"]:
+        credits = codex["credits"]
+        if credits["unlimited"]:
+            credit_text = "unlimited credits"
+        elif credits["balance"] is not None:
+            credit_text = f"{credits['balance']} credits"
+        else:
+            credit_text = "credits —"
+        reset_count = codex.get("reset_credits")
+        reset_text = "resets —" if reset_count is None else (
+            f"{reset_count} reset" if reset_count == 1 else f"{reset_count} resets"
+        )
+        lines.append(
+            f"{_provider_icon(codex['status'])} Codex   {_bar(codex['weekly']['used_percent'])}  "
+            f"{_pct(codex['weekly']['used_percent'])}% weekly · {credit_text} · {reset_text}"
+        )
+    else:
+        lines.append(f"⚪ Codex   unavailable — {codex['error']}")
+
+    reset_parts = []
+    if claude["available"]:
+        reset_parts.append(f"Claude {_reset(claude['weekly']['resets_at'])}")
+    if ollama["available"]:
+        reset_parts.append(f"Ollama {_reset(ollama['weekly']['resets_at'])}")
+    if codex["available"]:
+        reset_parts.append(f"Codex {_reset(codex['weekly']['resets_at'])}")
+    lines.append("Resets: " + (" · ".join(reset_parts) if reset_parts else "unavailable"))
+    return "\n".join(lines)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="capacity",
+        description="Show Claude, Ollama Cloud, and Codex subscription capacity.",
+        epilog="Exit codes: 0 at least one provider available; 1 all unavailable; 2 usage error.",
+    )
+    parser.add_argument("--json", action="store_true", help="emit stable machine-readable JSON")
+    parser.add_argument(
+        "--refresh", action="store_true",
+        help="refresh Claude and Ollama through Hermes before reading limits",
+    )
+    parser.add_argument(
+        "--url", default=os.environ.get("CAPACITY_HERMES_URL", DEFAULT_HERMES_URL),
+        help=f"Hermes dashboard base URL (default: {DEFAULT_HERMES_URL})",
+    )
+    parser.add_argument(
+        "--timeout", type=float,
+        default=float(os.environ.get("CAPACITY_TIMEOUT", "12")),
+        help="per-source timeout in seconds (default: 12)",
+    )
+    parser.add_argument("--local", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--hermes-json", action="store_true", help=argparse.SUPPRESS)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = _parser().parse_args(raw_argv)
+    if args.timeout <= 0:
+        _parser().error("--timeout must be positive")
+    try:
+        remote_hermes = _should_route_remote(args.local, _url_is_explicit(raw_argv))
+    except CapacityError as exc:
+        _parser().error(str(exc))
+
+    if args.hermes_json:
+        usage, refresh_errors, shared_error = _fetch_hermes(
+            args.url, args.refresh, args.timeout,
+        )
+        print(json.dumps({
+            "usage": usage,
+            "refresh_errors": refresh_errors,
+            "shared_error": shared_error,
+        }, sort_keys=True, separators=(",", ":")))
+        return 0
+
+    if remote_hermes:
+        usage, refresh_errors, shared_error = _remote_hermes(args)
+    else:
+        usage, refresh_errors, shared_error = _fetch_hermes(
+            args.url, args.refresh, args.timeout,
+        )
+    providers = {
+        "claude": _normalize_claude(
+            usage.get("claude"), shared_error, refresh_errors.get("claude"),
+        ),
+        "ollama": _normalize_ollama(
+            usage.get("ollama"), shared_error, refresh_errors.get("ollama"),
+        ),
+        "codex": _fetch_codex(
+            os.environ.get("CAPACITY_CODEX_BIN", "codex"), args.timeout,
+        ),
+    }
+    available = [item for item in providers.values() if item.get("available")]
+    statuses = [item["status"] for item in available]
+    overall = (
+        "critical" if "critical" in statuses else
+        "warning" if "warning" in statuses else
+        "ok" if statuses else "unavailable"
+    )
+    report = {
+        "generated_at": datetime.now(LOCAL_TZ).isoformat(timespec="seconds"),
+        "status": overall,
+        "providers": providers,
+        "refresh_errors": refresh_errors,
+    }
+    if args.json:
+        print(json.dumps(report, sort_keys=True, separators=(",", ":")))
+    else:
+        print(_render_text(report))
+    return 0 if available else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

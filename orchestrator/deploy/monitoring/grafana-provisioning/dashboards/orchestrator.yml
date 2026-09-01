@@ -1,0 +1,12 @@
+apiVersion: 1
+providers:
+  - name: hermes-orchestrator
+    folder: Hermes
+    type: file
+    updateIntervalSeconds: 60
+    allowUiUpdates: false
+    options:
+      # ../grafana of the repo, mounted read-only by docker-compose.yml —
+      # both boards (ops + service/alerts) load from there; edits happen in
+      # git, not the UI (allowUiUpdates: false keeps the repo authoritative).
+      path: /var/lib/grafana/dashboards

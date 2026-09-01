@@ -1,0 +1,12 @@
+[Unit]
+Description=Weekly conversion-funnel snapshot — Monday 09:00
+
+[Timer]
+# Monday 9am: capture the week's opening funnel (lead→discovery→proposal→won).
+OnCalendar=Mon *-*-* 09:00:00
+# Catch up a missed run (laptop asleep Monday morning) on next wake.
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

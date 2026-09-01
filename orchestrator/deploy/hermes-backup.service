@@ -1,0 +1,10 @@
+[Unit]
+Description=Hermes kanban DB backup — consistent SQLite snapshot + rotation (P2-5)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/dev/orchestratormaxxing/orchestrator
+# Stdlib-only script; run under the repo venv to match the other units.
+ExecStart=%h/dev/orchestratormaxxing/orchestrator/.venv/bin/python %h/dev/orchestratormaxxing/orchestrator/bin/backup-kanban
+# Override retention/location here if desired (defaults: ~/.hermes/backups, keep 14).
+# Environment=HERMES_BACKUP_KEEP=14

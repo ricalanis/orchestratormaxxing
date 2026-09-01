@@ -1,0 +1,33 @@
+# Prometheus config for the Coolify hub — scrapes the Hermes orchestrator
+# over the tailnet. Job name MUST stay `hermes-orchestrator`: the
+# HermesDashboardDown alert keys on it.
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+rule_files:
+  - /etc/prometheus/rules/orchestrator-alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["127.0.0.1:9093"]
+
+scrape_configs:
+  - job_name: hermes-orchestrator
+    static_configs:
+      - targets: ["orchestrator-host:5555"]   # your orchestrator box over the tailnet
+    metrics_path: /metrics
+
+  # The MCP SSE server's own /metrics (auth failures, active streams, message
+  # latency). Reachable at :5556 wherever the SSE server runs (systemd on the
+  # GPU box behind tailscale serve, or the mcp-sse container). Absent series
+  # while it's down is Prometheus-idiomatic for target-down.
+  - job_name: hermes-mcp-sse
+    static_configs:
+      - targets: ["orchestrator-host:5556"]
+    metrics_path: /metrics
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["127.0.0.1:9090"]

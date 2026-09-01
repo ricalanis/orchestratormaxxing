@@ -1,0 +1,191 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Prometheus scraping the Hermes dashboard /metrics",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "title": "Hermes Orchestrator — Service / Alerts",
+  "uid": "hermes-orchestrator-service",
+  "tags": ["hermes", "orchestrator", "alerts", "orchestratormaxxing"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "description": "Visual counterpart to deploy/prometheus/orchestrator-alerts.yml — each panel graphs an alert's expression with its threshold, so when an alert fires you look HERE first.",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Request rate",
+      "description": "All API + /healthz traffic (req/s, 5m rate). Context panel — no alert keys on volume alone.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(hermes_api_requests_total[5m]))",
+          "legendFormat": "total"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(hermes_api_requests_total{status=~\"5..\"}[5m]))",
+          "legendFormat": "5xx"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 8, "showPoints": "never" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "5xx" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "p99 latency",
+      "description": "99th percentile API latency, 5m windows. p50 shown for contrast — a p99/p50 gap means a slow tail, not general slowness.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, rate(hermes_api_request_duration_seconds_bucket[5m]))",
+          "legendFormat": "p99"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.50, rate(hermes_api_request_duration_seconds_bucket[5m]))",
+          "legendFormat": "p50"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 5, "showPoints": "never" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "p99" }, "properties": [{ "id": "custom.thresholdsStyle", "value": { "mode": "line" } }] }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Rejection ratios — MCP 429s and API 413s",
+      "description": "Two distinct rejection types, one panel. 'MCP 429 ratio' is EXACTLY the HermesMCPRateLimitPressure alert expression (fires >20% for 5m — the red line). 'API 413 share' is body-size-limit rejections as a share of all API traffic (no alert; sustained nonzero means a client sends oversized payloads). Both clamp so zero traffic reads 0.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(hermes_mcp_sse_rate_limit_rejections_total[5m]) / clamp_min(rate(hermes_mcp_sse_rate_limit_rejections_total[5m]) + rate(hermes_mcp_sse_requests_total[5m]), 1e-9)",
+          "legendFormat": "MCP 429 ratio (alert @ 20%)"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(hermes_api_requests_total{status=\"413\"}[5m])) / clamp_min(sum(rate(hermes_api_requests_total[5m])), 1e-9)",
+          "legendFormat": "API 413 share"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "max": 1,
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never", "thresholdsStyle": { "mode": "line" } },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.2 }
+            ]
+          }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "API 413 share" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Idle sessions & stuck-terminal age",
+      "description": "Left axis: idle-session count (transcript-only idlers are normal — context, not alarm). Right axis: max idle age among LIVE-TERMINAL sessions — the HermesSessionStuckIdle alert target (fires >1h, the red line). Triage: orchestrator sessions --stale --minutes 60.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "hermes_sessions{status=\"idle\"}",
+          "legendFormat": "idle sessions (count)"
+        },
+        {
+          "refId": "B",
+          "expr": "hermes_sessions_attached_max_idle_seconds",
+          "legendFormat": "stuck-terminal age (alert @ 1h)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "stuck-terminal age (alert @ 1h)" },
+            "properties": [
+              { "id": "unit", "value": "s" },
+              { "id": "custom.axisPlacement", "value": "right" },
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } },
+              { "id": "custom.thresholdsStyle", "value": { "mode": "line" } },
+              { "id": "thresholds", "value": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 3600 } ] } }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    }
+  ]
+}

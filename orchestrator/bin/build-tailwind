@@ -1,0 +1,9 @@
+#!/bin/bash
+# Regenerate the vendored Tailwind build (static/tailwind.css) after any
+# template/UI class change. The templates are the class universe (the scanner
+# reads JS template literals too). Pinned version = reproducible output.
+set -euo pipefail
+cd "$(dirname "$0")/../dashboard"
+npx --yes tailwindcss@3.4.17 -c tailwind.config.js -i tailwind.input.css \
+    -o static/tailwind.css --minify
+echo "built: $(wc -c < static/tailwind.css) bytes → dashboard/static/tailwind.css"

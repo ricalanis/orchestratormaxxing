@@ -1,0 +1,20 @@
+{
+ "classes": [
+  "digest",
+  "review",
+  "reason",
+  "extract"
+ ],
+ "effort": "low",
+ "exclusion_rule": "NONE \u2014 every class declared here is reported",
+ "incumbent": "deepseek-v4-flash:0731",
+ "models": [
+  "deepseek-v4-flash:0731",
+  "glm-5.3-flash"
+ ],
+ "n_per_cell": 20,
+ "seed": "2026-08-27",
+ "spec_hash": "3d04bf17bfd19203",
+ "stopping_rule": "overlapping 95% CIs or McNemar p>=0.05 -> KEEP INCUMBENT",
+ "temperature": 0
+}

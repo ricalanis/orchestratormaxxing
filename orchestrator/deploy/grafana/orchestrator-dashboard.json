@@ -1,0 +1,337 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Prometheus scraping the Hermes dashboard /metrics (the orchestrator host's :5555/metrics endpoint)",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "title": "Hermes Orchestrator",
+  "uid": "hermes-orchestrator",
+  "tags": ["hermes", "orchestrator", "orchestratormaxxing"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Request rate (all API)",
+      "description": "Total /api + /healthz requests per second, 5m rate.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(hermes_api_requests_total[5m]))",
+          "legendFormat": "req/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "decimals": 2, "color": { "mode": "palette-classic" } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Error rate (4xx + 5xx)",
+      "description": "Share of API requests answering 4xx/5xx, 5m rate. Sustained 5xx is an incident; 4xx spikes usually mean a broken client.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(hermes_api_requests_total{status=~\"4..|5..\"}[5m])) / clamp_min(sum(rate(hermes_api_requests_total[5m])), 1e-9)",
+          "legendFormat": "error %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.05 },
+              { "color": "red", "value": 0.2 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "p95 latency",
+      "description": "95th percentile API latency over 5m.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 5, "w": 4, "x": 8, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, rate(hermes_api_request_duration_seconds_bucket[5m]))",
+          "legendFormat": "p95"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.25 },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Live terminals",
+      "description": "Sessions with a tmux terminal attached (input can be sent from the dashboard).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 5, "w": 4, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "hermes_sessions_tmux_attached",
+          "legendFormat": "attached"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "none", "decimals": 0, "color": { "mode": "palette-classic" } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "MCP rate-limit rejections (1h)",
+      "description": "429s from the MCP SSE server in the last hour. Zero is normal; sustained rejections mean a client is misbehaving or the limit is too tight. No data = SSE transport not running.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 5, "w": 4, "x": 16, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "increase(hermes_mcp_sse_rate_limit_rejections_total[1h])",
+          "legendFormat": "rejections"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 30 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "MCP SSE sessions",
+      "description": "Open SSE streams on the MCP transport.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 5, "w": 4, "x": 20, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "hermes_mcp_sse_active_sessions",
+          "legendFormat": "streams"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "none", "decimals": 0 },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Request rate by path",
+      "description": "5m request rate per normalized path (entity ids collapse to {id}). Top 10 by traffic.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 5 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, sum by (path) (rate(hermes_api_requests_total[5m])))",
+          "legendFormat": "{{path}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 8, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Latency percentiles",
+      "description": "p50 / p95 / p99 API latency, 5m windows, from the request-duration histogram.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 5 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, rate(hermes_api_request_duration_seconds_bucket[5m]))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, rate(hermes_api_request_duration_seconds_bucket[5m]))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, rate(hermes_api_request_duration_seconds_bucket[5m]))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 5, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Responses by status class",
+      "description": "2xx / 4xx / 5xx split. The request log (orchestrator/logs/api-YYYYMMDD.log) has the per-request detail behind any spike here.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 9, "w": 8, "x": 0, "y": 14 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (class) (label_replace(rate(hermes_api_requests_total[5m]), \"class\", \"$1xx\", \"status\", \"([0-9]).+\"))",
+          "legendFormat": "{{class}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 15, "stacking": { "mode": "normal" } }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "5xx" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
+          { "matcher": { "id": "byName", "options": "4xx" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }] },
+          { "matcher": { "id": "byName", "options": "2xx" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Sessions by status",
+      "description": "Claude Code sessions as the dashboard's cache sees them: active (writing now), recent, idle. Gauge — current state, not a rate.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 9, "w": 8, "x": 8, "y": 14 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "hermes_sessions",
+          "legendFormat": "{{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 20, "stacking": { "mode": "normal" }, "showPoints": "never" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "active" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
+          { "matcher": { "id": "byName", "options": "recent" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }] },
+          { "matcher": { "id": "byName", "options": "idle" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "MCP SSE: admitted vs rejected",
+      "description": "Requests the rate limiter admitted vs 429'd, per second. Series absent entirely = SSE transport not running (expected until armed).",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 14 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(hermes_mcp_sse_requests_total[5m])",
+          "legendFormat": "admitted"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(hermes_mcp_sse_rate_limit_rejections_total[5m])",
+          "legendFormat": "rejected (429)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "rejected (429)" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
+          { "matcher": { "id": "byName", "options": "admitted" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    }
+  ]
+}

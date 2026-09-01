@@ -1,0 +1,40 @@
+# One-command orchestrator API deploy:
+#   cd orchestrator/deploy && docker compose up -d --build
+#
+# Runs the dashboard API + UI against a VOLUME-MOUNTED SQLite DB. Session
+# probing (tmux/tailscale) degrades gracefully in-container — this is the
+# portable/replica deployment (Coolify hub's read-only dashboard); the GPU
+# box keeps running the full systemd service.
+#
+# All config is env-var driven (defaults inline; override via environment or
+# a .env file next to this compose):
+#   HERMES_DATA_DIR      host dir holding kanban.db     (default ~/.hermes)
+#   DASHBOARD_PORT       published + in-container port  (default 5555)
+#   DASHBOARD_MAX_BODY_BYTES / HERMES_MCP_RATE_LIMIT[_PRIVILEGED] /
+#   ORCH_INPUT_GRACE     tuning knobs, same as the systemd service
+services:
+  orchestrator-api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: hermes-orchestrator-api:latest
+    restart: unless-stopped
+    ports:
+      - "${DASHBOARD_PORT:-5555}:${DASHBOARD_PORT:-5555}"
+    environment:
+      DASHBOARD_BIND: 0.0.0.0
+      DASHBOARD_PORT: ${DASHBOARD_PORT:-5555}
+      DASHBOARD_MAX_BODY_BYTES: ${DASHBOARD_MAX_BODY_BYTES:-1048576}
+      HERMES_MCP_RATE_LIMIT: ${HERMES_MCP_RATE_LIMIT:-60}
+      HERMES_MCP_RATE_LIMIT_PRIVILEGED: ${HERMES_MCP_RATE_LIMIT_PRIVILEGED:-120}
+      ORCH_INPUT_GRACE: ${ORCH_INPUT_GRACE:-60}
+    volumes:
+      # The DB (and the rest of the hermes data dir) — the modules resolve
+      # ~/.hermes/kanban.db and HOME=/root in the image.
+      - ${HERMES_DATA_DIR:-~/.hermes}:/root/.hermes
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,os,sys; sys.exit(0 if urllib.request.urlopen(f\"http://127.0.0.1:{os.environ.get('DASHBOARD_PORT','5555')}/healthz\", timeout=4).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3

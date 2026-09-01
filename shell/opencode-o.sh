@@ -349,8 +349,18 @@ _o_owned_worker_session() {
 _o_wait_ready() {
   local sess="$1" max_seconds="${O_READY_TIMEOUT_SECONDS:-15}"
   [[ "$max_seconds" =~ ^[0-9]+$ ]] && [[ "$max_seconds" -ge 1 ]] || max_seconds=15
-  local attempts=$((max_seconds * 5)) pane snap i=0 pending bound
+  local attempts=$((max_seconds * 5)) pane snap i=0 pending bound transport
   pane="$(_o_resolve_pane "$sess")" || return $?
+  transport="$(_o_worker_option "$sess" @orchestratormaxxing_transport)"
+  if [[ "$transport" == "run" ]]; then
+    # TUI-less worker: ready = no in-flight turn. The pane is a runner, not a composer.
+    while [[ "$i" -lt "$attempts" ]]; do
+      pending="$(_o_worker_option "$sess" @orchestratormaxxing_pending)"
+      [[ "$pending" != "1" ]] && return 0
+      sleep 0.2; i=$((i + 1))
+    done
+    return 4
+  fi
   while [[ "$i" -lt "$attempts" ]]; do
     # A plugin-bound idle event is the durable readiness signal after turn 1.
     # It survives alternate-screen redraws and localized/missing placeholders.
@@ -383,6 +393,25 @@ _o_wait_ready() {
   return 4
 }
 
+# Submit one TUI-less turn into a delegated worker pane: write the prompt to the
+# run dir (audit trail), then respawn the pane onto a fresh bounded run-turn.
+_o_submit_run_turn() {
+  local sess="$1" agent="$2" oc_session="$3" prompt_text="$4"
+  local run_abs turn pane pf
+  run_abs="$(_o_worker_option "$sess" @orchestratormaxxing_run_dir)"
+  turn="$(_o_worker_option "$sess" @orchestratormaxxing_turn)"
+  [[ -d "$run_abs" && "$turn" =~ ^[0-9]+$ ]] || return 1
+  pf="$run_abs/turn-$turn.prompt"
+  printf '%s' "$prompt_text" > "$pf" || return 1
+  chmod 600 "$pf" 2>/dev/null || true
+  pane="$(_o_resolve_pane "$sess")" || return 1
+  local cmd
+  cmd="o run-turn --agent $(printf '%q' "$agent") --prompt-file $(printf '%q' "$pf")"
+  [[ -n "$oc_session" ]] && cmd+=" --session $(printf '%q' "$oc_session")"
+  tmux respawn-pane -k -t "$pane" \
+    "ORCHESTRATORMAXXING_HARNESS_CHILD=1 ORCHESTRATORMAXXING_O_DELEGATED=1 ORCHESTRATORMAXXING_O_SHELL=$(printf '%q' "${ORCHESTRATORMAXXING_O_SHELL:-$HOME/.config/orchestratormaxxing/opencode-o.sh}") O_TURN_TIMEOUT_SECONDS=$(printf '%q' "${O_TURN_TIMEOUT_SECONDS:-600}") $cmd" 2>/dev/null
+}
+
 _o_send_worker() {
   local sess="${1:-}" prompt_text="" as_json=0
   [[ -n "$sess" ]] || { echo 'o send: SESSION is required' >&2; return 2; }
@@ -397,7 +426,6 @@ _o_send_worker() {
   _o_exact_worker_session "$sess" || { [[ "$as_json" == 1 ]] && _o_json_status invalid_session "$sess" 'exact opencode-* session required'; return 2; }
   [[ -n "$prompt_text" ]] || { [[ "$as_json" == 1 ]] && _o_json_status invalid_prompt "$sess" 'non-empty prompt required'; return 2; }
   _o_owned_worker_session "$sess" || { [[ "$as_json" == 1 ]] && _o_json_status not_owned "$sess" 'delegation ownership binding required'; return 4; }
-  command -v tmux-send >/dev/null 2>&1 || { [[ "$as_json" == 1 ]] && _o_json_status unavailable "$sess" 'tmux-send missing'; return 127; }
   local pane rc old_turn new_turn
   pane="$(_o_resolve_pane "$sess")" || {
     rc=$?
@@ -410,7 +438,16 @@ _o_send_worker() {
   new_turn=$((old_turn + 1))
   _o_set_worker_option "$sess" @orchestratormaxxing_turn "$new_turn" || return 4
   _o_set_worker_option "$sess" @orchestratormaxxing_pending 1 || return 4
-  if ! command tmux-send "$sess" "$prompt_text" >/dev/null; then
+  local transport agent oc_session submitted=0
+  transport="$(_o_worker_option "$sess" @orchestratormaxxing_transport)"
+  if [[ "$transport" == "run" ]]; then
+    agent="$(_o_worker_option "$sess" @orchestratormaxxing_agent)"
+    oc_session="$(_o_worker_option "$sess" @opencode_session_id)"
+    _o_submit_run_turn "$sess" "$agent" "$oc_session" "$prompt_text" && submitted=1
+  else
+    command tmux-send "$sess" "$prompt_text" >/dev/null && submitted=1
+  fi
+  if [[ "$submitted" != 1 ]]; then
     _o_set_worker_option "$sess" @orchestratormaxxing_turn "$old_turn" || true
     _o_set_worker_option "$sess" @orchestratormaxxing_pending 0 || true
     [[ "$as_json" == 1 ]] && _o_json_status unconfirmed "$sess" 'submission not confirmed'
@@ -421,6 +458,110 @@ _o_send_worker() {
   else
     printf '%s\n' "$sess"
   fi
+}
+
+# Machine-only turn runner for delegated workers (runs INSIDE the worker pane).
+# The OpenTUI cannot be born reliably in a clientless pane (measured 2026-09-01:
+# blank even with control-mode, script-PTY and properly sized real clients —
+# lq-1e91f49c), so delegation is TUI-less: each turn is one bounded
+# `opencode run --format json` in the pane, and its terminal event feeds the
+# same durable `o bind-event` path the TUI plugin used. occ-style hardening:
+# process-group kill on timeout so MCP children never orphan.
+_o_run_turn() {
+  local agent="" session="" prompt_file="" timeout="${O_TURN_TIMEOUT_SECONDS:-600}"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --agent) agent="$2"; shift 2 ;;
+      --session) session="$2"; shift 2 ;;
+      --prompt-file) prompt_file="$2"; shift 2 ;;
+      --timeout) timeout="$2"; shift 2 ;;
+      *) echo "o run-turn: unknown argument '$1'" >&2; return 2 ;;
+    esac
+  done
+  [[ -n "$agent" && -n "$prompt_file" && -r "$prompt_file" ]] || { echo 'o run-turn: --agent and a readable --prompt-file are required' >&2; return 2; }
+  [[ "$timeout" =~ ^[0-9]+$ ]] && [[ "$timeout" -ge 1 ]] || timeout=600
+  local oc; oc="$(command -v opencode 2>/dev/null)" || { echo 'o run-turn: opencode not on PATH' >&2; return 127; }
+  local stream rc waited=0
+  stream="$(mktemp "${TMPDIR:-/tmp}/o-run-turn.XXXXXX")" || return 1
+  local prompt_text; prompt_text="$(cat "$prompt_file")"
+  local run_args=(run --format json --agent "$agent")
+  [[ -n "$session" ]] && run_args+=(-s "$session")
+  echo "o run-turn: agent=$agent session=${session:-new} timeout=${timeout}s"
+  set -m
+  "$oc" "${run_args[@]}" "$prompt_text" >"$stream" 2>&1 </dev/null &
+  local pid=$!
+  set +m
+  # Deterministic close path: o close reads this pidfile and kills the group,
+  # so an in-flight model run can never outlive its worker (a trap alone loses
+  # the race when the pane group takes SIGKILL before bash can forward TERM).
+  printf '%s\n' "$pid" > "${prompt_file%.prompt}.pid" 2>/dev/null || true
+  # The pane dying (o close, respawn, kill-session) must take the in-flight
+  # model run and its MCP children with it — otherwise every close of a busy
+  # worker leaks an opencode process group (caught live 2026-09-01: a closed
+  # headless proof left `opencode run` running for 40 minutes).
+  trap 'kill -TERM -- "-$pid" 2>/dev/null; sleep 1; kill -KILL -- "-$pid" 2>/dev/null; exit 143' TERM HUP INT
+  while kill -0 "$pid" 2>/dev/null && [[ "$waited" -lt "$timeout" ]]; do
+    sleep 1; waited=$((waited + 1))
+  done
+  # bin/o runs this under set -e: a nonzero wait must be captured, never fatal,
+  # or a failing turn dies before its error event can bind (caught live: only
+  # the PROVIDER_ERROR turn hung).
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM -- "-$pid" 2>/dev/null; sleep 2; kill -KILL -- "-$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null || true; rc=124
+  else
+    rc=0; wait "$pid" || rc=$?
+  fi
+  # Fold the stream into the bind-event payload. Any malformed/hung/failed turn
+  # still produces a TYPED terminal event — silence is the one forbidden outcome.
+  local payload
+  payload="$(python3 - "$stream" "$rc" <<'PY'
+import json, sys
+path, rc = sys.argv[1], int(sys.argv[2])
+sid = ""; mid = ""; finish = ""; texts = {}; err = ""
+try:
+    for raw in open(path, encoding="utf-8", errors="replace"):
+        raw = raw.strip()
+        if not raw or not raw.startswith("{"):
+            continue
+        try:
+            ev = json.loads(raw)
+        except ValueError:
+            continue
+        t = ev.get("type"); part = ev.get("part") or {}
+        if isinstance(ev.get("sessionID"), str):
+            sid = ev["sessionID"] or sid
+        m = part.get("messageID")
+        if t == "text" and isinstance(part.get("text"), str) and isinstance(m, str):
+            texts.setdefault(m, []).append(part["text"])
+        elif t == "step_finish" and isinstance(m, str):
+            mid = m; finish = str(part.get("reason") or "")
+        elif t == "error":
+            err = str((ev.get("error") or {}).get("name") or "error")[:64]
+except OSError:
+    err = err or "unreadable-stream"
+if rc == 124:
+    err = err or "timeout"
+elif rc != 0:
+    err = err or f"exit-{rc}"
+text = "".join(texts.get(mid, [])) if mid else ""
+if not sid:
+    sid = "ses_unbound0"      # keeps the payload well-formed; error_code marks the failure
+    err = err or "no-session"
+if not mid and not err:
+    err = "no-terminal-event"
+print(json.dumps({"session_id": sid, "message_id": mid, "finish": finish or ("stop" if not err else "error"),
+                  "text": text, "error_code": err}, separators=(",", ":")))
+PY
+)"
+  rm -f -- "$stream"
+  if printf '%s' "$payload" | o bind-event --json >/dev/null 2>&1 || printf '%s' "$payload" | command o bind-event --json >/dev/null 2>&1; then
+    local turn; turn="$(printf '%s' "$payload" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("IDLE" if not d["error_code"] else "ERROR:"+d["error_code"])')"
+    echo "TURN-DONE-$turn"
+  else
+    echo "BIND-FAILED"
+  fi
+  return 0
 }
 
 # Machine-only event bridge. The OpenCode plugin calls this from the exact
@@ -727,6 +868,21 @@ _o_close_worker() {
       fi
     fi
   fi
+  # Kill the newest in-flight turn's own process group (run-turn spawns the
+  # model run with set -m, so the pane-group kill above cannot reach it).
+  local run_abs_close turnpid
+  run_abs_close="$(_o_worker_option "$sess" @orchestratormaxxing_run_dir)"
+  if [[ -d "$run_abs_close" ]]; then
+    turnpid="$(ls -1t "$run_abs_close"/turn-*.pid 2>/dev/null | head -1)"
+    if [[ -n "$turnpid" ]] && [[ "$(cat "$turnpid" 2>/dev/null)" =~ ^[0-9]+$ ]]; then
+      turnpid="$(cat "$turnpid")"
+      if kill -0 "$turnpid" 2>/dev/null; then
+        kill -TERM -- "-$turnpid" 2>/dev/null || kill -TERM "$turnpid" 2>/dev/null
+        sleep 0.3
+        kill -KILL -- "-$turnpid" 2>/dev/null || kill -KILL "$turnpid" 2>/dev/null
+      fi
+    fi
+  fi
   tmux kill-session -t "$(_o_tmux_target "$sess")" 2>/dev/null || true
   if _o_has_session "$sess"; then
     [[ "$as_json" == 1 ]] && _o_json_status unclosed "$sess" 'session survived kill'
@@ -897,7 +1053,15 @@ while True:
   # Mark the OpenCode process tree at birth. The global event plugin runs for
   # ordinary human sessions too; only delegation-born workers may bridge idle
   # and error events into `o bind-event`.
-  sess="$(ORCHESTRATORMAXXING_O_DELEGATED=1 o "$name" --detach --agent "$agent" --auto)" || return 1
+  sess="$(_o_next_session "opencode-$name")"
+  echo "→ Creating new OpenCode session: $sess" >&2
+  # A delegated worker pane hosts bounded `o run-turn` processes, one per turn
+  # (TUI-less: see _o_run_turn). remain-on-exit keeps the pane addressable
+  # between turns so respawn-pane can submit the next one.
+  if ! tmux new-session -d -x 220 -y 50 -s "$sess" -c "$cwd_physical" 'tail -f /dev/null'       || ! tmux set-option -t "$(_o_tmux_target "$sess"):" remain-on-exit on 2>/dev/null; then
+    echo "o delegate: failed to create worker session" >&2
+    return 1
+  fi
   # Bind ownership before readiness or submission. A human opencode-* TUI has
   # the same name shape, so prefix matching alone is never deletion authority.
   if ! _o_set_worker_option "$sess" @orchestratormaxxing_delegated 1 \
@@ -905,6 +1069,7 @@ while True:
       || ! _o_set_worker_option "$sess" @orchestratormaxxing_turn 1 \
       || ! _o_set_worker_option "$sess" @orchestratormaxxing_pending 0 \
       || ! _o_set_worker_option "$sess" @orchestratormaxxing_turn1_mode "$turn1_mode" \
+      || ! _o_set_worker_option "$sess" @orchestratormaxxing_transport run \
       || ! _o_set_worker_option "$sess" @orchestratormaxxing_agent "$agent" \
       || ! _o_set_worker_option "$sess" @orchestratormaxxing_model "$model"; then
     tmux kill-session -t "$(_o_tmux_target "$sess")" 2>/dev/null || true
@@ -916,10 +1081,6 @@ while True:
     [[ "$as_json" == 1 ]] && _o_json_status ownership_failure "$sess" 'worker profile binding failed; exact new session closed'
     return 4
   fi
-  if ! _o_wait_ready "$sess"; then
-    [[ "$as_json" == 1 ]] && _o_json_status not_ready "$sess" "worker preserved; attach with o ls $sess"
-    return 4
-  fi
   _o_set_worker_option "$sess" @orchestratormaxxing_pending 1 || return 4
   if [[ "$turn1_mode" == "marked" ]]; then
     prompt_text="You are a delegated OpenCode worker in this project. Read the Root-authored brief at $brief and acceptance contract at $contract. Execute the complete bounded assignment inside the o-delegate-turn-1 marker block now."
@@ -927,7 +1088,8 @@ while True:
     prompt_text="You are a delegated OpenCode worker in this project. Read the Root-authored brief at $brief and acceptance contract at $contract. Treat the whole brief as the complete bounded turn-1 assignment and execute it now."
   fi
   prompt_text+=" Never modify, grade, or certify either file. Work only within their scope. Give a bounded final handoff in this same session; Root alone runs acceptance, publishes output.md, and writes receipt.json."
-  if ! command tmux-send "$sess" "$prompt_text" >/dev/null; then
+  if ! _o_submit_run_turn "$sess" "$agent" "" "$prompt_text"; then
+    _o_set_worker_option "$sess" @orchestratormaxxing_pending 0 || true
     [[ "$as_json" == 1 ]] && _o_json_status unconfirmed "$sess" "worker preserved; attach with o ls $sess"
     return 1
   fi
@@ -943,6 +1105,7 @@ _o_machine_main() {
   local verb="${1:-}"
   case "$verb" in
     delegate) shift; _o_delegate_worker "$@" ;;
+    run-turn) shift; _o_run_turn "$@" ;;
     send) shift; _o_send_worker "$@" ;;
     bind-event) shift; _o_bind_worker_event "$@" ;;
     handoff) shift; _o_handoff_worker "$@" ;;

@@ -1,0 +1,42 @@
+# Ephemeral stack for tests/test_container_security.py — the same image the
+# Coolify deploy uses, booted so the security suite runs against a REAL
+# containerized mcp-sse over HTTP (not the in-process TestClient).
+# Dashboard maps to 5575 (host 5555 is the systemd service); mcp-sse to 5556.
+services:
+  dashboard:
+    image: ${IMAGE:-hermes-orchestrator:citest}
+    command: ["python", "-m", "dashboard.api"]
+    environment:
+      DASHBOARD_BIND: 0.0.0.0
+      DASHBOARD_PORT: "5555"
+      HERMES_KANBAN_DB: /data/orchestrator.db
+    volumes:
+      - ${TEST_DATA_DIR:?set TEST_DATA_DIR}:/data
+    ports:
+      - "5575:5555"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5555/healthz',timeout=4).status==200 else 1)"]
+      interval: 5s
+      timeout: 4s
+      start_period: 10s
+      retries: 10
+
+  mcp-sse:
+    image: ${IMAGE:-hermes-orchestrator:citest}
+    command: ["python", "mcp_sse_server.py"]
+    environment:
+      HERMES_MCP_SSE_BIND: 0.0.0.0
+      HERMES_MCP_SSE_PORT: "5556"
+      HERMES_KANBAN_DB: /data/orchestrator.db
+      HERMES_MCP_SSE_TOKEN: ${HERMES_MCP_SSE_TOKEN:?set HERMES_MCP_SSE_TOKEN}
+      HERMES_MCP_CORS_ORIGINS: http://localhost:5556
+    volumes:
+      - ${TEST_DATA_DIR:?set TEST_DATA_DIR}:/data
+    ports:
+      - "5556:5556"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5556/health',timeout=4).status==200 else 1)"]
+      interval: 5s
+      timeout: 4s
+      start_period: 10s
+      retries: 10

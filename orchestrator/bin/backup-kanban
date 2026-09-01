@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""backup-kanban — consistent daily snapshot of the Hermes kanban SQLite DB (P2-5).
+
+Uses SQLite's ONLINE backup API (not a raw cp), so the snapshot is
+transaction-consistent even while the dashboard is writing — a plain copy can
+capture a torn WAL state. Verifies the copy with PRAGMA integrity_check before
+trusting it, then rotates old snapshots. Driven by deploy/hermes-backup.timer
+(systemd --user, daily); also runnable by hand for an ad-hoc backup.
+
+Env:
+  HERMES_KANBAN_DB    source DB            (default ~/.hermes/kanban.db)
+  HERMES_BACKUP_DIR   snapshot directory   (default ~/.hermes/backups)
+  HERMES_BACKUP_KEEP  snapshots to retain  (default 14)
+
+Exit 0 = a verified snapshot written; non-zero (loud, to stderr) on any failure
+so the timer/monitor can alert.
+"""
+import os
+import sqlite3
+import sys
+import time
+from pathlib import Path
+
+SRC = Path(os.environ.get("HERMES_KANBAN_DB") or (Path.home() / ".hermes" / "kanban.db"))
+DEST_DIR = Path(os.environ.get("HERMES_BACKUP_DIR") or (Path.home() / ".hermes" / "backups"))
+KEEP = int(os.environ.get("HERMES_BACKUP_KEEP") or 14)
+
+
+def main() -> int:
+    if not SRC.exists():
+        print(f"backup-kanban: source DB not found: {SRC}", file=sys.stderr)
+        return 2
+    DEST_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+    dest = DEST_DIR / f"kanban-{stamp}.db"
+
+    # Consistent online backup: the backup API copies pages under a read lock and
+    # copes with concurrent writers / WAL, unlike a filesystem cp.
+    try:
+        src = sqlite3.connect(f"file:{SRC}?mode=ro", uri=True, timeout=30)
+        dst = sqlite3.connect(str(dest))
+        with dst:
+            src.backup(dst)
+        dst.close()
+        src.close()
+    except Exception as e:  # pragma: no cover - defensive
+        print(f"backup-kanban: backup failed: {e}", file=sys.stderr)
+        if dest.exists():
+            dest.unlink()
+        return 3
+
+    # Never keep a snapshot we can't verify.
+    try:
+        chk = sqlite3.connect(str(dest)).execute("PRAGMA integrity_check").fetchone()[0]
+    except Exception as e:  # pragma: no cover - defensive
+        chk = f"error: {e}"
+    if chk != "ok":
+        print(f"backup-kanban: integrity check failed on {dest.name}: {chk}", file=sys.stderr)
+        dest.unlink()
+        return 4
+
+    # Rotate: keep the newest KEEP snapshots (timestamped names sort chronologically).
+    snaps = sorted(DEST_DIR.glob("kanban-*.db"))
+    removed = 0
+    for old in (snaps[:-KEEP] if KEEP > 0 else []):
+        try:
+            old.unlink()
+            removed += 1
+        except Exception:  # pragma: no cover
+            pass
+
+    size_kb = dest.stat().st_size // 1024
+    print(f"backup-kanban: wrote {dest} ({size_kb} KB, integrity ok); "
+          f"{len(snaps) - removed} kept, {removed} rotated")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

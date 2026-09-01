@@ -1,0 +1,19 @@
+# Alertmanager — route/notification wiring for the orchestrator alerts.
+# Starts with a LOG-ONLY receiver so the stack is complete out of the box;
+# point `webhook_configs.url` at a real notifier when ready. The natural
+# Hermes integration: a small receiver that POSTs firing alerts into the
+# dashboard as session events / Needs-You items — until then, alert state is
+# visible at http://coolify-hub:9093 and on the Prometheus /alerts page.
+route:
+  receiver: log-only
+  group_by: [alertname]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: log-only
+    # Alertmanager requires ≥1 receiver; without integrations it just holds
+    # the alert state (UI + API). Add e.g.:
+    #   webhook_configs:
+    #     - url: http://<orchestrator-host>:5555/api/alerts/webhook   # (endpoint TBD)

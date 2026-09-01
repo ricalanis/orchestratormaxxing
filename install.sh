@@ -6,7 +6,7 @@
 # references back to this repo's path:
 #   • bridges  → ~/.local/bin/{oll,oll-council,oll-sync,occ,worker-path-bench,ticket-route,provider-ask,multi-council,cross-review,xsearch,mem-audit,memory-bridge-hermes.sh,loop-queue,loop-tick,intent-queue,hermes-watch,kpi-brief,capacity,token-ledger,model-catalog,model-bench,model-eval,win-log,delegate-ledger,warp-ollama,warp-model-pin,zed-setup,session-log,task-plan,project-new,drive,gpu-desktop,tmux-send,harness-agent-run,opencode-browser-mcp,gcloud,coolify,gauntlet-judge}  (on PATH)
 #   • agents   → ~/.claude/agents/{ollama-worker,product-manager,fable-planner}.md
-#   • commands → ~/.claude/commands/{fanout,ideas,self-improve,wrap-up,fableplan,plan-to-repo,gauntlet}.md (bare `oll`/`session-log`)
+#   • commands → ~/.claude/commands/{fanout,ideas,self-improve,wrap-up,fableplan,gauntlet,cheap-delegate}.md (bare `oll`/`session-log`)
 #   • codex    → repo marketplace plugin + ~/.codex/agents/*.toml
 #   • shell    → ~/.config/orchestratormaxxing/{claude-c,codex-g}.sh + tmux.conf
 #   • doctrine → ~/.claude/CLAUDE.md + ~/.codex/AGENTS.md (compact marked block)
@@ -77,6 +77,11 @@ cp "$REPO_DIR/bin/mem-audit"   "$BIN_DST/mem-audit"
 cp "$REPO_DIR/bin/memoryctl"   "$BIN_DST/memoryctl"
 cp "$REPO_DIR/bin/harness-sync" "$BIN_DST/harness-sync"
 cp "$REPO_DIR/bin/core-export" "$BIN_DST/core-export"
+cp "$REPO_DIR/bin/task-plan"     "$BIN_DST/task-plan"
+cp "$REPO_DIR/bin/capacity"       "$BIN_DST/capacity"
+cp "$REPO_DIR/bin/kpi-brief"      "$BIN_DST/kpi-brief"
+cp "$REPO_DIR/bin/hermes-watch"   "$BIN_DST/hermes-watch"
+cp "$REPO_DIR/bin/memory-bridge-hermes.sh" "$BIN_DST/memory-bridge-hermes.sh"
 cp "$REPO_DIR/bin/mut"         "$BIN_DST/mut"
 cp "$REPO_DIR/bin/harness-verify" "$BIN_DST/harness-verify"
 cp "$REPO_DIR/bin/harness-scan"   "$BIN_DST/harness-scan"
@@ -110,7 +115,7 @@ chmod +x "$BIN_DST/o"
 rm -rf -- "$SHARE_DIR/orchestration_practices"
 cp -R "$REPO_DIR/orchestration_practices" "$SHARE_DIR/orchestration_practices"
 cp "$REPO_DIR/prompts/context/compact.md" "$SHARE_DIR/context-compact.md"
-chmod +x "$BIN_DST/oll" "$BIN_DST/oll-council" "$BIN_DST/oll-sync" "$BIN_DST/occ" "$BIN_DST/agent-tab-status" "$BIN_DST/warp-agent-event" "$BIN_DST/warp-agent-recovery" "$BIN_DST/codex-stop-hook" "$BIN_DST/agent-done-notify" "$BIN_DST/ticket-route" "$BIN_DST/provider-ask" "$BIN_DST/multi-council" "$BIN_DST/cross-review" "$BIN_DST/mem-audit" "$BIN_DST/memoryctl" "$BIN_DST/harness-sync" "$BIN_DST/core-export" "$BIN_DST/mut" "$BIN_DST/harness-verify" "$BIN_DST/harness-scan" "$BIN_DST/loop-queue" "$BIN_DST/loop-tick" "$BIN_DST/token-ledger" "$BIN_DST/model-catalog" "$BIN_DST/model-bench" "$BIN_DST/model-eval" "$BIN_DST/win-log" "$BIN_DST/delegate-ledger" "$BIN_DST/warp-ollama" "$BIN_DST/warp-model-pin" "$BIN_DST/zed-setup" "$BIN_DST/session-log" "$BIN_DST/sync-agent-skills" "$BIN_DST/orchestration-practice" "$BIN_DST/cogload" "$BIN_DST/tmux" "$BIN_DST/tmux-send" "$BIN_DST/harness-agent-run" "$BIN_DST/opencode-browser-mcp" "$BIN_DST/browser-mcp-contract" "$BIN_DST/gauntlet-judge" "$BIN_DST/xsearch"
+chmod +x "$BIN_DST/oll" "$BIN_DST/oll-council" "$BIN_DST/oll-sync" "$BIN_DST/occ" "$BIN_DST/agent-tab-status" "$BIN_DST/warp-agent-event" "$BIN_DST/warp-agent-recovery" "$BIN_DST/codex-stop-hook" "$BIN_DST/agent-done-notify" "$BIN_DST/ticket-route" "$BIN_DST/provider-ask" "$BIN_DST/multi-council" "$BIN_DST/cross-review" "$BIN_DST/mem-audit" "$BIN_DST/memoryctl" "$BIN_DST/harness-sync" "$BIN_DST/core-export" "$BIN_DST/mut" "$BIN_DST/harness-verify" "$BIN_DST/harness-scan" "$BIN_DST/loop-queue" "$BIN_DST/loop-tick" "$BIN_DST/token-ledger" "$BIN_DST/model-catalog" "$BIN_DST/model-bench" "$BIN_DST/model-eval" "$BIN_DST/win-log" "$BIN_DST/delegate-ledger" "$BIN_DST/warp-ollama" "$BIN_DST/warp-model-pin" "$BIN_DST/zed-setup" "$BIN_DST/session-log" "$BIN_DST/sync-agent-skills" "$BIN_DST/orchestration-practice" "$BIN_DST/cogload" "$BIN_DST/tmux" "$BIN_DST/tmux-send" "$BIN_DST/harness-agent-run" "$BIN_DST/opencode-browser-mcp" "$BIN_DST/browser-mcp-contract" "$BIN_DST/gauntlet-judge" "$BIN_DST/xsearch" "$BIN_DST/memory-bridge-hermes.sh" "$BIN_DST/hermes-watch" "$BIN_DST/kpi-brief" "$BIN_DST/capacity" "$BIN_DST/task-plan"
 
 # bin/chrome-debug-wayland-shim → shadows google-chrome(-stable) on PATH (Linux only).
 # Any launch carrying --remote-debugging-port under a Wayland session gets
@@ -143,7 +148,6 @@ cp "$REPO_DIR/.claude/commands/wrap-up.md"     "$CLAUDE_DIR/commands/wrap-up.md"
 cp "$REPO_DIR/.claude/commands/fableplan.md"   "$CLAUDE_DIR/commands/fableplan.md"
 cp "$REPO_DIR/.claude/commands/gauntlet.md"    "$CLAUDE_DIR/commands/gauntlet.md"
 cp "$REPO_DIR/.claude/commands/cheap-delegate.md" "$CLAUDE_DIR/commands/cheap-delegate.md"
-cp "$REPO_DIR/.claude/commands/graduate.md"    "$CLAUDE_DIR/commands/graduate.md"
 
 say "Governed skill stack → Claude, Codex, OpenCode, and production Hermes"
 # ADOPT + EXTEND: upstream payloads stay pinned in skills/external-stack.json;

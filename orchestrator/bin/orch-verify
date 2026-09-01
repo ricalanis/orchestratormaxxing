@@ -1,0 +1,907 @@
+#!/usr/bin/env python3
+"""orch-verify — deterministic ratchet for the Hermes orchestrator's Phase 0 invariants.
+
+Phase 0 of the deep-design work ("stop the bleeding") fixed a set of structural
+leaks: divergent status writers, heartbeat noise in the audit log, an unvalidated
+raw-SQL fallback. This script is the *ratchet* that keeps them fixed — a
+deterministic, read-only self-check in the spirit of the harness's `harness-verify`
+(the loop reads pass/fail, never re-derives "is this good" with an LLM).
+
+It asserts the cumulative Phase 0→6 invariants (knowledge/deep-design-interaction-layers.md):
+
+ Phase 6 (PROPOSAL ratchet): 16. STRATEGY EVENTED — initiatives live in the DB
+     with initiative_events; roadmap.json is a _generated export in id-parity
+     with the table. 17. CRM SPINE — accounts/contacts/deals/deal_events exist,
+     stages in the closed set, every FK (account, initiative) resolves.
+ 18. CHAIN RESOLVES — for a linked deal, Deal→Initiative→Epic→Task→Run→Commit
+     drill-down resolves (live smoke; skipped when no deal is linked).
+
+
+  1. ONE-WRITER for status  — a raw `UPDATE tasks SET status …` may live ONLY in the
+     sanctioned core (sprints.py / loop.py / orchestration.py). The MCP server, the
+     HTTP API, and the read layer must route through those, never write status
+     directly. (This is the general form of "no-raw-SQL-status".)
+  2. NO-RAW-SQL-STATUS      — mcp_server.py specifically carries zero status writes
+     (the deleted fallback at mcp_server.py:645 must not creep back).
+  3. NO-HEARTBEAT-EVENTS    — no code path inserts a `task_events` row of kind
+     'heartbeat' (heartbeats belong in the last_heartbeat_at column). Backstop:
+     if the live kanban DB is present, warn when heartbeat rows have reaccumulated.
+
+Phase 5 added the unified-memory invariants (see §Phase 5 of the same doc):
+
+ 12. RECALL IS THE READ PATH — graph_memory.recall() must exist, be an MCP
+     verb, and (live smoke, skipped without a graph DB) resolve a known probe
+     across ≥3 distinct authoritative sources with a staleness flag on every
+     result.
+ 13. RENAME HELD          — dashboard/graph.py must NOT reappear (it's
+     object_graph.py now); concept_vocab.json must exist, parse, be non-empty.
+ 14. INGESTER SURFACE     — the six-store ingesters stay wired
+     (initiatives/sprints/ledger/cc_memory/changelog/obsidian).
+ 15. METABOLISM ALIVE     — warn when memories/metabolism.json is missing or
+     >24h old (the consolidation worker is a vital organ; flatline = warn).
+
+Phase 4 added the governance invariants (see §Phase 4 of the same doc):
+
+  9. VERIFIED DONE          — no AGENT task completed after the Phase-4 epoch
+     (orch_meta.phase4_epoch) may be `done` without a role='verification'
+     task_ledger row (the VALIDATE sign-off or the operator's manual accept).
+ 10. LEDGER = VERIFICATION  — every ledger row written after the epoch carries
+     role='verification' (the VALIDATE session is the only writer).
+ 11. GOVERNANCE WIRED       — dashboard/governance.py exposes the gate/runner
+     surface; run_contract/set_contract are MCP verbs; tasks.contract_cmd and
+     the auto-pool triggers + epoch marker exist in the live DB.
+
+Phase 3 added the canvas/cycle invariants (see §Phase 3 of the same doc):
+
+  6. CANVAS IS SERVER-SIDE  — the Today surface is composed by dashboard/canvas.py
+     (get_day_plan) and read via /api/day-plan; the Today tab must fetch that
+     endpoint and must NOT rebuild its zones from the /api/tasks firehose
+     (Hermes reads the SAME MCP verb, so client-side filters would fork truth).
+     The canvas MCP verbs must exist in mcp_server.py.
+  7. REVIEW IS A STATUS     — no task may sit on the dead `done AND reviewed_at
+     IS NULL` predicate (ensure_schema migrates it to status='review').
+  8. COMMIT-LEDGER          — task_sprints carries committed_at (never NULL) +
+     outcome ∈ {delivered, carried, dropped, open}; sprints.project_id is
+     nullable (cross-project cycles); the cycle_velocity VIEW exists.
+
+Phase 2 added the derived-strategy invariants (see §Phase 2 of the same doc):
+
+  4. ROADMAP SCHEMA         — every roadmap.json initiative carries a canonical
+     project_id (validated FK, no aliases/slugs/legacy 'project' key), a
+     calendar `quarter` matching YYYY-Q[1-4] (trimester/month are dead), and a
+     unique UUID-suffixed id.
+  5. DERIVED ≠ STORED       — an initiative with ≥1 live epic must NOT carry a
+     stored `progress` key: its progress is derived (accepted-done roll-up)
+     and a hand-typed number there is exactly the drift D2 exists to kill.
+     Backstop: the `active_by_project` hack must not reappear in code (NAME
+     tokens), and epics.initiative_id must resolve to a roadmap initiative.
+
+Analysis is done over Python STRING TOKENS (via tokenize), not raw text, so comments
+and docstrings that merely *mention* these patterns never trip a false positive.
+
+Read-only. Exit 0 = green (invariants hold), 1 = a regression to fix.
+
+Usage:
+  bin/orch-verify            # verify the orchestrator repo containing this script
+  bin/orch-verify --repo P   # explicit orchestrator root
+  bin/orch-verify --json     # machine-readable
+"""
+import argparse
+import io
+import json
+import os
+import re
+import sqlite3
+import sys
+import tokenize
+from pathlib import Path
+
+# The ONLY modules allowed to issue a raw `UPDATE tasks SET status` (repo-relative).
+# These are the loop/sidecar core; every other layer routes through them.
+STATUS_WRITERS = {
+    "dashboard/sprints.py",       # set_task_status / reject_task — the validated board writer
+    "dashboard/loop.py",          # claim/result/blocked loop transitions (each logs an event)
+    "dashboard/orchestration.py", # abort / record_failed_attempt (each logs an event)
+    "dashboard/canvas.py",        # Phase-3 review-status migration (event-logged, idempotent)
+}
+
+# Layers that must NEVER write status directly (the edges: MCP, HTTP, read layer).
+STATUS_FORBIDDEN = {
+    "mcp_server.py",
+    "dashboard/api.py",
+    "dashboard/db.py",
+}
+
+_STATUS_WRITE_RE = re.compile(r"update\s+tasks\s+set\s+status", re.IGNORECASE)
+
+KANBAN_DB = Path(os.environ.get("HERMES_KANBAN_DB") or (Path.home() / ".hermes" / "kanban.db"))
+
+# Phase 1 invariants. Kept inline (not imported from identity.py) so the ratchet
+# stays a dependency-free external verifier — if identity.py breaks, this still runs.
+ORIGINS = {"ricardo", "hermes", "agent", "decomposed"}
+# Phase 2: roadmap.json schema (kept inline for the same dependency-free reason).
+QUARTER_RE = re.compile(r"^\d{4}-Q[1-4]$")
+INIT_ID_RE = re.compile(r"^init_[0-9a-f]{8}$")
+# The deleted per-project active-initiative hack must not creep back in.
+FORBIDDEN_NAMES = {"active_by_project"}
+REQUIRED_TRIGGERS = {
+    "trg_task_identity",         # create-time origin/owner/delegate assertion (item 3)
+    "trg_task_default_project",  # NOT-NULL-by-default project floor (item 4)
+    "trg_decompose_inherit",     # children inherit the root's project (item 5)
+}
+
+
+def repo_root(explicit):
+    if explicit:
+        return os.path.abspath(explicit)
+    # this script lives at <root>/bin/orch-verify
+    return str(Path(__file__).resolve().parent.parent)
+
+
+def _py_files(root):
+    skip = {".venv", "__pycache__", ".git", "node_modules"}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in skip]
+        for f in filenames:
+            if f.endswith(".py"):
+                full = os.path.join(dirpath, f)
+                yield full, os.path.relpath(full, root)
+
+
+def _literal_value(tok_string):
+    """Best-effort decode of a string token to its runtime value (strips quotes/
+    prefixes, resolves escapes). Falls back to the raw token if eval is unsafe."""
+    try:
+        import ast
+        return ast.literal_eval(tok_string)
+    except Exception:
+        return tok_string
+
+
+def _name_tokens(path):
+    """Yield (identifier, lineno) for every NAME token in a .py file — the
+    identifier-level twin of _string_tokens (comments/strings never match)."""
+    try:
+        with open(path, "rb") as fh:
+            for tok in tokenize.tokenize(fh.readline):
+                if tok.type == tokenize.NAME:
+                    yield tok.string, tok.start[0]
+    except Exception:
+        return
+
+
+def _string_tokens(path):
+    """Yield (decoded_value, lineno) for every STRING token in a .py file. Comments
+    are not STRING tokens, so `# … heartbeat …` never appears here; a docstring is
+    one token whose decoded value is the whole paragraph (so it won't equal a bare
+    'heartbeat'). Decoding matters: the raw token is `'"heartbeat"'` (with quotes),
+    the value is `heartbeat`. On a tokenize/syntax error, yield nothing (a separate
+    syntax check owns that)."""
+    try:
+        with open(path, "rb") as fh:
+            for tok in tokenize.tokenize(fh.readline):
+                if tok.type == tokenize.STRING:
+                    yield _literal_value(tok.string), tok.start[0]
+    except Exception:
+        return
+
+
+def _js_test_checks(root, err, warn):
+    """Run the jsdom unit suite (the browser-side logic in dashboard/static/*.js,
+    e.g. the Cycle-board roving tabindex) as part of the ratchet, so a red JS test
+    blocks a green ratchet — the same way the Python invariants do.
+
+    Best-effort on the toolchain so the ratchet stays runnable everywhere: if
+    node/npm/jsdom aren't present it WARNS and skips (attempting one `npm ci` from
+    the committed lockfile first). It only ERRORS on an actual test failure."""
+    import shutil
+    import subprocess
+    root = Path(root)
+    tests = sorted((root / "tests").glob("*.test.mjs")) if (root / "tests").exists() else []
+    if not tests:
+        return
+    node = shutil.which("node")
+    if not node:
+        warn("tests:js", "node not found — jsdom unit tests skipped (npm test)")
+        return
+    if not (root / "node_modules" / "jsdom").exists():
+        if (root / "package-lock.json").exists() and shutil.which("npm"):
+            try:
+                subprocess.run(["npm", "ci", "--silent", "--no-audit", "--no-fund"],
+                               cwd=str(root), capture_output=True, text=True, timeout=240)
+            except Exception:
+                pass
+        if not (root / "node_modules" / "jsdom").exists():
+            warn("tests:js", "jsdom not installed — run `npm ci` to enable the JS suite (skipped)")
+            return
+    rel = [str(p.relative_to(root)) for p in tests]
+    try:
+        r = subprocess.run([node, "--test", *rel], cwd=str(root),
+                           capture_output=True, text=True, timeout=180)
+    except Exception as e:
+        warn("tests:js", f"could not run the JS suite: {e}")
+        return
+    if r.returncode != 0:
+        out = (r.stdout or "") + (r.stderr or "")
+        tail = "\n    ".join(out.strip().splitlines()[-15:])
+        err("tests:js", "jsdom unit tests FAILED (node --test):\n    " + tail)
+
+
+def audit(root):
+    issues = []  # (severity, where, message)
+    def err(w, m): issues.append(("error", w, m))
+    def warn(w, m): issues.append(("warn", w, m))
+
+    seen_status_writer = set()
+    heartbeat_hits = []
+
+    for full, rel in _py_files(root):
+        rel_posix = rel.replace(os.sep, "/")
+        for value, lineno in _string_tokens(full):
+            if not isinstance(value, str):
+                continue
+            # (1)/(2) status writes — only string literals carry the SQL.
+            if _STATUS_WRITE_RE.search(value):
+                if rel_posix in STATUS_FORBIDDEN:
+                    err(f"{rel_posix}:{lineno}",
+                        "raw 'UPDATE tasks SET status' in a non-writer layer — "
+                        "route through sprints.set_task_status / the loop core")
+                elif rel_posix in STATUS_WRITERS:
+                    seen_status_writer.add(rel_posix)
+                else:
+                    err(f"{rel_posix}:{lineno}",
+                        "raw 'UPDATE tasks SET status' outside the sanctioned "
+                        f"status-writer set {sorted(STATUS_WRITERS)}")
+            # (3) heartbeat event kind — a bare 'heartbeat' literal only exists as
+            # a task_events kind (comments/docstrings can't produce this token).
+            if value == "heartbeat":
+                heartbeat_hits.append(f"{rel_posix}:{lineno}")
+        # (5) Phase 2: deleted hacks must not reappear as identifiers.
+        for name, lineno in _name_tokens(full):
+            if name in FORBIDDEN_NAMES:
+                err(f"{rel_posix}:{lineno}",
+                    f"forbidden identifier '{name}' — the per-project active-initiative "
+                    "hack was deleted in Phase 2 (progress derives per initiative)")
+
+    # (1) one-writer: the sidecar writer must actually exist (guards a rename that
+    # would silently move the write path somewhere unchecked).
+    if "dashboard/sprints.py" not in seen_status_writer:
+        err("dashboard/sprints.py",
+            "no 'UPDATE tasks SET status' found — the validated status writer "
+            "(set_task_status) is missing or was moved; one-writer invariant unverifiable")
+
+    # (3) no code path may insert a heartbeat event.
+    for hit in heartbeat_hits:
+        err(hit, "a 'heartbeat' event kind is written to task_events — heartbeats "
+                 "belong in the last_heartbeat_at column, not the audit log")
+
+    # (3) backstop: the live DB shouldn't have heartbeat rows reaccumulate.
+    if KANBAN_DB.is_file():
+        try:
+            conn = sqlite3.connect(str(KANBAN_DB), timeout=5)
+            try:
+                n = conn.execute(
+                    "SELECT COUNT(*) FROM task_events WHERE kind = 'heartbeat'"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+            if n:
+                warn("kanban.db",
+                     f"{n} 'heartbeat' rows in task_events — clean with "
+                     "\"DELETE FROM task_events WHERE kind='heartbeat';\" "
+                     "(likely written by the external hermes CLI, not this repo)")
+        except Exception as ex:
+            warn("kanban.db", f"could not check heartbeat rows: {ex}")
+
+    # --- Phase 1 ratchet: no orphan project keys + origin closed-set (item 6) ---
+    _phase1_db_checks(root, err, warn)
+
+    # --- Phase 3 ratchet: canvas server-side + review status + commit-ledger ---
+    _phase3_checks(root, err, warn)
+
+    # --- Phase 4 ratchet: verified done + verification-only ledger + wiring ---
+    _phase4_checks(root, err, warn)
+
+    # --- Phase 5 ratchet: recall read path + rename + ingesters + metabolism ---
+    _phase5_checks(root, err, warn)
+
+    # --- Phase 6 ratchet (PROPOSAL): strategy events + CRM spine + full chain ---
+    _phase6_checks(root, err, warn)
+
+    # --- Session-mapping ratchet: UUID→tmux registry + no hot-gate regression ---
+    _session_mapping_checks(root, err, warn)
+
+    # --- Unit suites: the jsdom JS tests run as part of the ratchet (a red test
+    #     is a red ratchet). Toolchain-optional (warn+skip when node/jsdom absent).
+    _js_test_checks(root, err, warn)
+
+    return issues
+
+
+def _session_mapping_checks(root, err, warn):
+    """The dashboard must resolve ANY session to its terminal via the STAMPED
+    tmux registry (@claude-session-id user option), and the old <120s 'hot'
+    freshness gate — which made every idle session transcript-only — must
+    never creep back into sessions.py."""
+    sess_py = os.path.join(root, "dashboard", "sessions.py")
+    if os.path.isfile(sess_py):
+        strings = {v for v, _ in _string_tokens(sess_py) if isinstance(v, str)}
+        if "@claude-session-id" not in strings:
+            err("dashboard/sessions.py",
+                "the @claude-session-id tmux registry is gone — send/capture would "
+                "fall back to the fragile cwd heuristic alone")
+        names = {n for n, _ in _name_tokens(sess_py)}
+        if "is_hot" in names:
+            err("dashboard/sessions.py",
+                "the 'is_hot' freshness gate reappeared — idle sessions must keep "
+                "their terminal link (the UUID registry owns the mapping)")
+        if "resolve_tmux_target" not in names:
+            err("dashboard/sessions.py", "resolve_tmux_target missing — the ONE "
+                "host-agnostic UUID→tmux resolver was removed")
+        if "_tmux_registry" not in names:
+            err("dashboard/sessions.py", "_tmux_registry missing — the one-call "
+                "tmux mapping surface was removed")
+    # Vendored Tailwind: the CDN must not creep back (offline Tailscale-only
+    # dashboard + the production warning it prints), and the built CSS must
+    # exist and be non-trivial.
+    for tpl in ("index.html", "sessions.html", "planning.html", "orchestration.html"):
+        tp = os.path.join(root, "dashboard", "templates", tpl)
+        if os.path.isfile(tp) and "cdn.tailwindcss.com" in open(tp, encoding="utf-8").read():
+            err(f"dashboard/templates/{tpl}",
+                "references cdn.tailwindcss.com — Tailwind is vendored "
+                "(bin/build-tailwind → static/tailwind.css)")
+    tw = os.path.join(root, "dashboard", "static", "tailwind.css")
+    if not os.path.isfile(tw):
+        err("dashboard/static/tailwind.css", "missing — run bin/build-tailwind")
+    elif os.path.getsize(tw) < 10000:
+        err("dashboard/static/tailwind.css",
+            f"suspiciously small ({os.path.getsize(tw)}b) — a broken build would "
+            "unstyle the whole dashboard; re-run bin/build-tailwind")
+
+    # Prometheus alerting: rules must carry their unit tests, every alert must
+    # be exercised, and where promtool exists (the monitoring host) the tests
+    # RUN — a threshold typo then fails this ratchet, not a 3am page.
+    alerts_f = os.path.join(root, "deploy", "prometheus", "orchestrator-alerts.yml")
+    rules_test_f = os.path.join(root, "deploy", "prometheus", "orchestrator-rules-test.yml")
+    if os.path.isfile(alerts_f):
+        if not os.path.isfile(rules_test_f):
+            err("deploy/prometheus", "orchestrator-alerts.yml has no "
+                "orchestrator-rules-test.yml — alert logic must stay unit-tested")
+        else:
+            atext = open(alerts_f, encoding="utf-8").read()
+            ttext = open(rules_test_f, encoding="utf-8").read()
+            alert_names = re.findall(r"^\s*-\s*alert:\s*(\S+)", atext, re.M)
+            for name in alert_names:
+                if f"alertname: {name}" not in ttext:
+                    err("deploy/prometheus/orchestrator-rules-test.yml",
+                        f"alert {name} has no test case (alertname: {name} absent)")
+            import shutil as _sh
+            promtool = _sh.which("promtool")
+            if promtool:
+                import subprocess as _sp
+                r = _sp.run([promtool, "test", "rules", os.path.basename(rules_test_f)],
+                            cwd=os.path.dirname(rules_test_f),
+                            capture_output=True, text=True, timeout=60)
+                if r.returncode != 0:
+                    err("deploy/prometheus/orchestrator-rules-test.yml",
+                        "promtool test rules FAILED:\n" + (r.stdout + r.stderr)[-800:])
+
+    stamp = os.path.join(root, "hooks", "tmux-stamp.sh")
+    if not os.path.isfile(stamp):
+        err("hooks/tmux-stamp.sh", "missing — nothing stamps new sessions with their "
+            "UUID; the registry starves")
+    elif "@claude-session-id" not in open(stamp).read():
+        err("hooks/tmux-stamp.sh", "does not write @claude-session-id")
+    installer = os.path.join(root, "hooks", "install-hooks.py")
+    if os.path.isfile(installer):
+        text = open(installer).read()
+        if "SessionStart" not in text or "tmux-stamp" not in text:
+            err("hooks/install-hooks.py", "does not register the SessionStart "
+                "tmux-stamp hook — new sessions would never be stamped")
+
+
+DEAL_STAGES = {"lead", "engaged", "qualified", "demo", "proposal", "won", "lost"}
+CRM_TABLES = {"accounts", "contacts", "deals", "deal_events"}
+
+
+def _phase6_checks(root, err, warn):
+    """Phase-6 invariants: strategy is evented in the DB, the CRM spine's FKs
+    all resolve, and the full Deal→Initiative→Epic→Task→Run→Commit drill-down
+    resolves for linked deals (smoke, skipped when no deal is linked)."""
+    if not KANBAN_DB.is_file():
+        return
+    try:
+        conn = sqlite3.connect(str(KANBAN_DB), timeout=5)
+    except Exception as ex:
+        warn("kanban.db", f"could not open for Phase-6 checks: {ex}")
+        return
+    linked_deal = None
+    try:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "initiative_events" not in tables:
+            err("kanban.db:initiative_events", "missing — strategy mutations must be evented (Phase 6)")
+        for t in sorted(CRM_TABLES - tables):
+            err(f"kanban.db:{t}", "CRM table missing — Phase-6 spine incomplete")
+        if not CRM_TABLES - tables:
+            bad_stage = conn.execute(
+                f"SELECT COUNT(*) FROM deals WHERE stage NOT IN "
+                f"({','.join('?' * len(DEAL_STAGES))})",
+                tuple(sorted(DEAL_STAGES))).fetchone()[0]
+            if bad_stage:
+                err("kanban.db:deals.stage", f"{bad_stage} deal(s) outside the closed stage set {sorted(DEAL_STAGES)}")
+            orphans = conn.execute(
+                "SELECT COUNT(*) FROM deals d LEFT JOIN accounts a ON a.id = d.account_id "
+                "WHERE a.id IS NULL").fetchone()[0]
+            if orphans:
+                err("kanban.db:deals.account_id", f"{orphans} deal(s) with an orphan account key")
+            if "initiatives" in tables:
+                orphan_init = conn.execute(
+                    "SELECT COUNT(*) FROM deals d LEFT JOIN initiatives i ON i.id = d.initiative_id "
+                    "WHERE d.initiative_id IS NOT NULL AND i.id IS NULL").fetchone()[0]
+                if orphan_init:
+                    err("kanban.db:deals.initiative_id",
+                        f"{orphan_init} deal(s) point at a non-existent initiative — the strategy join is broken")
+            row = conn.execute(
+                "SELECT id FROM deals WHERE initiative_id IS NOT NULL LIMIT 1").fetchone()
+            linked_deal = row[0] if row else None
+    finally:
+        conn.close()
+
+    # THE chain smoke (the Phase-6 PROPOSAL ratchet): for a linked deal, the
+    # full drill-down must resolve structurally. Skipped when nothing is linked.
+    if linked_deal and os.path.isfile(os.path.join(root, "dashboard", "crm.py")):
+        code = (
+            "import sys, json; sys.path.insert(0, %r)\n"
+            "from dashboard import crm\n"
+            "d = crm.deal_drilldown(%r)\n"
+            "print(json.dumps({'ok': bool(d.get('deal')) and 'initiative' in d "
+            "and 'tasks' in d and 'progress' in d,\n"
+            "                  'has_init': d.get('initiative') is not None}))\n"
+            % (root, linked_deal))
+        try:
+            import subprocess
+            r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                               text=True, timeout=30)
+            out = json.loads(r.stdout.strip() or "{}") if r.returncode == 0 else {}
+            if r.returncode != 0:
+                err("chain-smoke", f"deal_drilldown crashed: {(r.stderr or '')[-200:]}")
+            elif not out.get("ok") or not out.get("has_init"):
+                err("chain-smoke",
+                    f"deal '{linked_deal}' drill-down did not resolve its chain "
+                    "(Deal→Initiative→Epic→Task→Run→Commit)")
+        except Exception as ex:
+            warn("chain-smoke", f"could not run chain smoke: {ex}")
+
+
+INGESTER_SURFACE = ("recall", "ingest_initiatives", "ingest_sprints", "ingest_ledger",
+                    "ingest_cc_memory", "ingest_changelog", "ingest_obsidian")
+
+
+def _phase5_checks(root, err, warn):
+    """Phase-5 invariants: one recall read path over the join-index, the
+    graph/object_graph rename held, the six-store ingesters wired, and the
+    metabolism worker alive."""
+    # (13) the ambiguous module name must not come back.
+    if os.path.isfile(os.path.join(root, "dashboard", "graph.py")):
+        err("dashboard/graph.py", "reappeared — it was renamed to object_graph.py (Phase 5); "
+            "two 'graph' modules is the ambiguity the rename killed")
+    if not os.path.isfile(os.path.join(root, "dashboard", "object_graph.py")):
+        err("dashboard/object_graph.py", "missing — the epics/agents/trust sidecar is gone")
+    vocab = os.path.join(root, "dashboard", "concept_vocab.json")
+    if not os.path.isfile(vocab):
+        err("dashboard/concept_vocab.json", "missing — the concept vocabulary is a DATA file (Phase 5)")
+    else:
+        try:
+            if not json.load(open(vocab)):
+                err("dashboard/concept_vocab.json", "empty — the extractor has no vocabulary")
+        except Exception as ex:
+            err("dashboard/concept_vocab.json", f"unparseable: {ex}")
+
+    # (12/14) recall + the six-store ingesters stay on the surface.
+    gm_py = os.path.join(root, "dashboard", "graph_memory.py")
+    if not os.path.isfile(gm_py):
+        err("dashboard/graph_memory.py", "missing — the join-index/recall module is gone")
+    else:
+        names = {n for n, _ in _name_tokens(gm_py)}
+        for fn in INGESTER_SURFACE:
+            if fn not in names:
+                err("dashboard/graph_memory.py", f"'{fn}' missing — the unified-memory surface shrank")
+    mcp_py = os.path.join(root, "mcp_server.py")
+    if os.path.isfile(mcp_py):
+        if "recall" not in {v for v, _ in _string_tokens(mcp_py) if isinstance(v, str)}:
+            err("mcp_server.py", "MCP verb 'recall' missing — the one memory read path "
+                "must stay fleet- and Hermes-callable")
+
+    # (12) live smoke: recall must span >=3 sources with staleness everywhere.
+    graph_db = Path(os.environ.get("GRAPH_DB", str(Path.home() / ".hermes" / "graph_memory.db")))
+    if graph_db.is_file() and os.path.isfile(gm_py):
+        code = (
+            "import sys, json; sys.path.insert(0, %r)\n"
+            "from dashboard import graph_memory as gm\n"
+            "srcs, ok = set(), True\n"
+            "for q in ('kanban', 'orchestrator'):\n"
+            "    r = gm.recall(q, k=12)\n"
+            "    for x in r['results']:\n"
+            "        srcs.add(x['source'])\n"
+            "        ok = ok and bool(x.get('ref')) and bool(x.get('fact')) \\\n"
+            "             and x.get('staleness') in ('fresh', 'stale', 'n/a')\n"
+            "print(json.dumps({'sources': sorted(srcs), 'ok': ok}))\n" % root)
+        try:
+            import subprocess
+            r = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                               text=True, timeout=30)
+            out = json.loads(r.stdout.strip() or "{}") if r.returncode == 0 else {}
+            if r.returncode != 0:
+                err("recall-smoke", f"recall() crashed: {(r.stderr or '')[-200:]}")
+            elif not out.get("ok"):
+                err("recall-smoke", "recall() returned results missing ref/fact/staleness")
+            elif len(out.get("sources", [])) < 3:
+                err("recall-smoke", f"recall() resolved only {out.get('sources')} — must span "
+                    "≥3 authoritative sources (the join-index lost stores)")
+        except Exception as ex:
+            warn("recall-smoke", f"could not run recall smoke: {ex}")
+
+    # (15) the metabolism worker should be alive (warn — it's an external cron).
+    metab = Path.home() / ".hermes" / "memories" / "metabolism.json"
+    if not metab.is_file():
+        warn("memories/metabolism.json", "missing — the consolidation worker has not "
+             "written its vitals (organ flatline?)")
+    else:
+        try:
+            ts = json.loads(metab.read_text()).get("ts", 0)
+            if (int(__import__('time').time()) - int(ts)) > 24 * 3600:
+                warn("memories/metabolism.json", "older than 24h — the 15-min worker "
+                     "appears to have stopped")
+        except Exception as ex:
+            warn("memories/metabolism.json", f"unreadable: {ex}")
+
+
+GOVERNANCE_MCP_VERBS = {"run_contract", "set_contract"}
+# Verb-audit ratchet: once a gap verb ships, it may never silently vanish from
+# the MCP surface again (checked as string tokens in mcp_server.py, same
+# mechanism as the canvas/governance verb checks).
+AUDIT_MCP_VERBS = {
+    # Tier 1
+    "create_initiative", "list_accounts", "list_contacts",
+    "get_task_runs", "get_task_ledger",
+    # Tier 2 (+ complements: get_task_links, bulk_accept)
+    "get_initiative", "get_initiative_drilldown", "add_deal_event",
+    "update_epic", "update_task", "list_agents", "get_agent_status",
+    "get_task_links", "bulk_accept",
+    # Tier 3 (+ complements: resolve_input, get_health)
+    "get_account_chain", "delete_task", "get_sprint", "get_velocity",
+    "get_graph", "rebuild_graph", "get_usage", "archive_project",
+    "register_agent", "resolve_input", "get_health",
+}
+GOVERNANCE_SURFACE = ("verification_gate", "verification_row", "run_contract",
+                      "set_contract", "graduate_autonomy", "ensure_schema")
+AUTO_POOL_TRIGGERS = {"trg_auto_pool_update", "trg_auto_pool_insert"}
+
+
+def _phase4_checks(root, err, warn):
+    """Phase-4 invariants: an agent task's `done` is EVIDENCED (independent
+    verification ledger row), the ledger stays verification-only, and the
+    governance wiring (contracts, auto-pool, epoch) is in place."""
+    gov_py = os.path.join(root, "dashboard", "governance.py")
+    if not os.path.isfile(gov_py):
+        err("dashboard/governance.py", "missing — the Phase-4 governance core (gate/runner) is gone")
+    else:
+        names = {n for n, _ in _name_tokens(gov_py)}
+        for fn in GOVERNANCE_SURFACE:
+            if fn not in names:
+                err("dashboard/governance.py", f"'{fn}' missing — the governance surface moved or was deleted")
+
+    mcp_py = os.path.join(root, "mcp_server.py")
+    if os.path.isfile(mcp_py):
+        mcp_strings = {v for v, _ in _string_tokens(mcp_py) if isinstance(v, str)}
+        for verb in sorted(GOVERNANCE_MCP_VERBS - mcp_strings):
+            err("mcp_server.py", f"MCP verb '{verb}' missing — runnable acceptance must stay fleet-drivable")
+        for verb in sorted(AUDIT_MCP_VERBS - mcp_strings):
+            err("mcp_server.py", f"MCP verb '{verb}' missing — a verb-audit gap verb "
+                "was removed from the surface (see mcp-verb-audit.md)")
+
+    if not KANBAN_DB.is_file():
+        return
+    try:
+        conn = sqlite3.connect(str(KANBAN_DB), timeout=5)
+    except Exception as ex:
+        warn("kanban.db", f"could not open for Phase-4 checks: {ex}")
+        return
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+        if "contract_cmd" not in cols:
+            err("kanban.db:tasks", "missing contract_cmd — runnable acceptance schema not applied")
+
+        row = None
+        try:
+            row = conn.execute(
+                "SELECT value FROM orch_meta WHERE key = 'phase4_epoch'").fetchone()
+        except sqlite3.OperationalError:
+            pass
+        if not row:
+            err("kanban.db:orch_meta", "phase4_epoch marker missing — the verified-done "
+                "ratchet has no scope; governance.ensure_schema didn't run")
+            epoch = None
+        else:
+            epoch = int(row[0])
+
+        have = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+        for trg in sorted(AUTO_POOL_TRIGGERS - have):
+            err("kanban.db:triggers", f"missing auto-pool trigger '{trg}' — ready agent-tasks "
+                "must enter the open pool by construction")
+
+        if epoch is not None:
+            # (9) verified done: agent tasks completed after the epoch need a
+            # role='verification' ledger row.
+            unverified = conn.execute(
+                "SELECT COUNT(*) FROM tasks t WHERE t.status = 'done' "
+                "AND t.assignee IS NOT NULL AND t.assignee NOT IN ('ricardo', 'user') "
+                "AND COALESCE(t.completed_at, 0) >= ? "
+                "AND NOT EXISTS (SELECT 1 FROM task_ledger l WHERE l.task_id = t.id "
+                "                AND l.role = 'verification')",
+                (epoch,)).fetchone()[0]
+            if unverified:
+                err("kanban.db:tasks",
+                    f"{unverified} agent task(s) completed after the Phase-4 epoch are "
+                    "'done' with NO verification ledger row — the accept gate was bypassed")
+            # (10) the ledger stays verification-only.
+            rogue = conn.execute(
+                "SELECT COUNT(*) FROM task_ledger WHERE created_at >= ? "
+                "AND COALESCE(role, '') != 'verification'", (epoch,)).fetchone()[0]
+            if rogue:
+                err("kanban.db:task_ledger",
+                    f"{rogue} post-epoch ledger row(s) with role != 'verification' — "
+                    "the VALIDATE session must be the only ledger writer")
+    finally:
+        conn.close()
+
+
+# The canvas verbs that must exist as MCP tool names (Hermes-readable/writable
+# rituals) — checked as string tokens in mcp_server.py.
+CANVAS_MCP_VERBS = {"get_day_plan", "plan_day", "plan_task", "wrap_day",
+                    "start_sprint", "assign_task_sprint"}
+CYCLE_OUTCOMES = {"delivered", "carried", "dropped"}
+
+
+def _phase3_checks(root, err, warn):
+    """Phase-3 invariants: the canvas is server-side queries, review is a real
+    status, and task_sprints is a dated commit-ledger."""
+    # (6a) the server-side composition module + its query surface exist.
+    canvas_py = os.path.join(root, "dashboard", "canvas.py")
+    if not os.path.isfile(canvas_py):
+        err("dashboard/canvas.py", "missing — the Today canvas must be composed server-side")
+    else:
+        names = {n for n, _ in _name_tokens(canvas_py)}
+        for fn in ("get_day_plan", "plan_day", "plan_task", "plan_candidates", "wrap_day"):
+            if fn not in names:
+                err("dashboard/canvas.py", f"'{fn}' missing — the canvas/ritual query surface moved or was deleted")
+
+    # (6b) the canvas verbs are on the MCP surface (Hermes reads the same view).
+    mcp_py = os.path.join(root, "mcp_server.py")
+    if os.path.isfile(mcp_py):
+        mcp_strings = {v for v, _ in _string_tokens(mcp_py) if isinstance(v, str)}
+        for verb in sorted(CANVAS_MCP_VERBS - mcp_strings):
+            err("mcp_server.py", f"MCP verb '{verb}' missing — the canvas/cycle must stay Hermes-drivable")
+
+    # (6c) the Today tab renders the server composition, not a client filter:
+    # it must fetch /api/day-plan, and its TODAY section must not pull the
+    # /api/tasks firehose to rebuild zones (per-task action PATCHes are fine).
+    idx = os.path.join(root, "dashboard", "templates", "index.html")
+    if os.path.isfile(idx):
+        html = open(idx, encoding="utf-8").read()
+        if "/api/day-plan" not in html:
+            err("dashboard/templates/index.html",
+                "the Today tab does not fetch /api/day-plan — canvas zones must come from the server")
+        # Section-bounded scan: from the end of the TODAY banner LINE to the
+        # next `// ===…` section banner (the banner itself contains the bar
+        # twice, so a naive .*?-between-bars regex would match only the banner).
+        start = html.find("==================== TODAY")
+        if start != -1:
+            body_start = html.find("\n", start)
+            nxt = html.find("// ====================", body_start)
+            section = html[body_start:nxt if nxt != -1 else len(html)]
+            if "fetch('/api/tasks')" in section:
+                err("dashboard/templates/index.html",
+                    "the TODAY section fetches the /api/tasks firehose — zones must be the "
+                    "server-side /api/day-plan composition, never a client-side re-filter")
+
+    if not KANBAN_DB.is_file():
+        return
+    try:
+        conn = sqlite3.connect(str(KANBAN_DB), timeout=5)
+    except Exception as ex:
+        warn("kanban.db", f"could not open for Phase-3 checks: {ex}")
+        return
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+        for c in ("planned_for", "plan_order", "due_date"):
+            if c not in cols:
+                err("kanban.db:tasks", f"missing Phase-3 canvas column '{c}'")
+
+        # (7) the dead predicate must stay dead.
+        n = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE status = 'done' AND reviewed_at IS NULL"
+        ).fetchone()[0]
+        if n:
+            err("kanban.db:tasks",
+                f"{n} task(s) on the dead 'done AND reviewed_at IS NULL' predicate — "
+                "review is a real status; canvas.ensure_schema should have migrated these")
+
+        # (8) commit-ledger shape.
+        ts_cols = {r[1] for r in conn.execute("PRAGMA table_info(task_sprints)")}
+        if not {"committed_at", "outcome"} <= ts_cols:
+            err("kanban.db:task_sprints",
+                "missing commit-ledger columns (committed_at/outcome) — Phase-3 cycle schema not applied")
+        else:
+            undated = conn.execute(
+                "SELECT COUNT(*) FROM task_sprints WHERE committed_at IS NULL").fetchone()[0]
+            if undated:
+                err("kanban.db:task_sprints", f"{undated} ledger row(s) without committed_at — commits must be dated")
+            bad = conn.execute(
+                "SELECT DISTINCT outcome FROM task_sprints WHERE outcome IS NOT NULL "
+                "AND outcome NOT IN (?,?,?)", tuple(sorted(CYCLE_OUTCOMES))).fetchall()
+            if bad:
+                err("kanban.db:task_sprints",
+                    f"outcome outside {sorted(CYCLE_OUTCOMES)}: {sorted(r[0] for r in bad)}")
+        sp_notnull = {r[1]: r[3] for r in conn.execute("PRAGMA table_info(sprints)")}
+        if sp_notnull.get("project_id") == 1:
+            err("kanban.db:sprints", "project_id is NOT NULL — cycles are cross-project (nullable), Phase-3 rebuild missing")
+        views = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='view'")}
+        if "cycle_velocity" not in views:
+            err("kanban.db", "cycle_velocity VIEW missing — velocity must be a derived VIEW, never typed")
+    finally:
+        conn.close()
+
+
+def _phase1_db_checks(root, err, warn):
+    """Verify the Phase-1 key invariants against the live DB + registries:
+    every project reference resolves (no orphans), every task carries a
+    closed-set origin, project_id is never NULL, and the enforcing triggers
+    exist. Skips silently when the DB is absent (fresh checkout / CI)."""
+    if not KANBAN_DB.is_file():
+        return
+    try:
+        conn = sqlite3.connect(str(KANBAN_DB), timeout=5)
+    except Exception as ex:
+        warn("kanban.db", f"could not open for Phase-1 checks: {ex}")
+        return
+    try:
+        # id set for resolving registry refs (roadmap.json etc.)
+        proj_ids = {r[0] for r in conn.execute("SELECT id FROM projects")}
+
+        # No orphan project keys across the DB registries.
+        # sprints.project_id became NULLABLE in Phase 3 (cross-project weekly
+        # cycles) — the NOT-NULL demand here predated that and fired the moment
+        # the first real cross-project cycle existed. Orphan (dangling non-NULL)
+        # keys are still checked for all three tables.
+        for tbl, col, nullable in (("tasks", "project_id", False),
+                                    ("sprints", "project_id", True),
+                                    ("epics", "project_id", True)):
+            orphan = conn.execute(
+                f"SELECT COUNT(*) FROM {tbl} t LEFT JOIN projects p ON t.{col} = p.id "
+                f"WHERE t.{col} IS NOT NULL AND p.id IS NULL"
+            ).fetchone()[0]
+            if orphan:
+                err(f"kanban.db:{tbl}.{col}",
+                    f"{orphan} orphan project key(s) — value not in projects (canonical namespace)")
+            if not nullable:
+                nulls = conn.execute(f"SELECT COUNT(*) FROM {tbl} WHERE {col} IS NULL").fetchone()[0]
+                if nulls:
+                    err(f"kanban.db:{tbl}.{col}",
+                        f"{nulls} NULL {col} — NOT-NULL-by-default invariant broken "
+                        "(the default-project floor didn't fire)")
+
+        # origin closed-set: every task has an origin, all ∈ ORIGINS.
+        bad_origin = conn.execute(
+            "SELECT DISTINCT COALESCE(origin,'<NULL>') FROM tasks "
+            "WHERE origin IS NULL OR origin NOT IN (?,?,?,?)",
+            tuple(sorted(ORIGINS)),
+        ).fetchall()
+        if bad_origin:
+            vals = ", ".join(sorted(r[0] for r in bad_origin))
+            err("kanban.db:tasks.origin",
+                f"origin outside the closed set {sorted(ORIGINS)}: {vals}")
+
+        # The enforcing triggers must exist (else the invariants aren't held forward).
+        have = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger'")}
+        for trg in sorted(REQUIRED_TRIGGERS - have):
+            err("kanban.db:triggers", f"missing enforcing trigger '{trg}' — Phase-1 invariant unenforced")
+
+        # Phase 2: which initiatives are epic-backed (their progress is derived —
+        # a stored number is forbidden), for the roadmap checks below.
+        epic_inits = {}
+        try:
+            for iid, n in conn.execute(
+                    "SELECT initiative_id, COUNT(*) FROM epics "
+                    "WHERE initiative_id IS NOT NULL AND archived_at IS NULL "
+                    "GROUP BY initiative_id"):
+                epic_inits[iid] = n
+        except sqlite3.OperationalError:
+            warn("kanban.db:epics", "no initiative_id column — Phase-2 schema not applied")
+    finally:
+        conn.close()
+
+    # Phase 6 moved strategy into the DB: the Phase-2 schema invariants now run
+    # against the initiatives TABLE; roadmap.json is only checked as a
+    # generated export (marked + id-parity with the table).
+    try:
+        conn = sqlite3.connect(str(KANBAN_DB), timeout=5)
+    except Exception:
+        return
+    try:
+        try:
+            inits = list(conn.execute(
+                "SELECT id, project_id, quarter, tier, progress FROM initiatives"))
+        except sqlite3.OperationalError:
+            err("kanban.db:initiatives",
+                "initiatives table missing — Phase-6 strategy schema not applied")
+            inits = []
+        seen_ids = set()
+        for iid, pid, quarter, tier, progress in inits:
+            where = "kanban.db:initiatives"
+            if pid not in proj_ids:
+                err(where, f"initiative '{iid}' → project_id '{pid}' is not a canonical projects.id")
+            if not INIT_ID_RE.match(str(iid)):
+                err(where, f"initiative id '{iid}' is not init_<8 hex> (UUID ids, Phase 2 item 4)")
+            seen_ids.add(iid)
+            if not quarter or not QUARTER_RE.match(str(quarter)):
+                err(where, f"initiative '{iid}' quarter '{quarter}' must match YYYY-Q[1-4]")
+            if epic_inits.get(iid) and progress is not None:
+                err(where, f"initiative '{iid}' has {epic_inits[iid]} epic(s) but stores a "
+                           "progress number — progress is DERIVED; the column must be NULL")
+        for iid in sorted(set(epic_inits) - seen_ids):
+            err("kanban.db:epics.initiative_id",
+                f"epic(s) reference initiative '{iid}' which is not in the initiatives table")
+    finally:
+        conn.close()
+
+    # The export: generated, honest, in sync (one-release transition aid).
+    roadmap = os.path.join(root, "dashboard", "roadmap.json")
+    if os.path.isfile(roadmap):
+        try:
+            data = json.load(open(roadmap))
+        except Exception as ex:
+            err("dashboard/roadmap.json", f"corrupt export: {ex}")
+            data = None
+        if data is not None:
+            if not data.get("_generated"):
+                err("dashboard/roadmap.json",
+                    "missing the _generated marker — the file must be the DB export, "
+                    "never a hand-edited source (Phase 6)")
+            file_ids = {i.get("id") for i in data.get("initiatives", [])}
+            if seen_ids and file_ids != seen_ids:
+                err("dashboard/roadmap.json",
+                    f"export drift: file ids {sorted(file_ids ^ seen_ids)} differ from the "
+                    "initiatives table — a write path skipped export_roadmap()")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--repo")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+    root = repo_root(args.repo)
+    issues = audit(root)
+    n_err = sum(1 for s, _, _ in issues if s == "error")
+    n_warn = sum(1 for s, _, _ in issues if s == "warn")
+
+    if args.json:
+        print(json.dumps({
+            "repo": root, "errors": n_err, "warnings": n_warn,
+            "issues": [{"severity": s, "where": w, "message": m} for s, w, m in issues],
+        }, indent=2))
+    else:
+        print(f"# orch-verify: {root}")
+        print(f"# {n_err} error(s), {n_warn} warning(s)")
+        if not issues:
+            print("OK — orchestrator Phase 0 + Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase 5 + Phase 6 invariants hold.")
+        for sev, w, m in issues:
+            mark = "✗" if sev == "error" else "•"
+            print(f"{mark} [{sev}] {w}: {m}")
+
+    sys.exit(1 if n_err else 0)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,7 +1,7 @@
 ---
 description: >-
   Compatibility alias for OpenCode's Kimi K3 planner. New work uses kimiplan;
-  this agent remains read-only for installed /oplan and task-plan callers.
+  this agent remains read-only for installed /oplan callers.
 mode: all
 model: ollama-cloud/kimi-k3
 temperature: 0.1

@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""kpi-brief — deterministic strategic KPI brief for the Hermes orchestrator.
+
+The STRATEGIC layer's data foundation (see knowledge/hermes-strategic-evolution-plan.md) and the
+KPI closed-loop's *measurement* primitive (council-kpi.md). Reads the dashboard's existing
+endpoints and prints each business KPI as value-vs-target + gap. Deterministic (no LLM): the number
+is read straight from the same endpoint/VIEW that computes it, never narrated or self-assessed —
+the same "who measures? a deterministic query, never the model" rule as bin/mut's kill/survive
+decision. This is what the KPI ratchet (a strategic /self-improve round must move a business number)
+reads pass/fail from.
+
+v1 ships the KPIs cleanly computable from a SINGLE existing endpoint — no fabricated joins:
+  K1 velocity, K2 delivery-rate  (/api/velocity — active cycle's committed/velocity)
+  K3 CLTV:CAC                    (/api/growth/cltv-cac — totals.ratio / rating)
+  K5 lead-score coverage         (/api/growth/lead-scores — non-null lead_score ÷ deals)
+  K7 scorecard hit-rate          (/api/scorecard — kpis meeting target ÷ 5)
+The join/mutation KPIs (K4 pipeline-coverage, K6 touch-cadence, K8/K9 cost, K10 contract-adequacy)
+are listed as `v2` rather than guessed — honesty over coverage (the iron rule: don't emit a number
+you can't deterministically stand behind).
+
+Read-only. Never mutates the dashboard. Degrades gracefully when the dashboard is unreachable
+(prints n/a, exit 0) — a strategic brief is advisory, not a gate that should fail the loop.
+
+Usage:
+  kpi-brief                     # human table
+  kpi-brief --json              # machine-readable (the KPI ratchet reads this)
+  kpi-brief --url http://host:port
+Env: HERMES_DASHBOARD_URL (default http://127.0.0.1:3000)
+"""
+import argparse, json, os, sys, urllib.request
+
+DEFAULT_URL = os.environ.get("HERMES_DASHBOARD_URL", "http://127.0.0.1:3000")
+
+
+def _get(base, path, timeout=8):
+    """GET base+path → parsed JSON, or None on any failure (unreachable/non-JSON/error)."""
+    try:
+        with urllib.request.urlopen(base.rstrip("/") + path, timeout=timeout) as r:
+            return json.loads(r.read().decode())
+    except Exception:
+        return None
+
+
+def _kpi(key, label, value, target, direction, note=""):
+    """Build one KPI record. status: pass|fail|na. direction 'up' → value>=target passes."""
+    if value is None or target is None:
+        status = "na"
+    elif direction == "up":
+        status = "pass" if value >= target else "fail"
+    else:  # 'down' — lower is better
+        status = "pass" if value <= target else "fail"
+    return {"key": key, "label": label, "value": value, "target": target,
+            "direction": direction, "status": status, "note": note}
+
+
+def collect(base):
+    kpis = []
+
+    # --- K1/K2: velocity + delivery-rate from the active cycle (one VIEW) ---
+    vel = _get(base, "/api/velocity")
+    committed = velocity = None
+    if vel and isinstance(vel.get("cycles"), list):
+        active = next((c for c in vel["cycles"] if c.get("status") == "active"), None)
+        if active:
+            committed = active.get("committed")
+            velocity = active.get("velocity")
+    kpis.append(_kpi("K1", "Velocity (accepted/cycle)", velocity, 1, "up",
+                     note=f"active cycle; committed={committed}"))
+    delivery = (round(velocity / committed, 2) if committed else None) if velocity is not None else None
+    kpis.append(_kpi("K2", "Delivery-rate (velocity÷committed)", delivery, 0.80, "up",
+                     note="paired guard for K1 — can't inflate velocity by over-committing"))
+
+    # --- K3: CLTV:CAC (existing >3 green rating; na when no cost rows yet) ---
+    cc = _get(base, "/api/growth/cltv-cac")
+    ratio = cc.get("totals", {}).get("ratio") if cc else None
+    rating = cc.get("totals", {}).get("rating") if cc else None
+    kpis.append(_kpi("K3", "CLTV:CAC", ratio, 3.0, "up", note=f"rating={rating}"))
+
+    # --- K5: lead-score coverage (% active deals with a non-null lead_score) ---
+    ls = _get(base, "/api/growth/lead-scores")
+    coverage = None
+    if ls and isinstance(ls.get("deals"), list) and ls["deals"]:
+        deals = ls["deals"]
+        scored = sum(1 for d in deals if d.get("lead_score") is not None)
+        coverage = round(scored / len(deals), 2)
+    kpis.append(_kpi("K5", "Lead-score coverage", coverage, 1.0, "up",
+                     note="run score_all_leads to close the gap"))
+
+    # --- K7: scorecard hit-rate (% of the weekly KPIs meeting target) ---
+    sc = _get(base, "/api/scorecard")
+    hit = None
+    if sc and isinstance(sc.get("kpis"), list) and sc["kpis"]:
+        rows = sc["kpis"]
+        met = sum(1 for k in rows if (k.get("value") or 0) >= (k.get("target") or 0))
+        hit = round(met / len(rows), 2)
+    kpis.append(_kpi("K7", "Scorecard hit-rate", hit, 0.80, "up",
+                     note=(sc.get("week") if sc else "")))
+
+    # --- C1 (counter-metric): review-queue WIP — Little's law on the human gate ---
+    # A COUNTERWEIGHT, not a business KPI: pairs the speed numbers above with the
+    # review queue they feed (DORA 2026 "verification tax"; Second Movement ch18 —
+    # "pair every speed metric with a counterweight"). Reported-only in v1: status
+    # stays "na" until HERMES_REVIEW_WIP_TARGET is ratified by the operator, and it is
+    # deliberately NEVER fed to the /self-improve KPI ratchet (a metric the loop
+    # can move by draining its own queue is Goodhart-exposed).
+    rq = _get(base, "/api/review-queue")
+    wip_target = os.environ.get("HERMES_REVIEW_WIP_TARGET")
+    kpis.append(_kpi("C1", "Review-queue WIP (counter)",
+                     rq.get("wip") if rq else None,
+                     float(wip_target) if wip_target else None, "down",
+                     note=(f"rework={rq.get('rework_events')} "
+                           f"arrivals/day={rq.get('arrivals_per_day')} "
+                           f"oldest={rq.get('wait_hours', {}).get('oldest_open_hours')}h"
+                           if rq else "review-queue endpoint unreachable")))
+
+    # --- K9 (v1, 2026-08-09): token anatomy with cache-read as its own line ---
+    # Pinned semantics (Sol finding 5): provider=claude, source=local Claude Code
+    # transcripts (last-30-day scan in dashboard/usage.py) — OBSERVED USAGE, not
+    # billed cost. value = cache-read share of grand_total (the replay-tax signal:
+    # Zeyliger 2026 measured 50% at 27.5k tokens, 87% by session end). Guarded by
+    # the arithmetic identity input+output+cache_read+cache_creation ==
+    # grand_total_tokens — shape drift upstream → na, never a silently wrong number.
+    # Reported-only (target na): no ratified threshold yet.
+    u = _get(base, "/api/usage")
+    c = (u or {}).get("claude") or {}
+    t, grand = c.get("totals") or {}, c.get("grand_total_tokens")
+    k9_val, k9_note = None, "usage endpoint unreachable"
+    if grand is not None and all(k in t for k in ("input", "output", "cache_read", "cache_creation")):
+        parts = t["input"] + t["output"] + t["cache_read"] + t["cache_creation"]
+        if parts == grand and grand > 0:
+            k9_val = round(t["cache_read"] / grand, 3)
+            k9_note = (f"cache_read={t['cache_read']} cache_creation={t['cache_creation']} "
+                       f"input={t['input']} output={t['output']} "
+                       f"tokens/session={c.get('session_tokens')} (observed, not billed)")
+        else:
+            k9_note = f"usage shape drift: parts={parts} grand={grand} — refusing to emit"
+    kpis.append(_kpi("K9", "Cache-read share (token anatomy)", k9_val, None, "down",
+                     note=k9_note))
+
+    # --- K10 (v1, 2026-08-09): worker contract-adequacy ---
+    # value = agent tasks carrying a runnable Tier-0 contract ÷ all agent tasks;
+    # target 1.0 is DOCTRINE-derived (every dispatch authors its contract first),
+    # not invented — at ship time this reads 0.0/FAIL, which is the honest number
+    # this KPI exists to make visible. note carries verification provenance
+    # (contract-runner rows vs operator-manual-accept fallback).
+    gc = _get(base, "/api/governance/contract-coverage")
+    k10_val = (gc or {}).get("agent_tasks", {}).get("coverage")
+    vr = (gc or {}).get("verification_rows", {})
+    kpis.append(_kpi("K10", "Worker contract-adequacy", k10_val, 1.0, "up",
+                     note=(f"verification rows: {vr.get('from_contract_run', '?')} contract-run vs "
+                           f"{vr.get('manual_accept', '?')} manual-accept; "
+                           f"contract_run events={( gc or {}).get('contract_run_events', '?')}"
+                           if gc else "contract-coverage endpoint unreachable")))
+
+    # --- M1 + C2: Orchestra-of-One run-envelope adoption and its counterweight ---
+    # Routing remains shadow-only: these numbers expose uptake and braking cost;
+    # they never grant retry, acceptance or topology authority.
+    env = _get(base, "/api/governance/envelope-coverage")
+    kpis.append(_kpi("M1", "Task run-envelope coverage",
+                     env.get("coverage") if env else None, 1.0, "up",
+                     note=(f"ready/completed={env.get('ready_or_completed')} "
+                           f"governed={env.get('governed')} agent_tasks={env.get('agent_tasks')}"
+                           if env else "envelope-coverage endpoint unreachable")))
+    kpis.append(_kpi("C2", "Envelope brake events (counter)",
+                     env.get("blocked_events") if env else None, None, "down",
+                     note=(f"rescues={env.get('rescue_counts')}" if env
+                           else "envelope-coverage endpoint unreachable")))
+
+    # v2 KPIs — declared, not guessed (need a join / mutation gate; see council-kpi.md §1)
+    for k, lbl in (("K4", "Pipeline coverage"), ("K6", "Touch-cadence compliance"),
+                   ("K8", "Cost per accepted task")):
+        kpis.append({"key": k, "label": lbl, "value": None, "target": None,
+                     "direction": "", "status": "v2", "note": "needs a join/mut — not in v1"})
+    return kpis
+
+
+def main():
+    ap = argparse.ArgumentParser(description="deterministic strategic KPI brief")
+    ap.add_argument("--url", default=DEFAULT_URL)
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+    kpis = collect(args.url)
+
+    if args.json:
+        summary = {"pass": sum(1 for k in kpis if k["status"] == "pass"),
+                   "fail": sum(1 for k in kpis if k["status"] == "fail"),
+                   "na": sum(1 for k in kpis if k["status"] == "na"),
+                   "v2": sum(1 for k in kpis if k["status"] == "v2")}
+        print(json.dumps({"url": args.url, "summary": summary, "kpis": kpis}, indent=2))
+        return 0
+
+    mark = {"pass": "✓", "fail": "✗", "na": "–", "v2": "·"}
+    print(f"# Hermes strategic KPI brief — {args.url}")
+    reachable = any(k["status"] in ("pass", "fail") for k in kpis)
+    if not reachable:
+        print("  (dashboard unreachable — all live KPIs n/a; is the gateway/dashboard up?)")
+    for k in kpis:
+        v = k["value"]
+        vs = "n/a" if v is None else (f"{v:g}")
+        tgt = "" if k["target"] is None else f"  target {'≥' if k['direction']=='up' else '≤'} {k['target']:g}"
+        note = f"   — {k['note']}" if k["note"] else ""
+        print(f"{mark.get(k['status'],'?')} {k['key']:3} {k['label']:34} {vs:>8}{tgt}{note}")
+    fails = [k["key"] for k in kpis if k["status"] == "fail"]
+    if fails:
+        print(f"\nGaps (strategic-round candidates): {', '.join(fails)}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,22 @@
+[Unit]
+Description=Hermes Orchestrator MCP Server — SSE HTTP transport (Tailscale intranet only)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/dev/orchestratormaxxing/orchestrator
+ExecStart=%h/dev/orchestratormaxxing/orchestrator/.venv/bin/python mcp_sse_server.py
+# Loopback bind; exposed to the tailnet via `tailscale serve --bg 5556`
+# (TLS + tailnet ACLs) instead of a raw Tailscale-IP bind.
+Environment=HERMES_MCP_SSE_BIND=127.0.0.1
+Environment=HERMES_MCP_SSE_PORT=5556
+# Scope defaults to the safe read/pull/report surface. To grant the operator's
+# privileged orchestration tools, uncomment and set a token:
+#   Environment=HERMES_MCP_SCOPE=privileged
+#   Environment=HERMES_MCP_TOKEN=<matches ~/.config/orchestratormaxxing/mcp-privileged-token>
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

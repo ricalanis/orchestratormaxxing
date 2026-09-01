@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh the disposable Hermes Semantica projection
+After=docker.service hermes-dashboard.service
+
+[Service]
+Type=oneshot
+ExecCondition=%h/.local/bin/semantica status
+ExecStart=%h/.local/bin/semantica rebuild
+TimeoutStartSec=120
+Nice=10
+
+[Install]
+WantedBy=default.target
