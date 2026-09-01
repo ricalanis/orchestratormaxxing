@@ -90,14 +90,21 @@ wait_for_pane() {
 }
 
 assert_normal() {
-  local session="$1" stat alt hist captured
+  local session="$1" stat alt hist captured deadline
   stat="$(wait_for_pane "$session")"
   alt="${stat%% *}"; hist="${stat##* }"
   [[ "$alt" == 0 ]] || fail "$session entered alternate screen"
   [[ "$hist" -gt 5000 ]] || fail "$session retained only $hist history lines"
-  captured="$(tmux capture-pane -p -S - -t "=$session:")"
+  # history_size crosses 5000 while the tail is still rendering on a slow runner
+  # (caught live on the 2-vCPU ubuntu CI runner): poll until the last line lands.
+  deadline=$((SECONDS + 10))
+  while :; do
+    captured="$(tmux capture-pane -p -S - -t "=$session:")"
+    [[ "$captured" == *scrollback-06999-* ]] && break
+    (( SECONDS < deadline )) || fail "$session lost transcript end"
+    sleep 0.2
+  done
   [[ "$captured" == *scrollback-00000-* ]] || fail "$session lost transcript start"
-  [[ "$captured" == *scrollback-06999-* ]] || fail "$session lost transcript end"
 }
 
 assert_alternate() {
