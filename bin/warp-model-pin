@@ -40,9 +40,34 @@ import subprocess
 import sys
 import tempfile
 
-PREFS = os.path.expanduser("~/.config/warp-terminal/user_preferences.json")
-SETTINGS = os.path.expanduser("~/.config/warp-terminal/settings.toml")
-DB = os.path.expanduser("~/.local/state/warp-terminal/warp.sqlite")
+# Warp keeps the same three artifacts in two layouts. Linux: XDG paths. macOS (measured
+# 2026-09-01 on the laptop): the user-owned TOML is ~/.warp/settings.toml, the database lives in
+# the Group Container, and user_preferences.json is not materialised on disk (the catalog is then
+# empty and discovery leans on the database join alone). WARP_MODEL_PIN_LAYOUT=linux|darwin
+# forces a layout (the contract pins linux so its fixtures are hermetic on every OS); each path
+# can also be overridden individually with WARP_MODEL_PIN_{PREFS,SETTINGS,DB}.
+import platform
+
+def _layout():
+    forced = os.environ.get("WARP_MODEL_PIN_LAYOUT", "").strip().lower()
+    name = forced or ("darwin" if platform.system() == "Darwin" else "linux")
+    if name == "darwin":
+        gc = "~/Library/Group Containers/2BBY89MBSN.dev.warp/Library/Application Support/dev.warp.Warp-Stable"
+        return {"name": "darwin",
+                "prefs": os.path.expanduser(gc + "/user_preferences.json"),
+                "settings": os.path.expanduser("~/.warp/settings.toml"),
+                "db": os.path.expanduser(gc + "/warp.sqlite"),
+                "proc": ["pgrep", "-f", "Warp.app/Contents/MacOS"]}
+    return {"name": "linux",
+            "prefs": os.path.expanduser("~/.config/warp-terminal/user_preferences.json"),
+            "settings": os.path.expanduser("~/.config/warp-terminal/settings.toml"),
+            "db": os.path.expanduser("~/.local/state/warp-terminal/warp.sqlite"),
+            "proc": ["pgrep", "-x", "warp-terminal"]}
+
+LAYOUT = _layout()
+PREFS = os.environ.get("WARP_MODEL_PIN_PREFS") or LAYOUT["prefs"]
+SETTINGS = os.environ.get("WARP_MODEL_PIN_SETTINGS") or LAYOUT["settings"]
+DB = os.environ.get("WARP_MODEL_PIN_DB") or LAYOUT["db"]
 CONF = os.path.expanduser("~/.config/claudemaxxing/warp-model.conf")
 
 # Warp's own routers; their ids are prefixes, not exact values.
@@ -60,8 +85,7 @@ def warp_running():
     if fake in ("0", "1"):
         return fake == "1"
     try:
-        return subprocess.run(["pgrep", "-x", "warp-terminal"],
-                              capture_output=True, timeout=5).returncode == 0
+        return subprocess.run(LAYOUT["proc"], capture_output=True, timeout=5).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False  # cannot measure is not the same as running
 
