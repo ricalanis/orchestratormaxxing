@@ -1,5 +1,7 @@
 # claudemaxxing
 
+> **Public projection.** This repository is graduated from a private lab by `bin/core-export` (see CLAUDE.md § Graduation): it is a deterministic, gated projection — direct edits here are overwritten by the next graduation; open a PR and the maintainer absorbs it into the source of truth with `core-export --absorb-pr`. Licensed MIT.
+
 **A self-improving orchestration harness for Claude Code and Codex.** The primary frontier host orchestrates and verifies; cheap-but-frontier Ollama Cloud models do the bulk work. Every design rule in the harness is grounded in a cited paper, enforced by a deterministic tool, and the harness improves *itself* through a governed propose-evaluate-select loop.
 
 This repo is a lab: the shared doctrine lives in [`CLAUDE.md`](CLAUDE.md) (also exposed as `AGENTS.md`), enforcement lives in [`bin/`](bin/), host adapters live in `.claude/`, `.codex/`, and `plugins/claudemaxxing/`, and the research trail lives in [`knowledge/`](knowledge/).
