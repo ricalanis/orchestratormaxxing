@@ -1,5 +1,5 @@
 {
-  "file_count": 646,
+  "file_count": 649,
   "files": [
     {
       "mode": "file",
@@ -35,6 +35,11 @@
       "mode": "file",
       "path": ".claude/commands/gauntlet.md",
       "sha256": "551f446971d6e4073c19d94f36edbc85a23f070ec3d375896ec8a914b8513ca4"
+    },
+    {
+      "mode": "file",
+      "path": ".claude/commands/graduate.md",
+      "sha256": "ba9edf9e395e4df88730782b59e78a5c6779b91f187f882b448419f6e94887d3"
     },
     {
       "mode": "file",
@@ -194,7 +199,7 @@
     {
       "mode": "exec",
       "path": "bin/harness-verify",
-      "sha256": "b49014a810deb8b685a2572703f039bb81a23faef324d887a07015e32053d7e2"
+      "sha256": "1bc2f49e2c455a43151e3b20117e61821ea89ea0d12c434e204e55de94f3c9f2"
     },
     {
       "mode": "exec",
@@ -489,7 +494,7 @@
     {
       "mode": "exec",
       "path": "install.sh",
-      "sha256": "a2aed3cc89d5d81e735931fe69bdda5cc7c258a56831752aad4b9ce9a85095bd"
+      "sha256": "486a58050c45f29e8de60c8e3c4ff1cbecedec92fd4c2a86bfa3df87393aa7b1"
     },
     {
       "mode": "file",
@@ -629,7 +634,7 @@
     {
       "mode": "file",
       "path": "knowledge/tool-inventory.md",
-      "sha256": "61d242b9940cdba1ce05447140bfdf5213cd36d57a1d5d41679cb52b3b675949"
+      "sha256": "79adc5370f1a11704aa8b6ec15b758a51abdc98dce27dcfd13bf034c29dd6900"
     },
     {
       "mode": "file",
@@ -2658,6 +2663,16 @@
     },
     {
       "mode": "file",
+      "path": "plugins/orchestratormaxxing/skills/graduate/SKILL.md",
+      "sha256": "1985bd492c70bb143635a7dd17780eead36f68ded09ee6e01c68fa6e4bcb0301"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/orchestratormaxxing/skills/graduate/agents/openai.yaml",
+      "sha256": "3193a6a1a60a00327237814693c796ab23fb1667cfdfd9c0a220ba5ae6ba39d6"
+    },
+    {
+      "mode": "file",
       "path": "plugins/orchestratormaxxing/skills/i-have-adhd/SKILL.md",
       "sha256": "5409c825084114ab5e9727670c233ab919d88d50f72772ae03c8dd3914bab30a"
     },
@@ -3064,7 +3079,7 @@
     {
       "mode": "exec",
       "path": "tests/o/run.sh",
-      "sha256": "91ed79dd34e9cbed438c8745af083b3cd7123e3c74fc43447fe843a9b5ad674d"
+      "sha256": "2d4a14cda543ce7590ea4bb098b262a71f6316161506be2963be00eb81d7af27"
     },
     {
       "mode": "exec",
@@ -3238,8 +3253,8 @@
     "literal_hits": 0
   },
   "manifest": "deploy/graduation.manifest",
-  "manifest_sha256": "ee6430d0cd72eaafc850f3de1b0e65716966c03ea7dd7f6776ef8b55abf8cc62",
-  "source_commit": "8cfd2a2b2d1bfddd77a5ae11e4567e019928221f",
+  "manifest_sha256": "a117faf05daa2df1e9f6b59b7dc036376846fa91101712ccc41db168e0d4141d",
+  "source_commit": "68729e3698b88293d8c2deb6e920c9e8874b9cc6",
   "source_tree_ish": "HEAD",
   "stripped": {
     "CLAUDE.md": 7,
