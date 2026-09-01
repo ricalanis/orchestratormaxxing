@@ -2,19 +2,68 @@
 
 A verifier-gated orchestration harness for Claude Code, Codex, OpenCode, Zed and Warp. It is for developers who want a deterministic, self-improving setup that protects frontier-model tokens. The public project is a graduation of a private lab.
 
-## Quick start
+## Quick start — agent kickoff
+
+Every step below has a deterministic check. An agent bootstrapping a new
+machine should run the steps in order and **stop and report on any mismatch**
+instead of improvising past it.
+
+**0 — Prerequisites.** `git`, `python3` (3.12+), `node`, `tmux`, and at least
+one host CLI (Claude Code, Codex, or OpenCode) on PATH.
+
+**1 — Clone, keys, install.**
 
 ```bash
 git clone https://github.com/ricalanis/orchestratormaxxing.git
 cd orchestratormaxxing
-export OLLAMA_API_KEY=…        # required
-export XAI_API_KEY=…           # optional
+export OLLAMA_API_KEY=…        # required (workers ride Ollama Cloud)
+export XAI_API_KEY=…           # optional (xsearch)
 ./bootstrap.sh
 ./install.sh
+```
+
+Check: `install.sh` ends without errors and `~/.local/bin/oll` exists.
+
+**2 — Self-verify.**
+
+```bash
 harness-verify
 ```
 
-Expected result on a standalone earth: 0 errors, 15 rows skipped as fleet-only.
+Check: **0 errors** on a standalone earth; fleet-only contracts (12 rows) skip
+visibly — a skip is not a failure, it says "this machine has no fleet half".
+
+**3 — Hermes dashboard (the sun's product, runs anywhere).**
+
+```bash
+cd orchestrator
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python -m dashboard.api &
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/api/stats
+```
+
+Check: `200`. First boot migrates a fresh `~/.hermes/kanban.db` with neutral
+example seeds (example OKRs, no chat topics, no folds) — real content is
+tenant config, never code. For a managed deployment use the shipped
+`orchestrator/Dockerfile` or arm the unit templates in `orchestrator/deploy/`.
+
+**4 — Cross-project MCP.** Register the stdio server on each host (plain
+`python3` suffices; it finds the DB via `$HERMES_KANBAN_DB` else
+`~/.hermes/kanban.db`). Claude Code example:
+
+```bash
+claude mcp add hermes-orchestrator -- python3 "$PWD/orchestrator/mcp_server.py"
+```
+
+Check: the host lists the `hermes-orchestrator` tools (kanban, CRM, briefs,
+sessions).
+
+**5 — Tenant identity (optional).** A machine with no config is a
+**standalone earth**: hooks exit silently, nothing touches the network. To
+join a fleet or personalize, copy `deploy/fleet.env.example` to
+`~/.config/orchestratormaxxing/fleet.env` and fill only the keys you use; personal
+seeds (OKR catalog, dashboard env) live under `~/.hermes/` and the service
+environment — see `SETUP.md`. No key ever lands in the repo.
 
 ## What gets installed
 
