@@ -1,0 +1,14 @@
+[Unit]
+Description=Friday-block pre-brief — Thursday 18:00 (Motor Caliente radar chunk 5)
+
+[Timer]
+# Thursday 6pm: the fleet has fetched Fireflies + derived proposals by then;
+# The operator reads the brief the evening before the Friday block.
+OnCalendar=Thu *-*-* 18:00:00
+# Catch up a missed run (laptop asleep Thursday evening) on next wake —
+# the script's own slot-floor + stamp file keep it at-most-once per date.
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

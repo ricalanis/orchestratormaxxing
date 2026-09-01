@@ -1,0 +1,12 @@
+[Unit]
+Description=Weekly scorecard reminder — Friday 17:00 (Phase 4)
+
+[Timer]
+# Friday 5pm: the end-of-week growth review (playbook Cap. 6).
+OnCalendar=Fri *-*-* 17:00:00
+# Catch up a missed run (laptop asleep Friday evening) on next wake.
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

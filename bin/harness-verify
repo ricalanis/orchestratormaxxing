@@ -66,9 +66,9 @@ COMPACTION_OVERRIDE_KEYS = {
 # Contract rows whose tool, test, and installer half all live only in the private fleet
 # (install-fleet.sh). In the graduated public tree they are recorded as visible skips.
 FLEET_ONLY_CONTRACTS = frozenset({
-    "worker-path-bench", "capacity", "tailnet-mcp-posture", "gpu-desktop",
-    "ubuntu-launchers", "ubuntu-clipboard", "folder-sync", "task-plan", "project-new",
-    "opendesign", "design-router", "firecrawl", "semantica", "memory-bridge-hermes",
+    "worker-path-bench", "tailnet-mcp-posture", "gpu-desktop",
+    "ubuntu-launchers", "ubuntu-clipboard", "folder-sync", "project-new",
+    "opendesign", "design-router", "firecrawl", "semantica",
     "install-fleet",
 })
 
@@ -1781,7 +1781,7 @@ KNOWN_CODEX_MARKETPLACE_SOURCES = {
     # "personal" is deliberately NOT pinned to a literal path: the checkout lives at
     # ~/dev on Ubuntu, ~/Dev on the Mac, and harness-verify itself runs from loop
     # worktrees — a realpath pin would manufacture phantom warns (signal-vs-artifact).
-    # Its identity is CONTENT: the source must be a orchestratormaxxing checkout, verified by
+    # Its identity is CONTENT: the source must be a checkout of this harness, verified by
     # _is_orchestratormaxxing_checkout below.
 }
 
@@ -1813,7 +1813,7 @@ def _codex_marketplace_identity(entry):
 
 
 def _is_orchestratormaxxing_checkout(path):
-    """True iff `path` is a orchestratormaxxing checkout: its .agents/plugins/marketplace.json
+    """True iff `path` is a checkout of this harness: its .agents/plugins/marketplace.json
     declares the orchestratormaxxing plugin. Content identity, not a path compare, so the check
     holds across machines and worktrees. Unreadable/absent/foreign all return False —
     a clobbered registration must never read as genuine because the payload was odd."""

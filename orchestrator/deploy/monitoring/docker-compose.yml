@@ -1,0 +1,72 @@
+# Monitoring stack for the Coolify hub — Prometheus + Grafana + Alertmanager
+# wired to the Hermes orchestrator's /metrics, alert rules, and dashboards.
+#
+# Deploy via Coolify: add a "Docker Compose" resource pointing at this repo,
+# compose file deploy/monitoring/docker-compose.yml. Or by hand on the hub:
+#   cd orchestrator/deploy/monitoring && docker compose up -d
+#
+# Gate the rules before (re)deploying — same tests orch-verify runs:
+#   docker compose --profile test run --rm rules-test
+#
+# NETWORK_MODE: HOST, deliberately. The scrape target (<orchestrator-host>:5555)
+# lives on the TAILNET: host networking gives the containers the hub's
+# tailscale routes AND its MagicDNS resolver, so tailnet names just work.
+# Nothing is exposed publicly anyway — the hub's firewall is SSH-only and
+# every UI below is reached over the tailnet (coolify-hub:9090/3000/9093).
+services:
+  prometheus:
+    image: prom/prometheus:v2.53.4          # same version the rule tests are validated against
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../prometheus/orchestrator-alerts.yml:/etc/prometheus/rules/orchestrator-alerts.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=30d
+      - --web.listen-address=127.0.0.1:9090
+      - --web.external-url=http://coolify-hub:9090/
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      GF_SERVER_HTTP_PORT: "3000"
+      # Change on first login — tailnet-only, but still.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-hermes-change-me}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - ./grafana-provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana-provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ../grafana:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --web.listen-address=127.0.0.1:9093
+      - --storage.path=/alertmanager
+
+  # One-shot gate: run the alert-rule unit tests inside the SAME promtool
+  # version Prometheus ships. `docker compose --profile test run --rm rules-test`
+  rules-test:
+    image: prom/prometheus:v2.53.4
+    profiles: ["test"]
+    entrypoint: ["promtool", "test", "rules", "/tests/orchestrator-rules-test.yml"]
+    volumes:
+      - ../prometheus:/tests:ro
+
+volumes:
+  prometheus-data:
+  grafana-data:
+  alertmanager-data:

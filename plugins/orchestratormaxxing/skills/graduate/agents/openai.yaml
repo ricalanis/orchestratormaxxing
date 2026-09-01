@@ -1,4 +1,0 @@
-interface:
-  display_name: "Graduate"
-  short_description: "Publish the gated public projection and absorb public PRs"
-  default_prompt: "Use $orchestratormaxxing:graduate to check the graduation gate, publish the public project as a rolling PR, and absorb open public PRs into the private repo."

@@ -1,0 +1,23 @@
+[Unit]
+Description=Hermes Orchestrator Dashboard (Tailscale intranet only)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/dev/orchestratormaxxing/orchestrator
+ExecStart=%h/dev/orchestratormaxxing/orchestrator/.venv/bin/python -m dashboard.api
+# Loopback backend on :3000; exposed to the tailnet as HTTPS :5555 via
+# `tailscale serve` (TLS + tailnet ACLs), never a raw Tailscale-IP bind.
+# Fleet identity (dashboard URL, operator aliases); optional - a machine
+# without fleet.env is a standalone client.
+EnvironmentFile=-%h/.config/orchestratormaxxing/fleet.env
+# Machine-local secrets/paths (credentials never live in a repo or unit file).
+EnvironmentFile=-%h/.config/orchestratormaxxing/hermes-dashboard.env
+Environment=DASHBOARD_BIND=127.0.0.1
+Environment=DASHBOARD_PORT=3000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

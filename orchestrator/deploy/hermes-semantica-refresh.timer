@@ -1,0 +1,12 @@
+[Unit]
+Description=Keep the Hermes Semantica projection fresher than 15 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+AccuracySec=30s
+Persistent=true
+Unit=hermes-semantica-refresh.service
+
+[Install]
+WantedBy=timers.target

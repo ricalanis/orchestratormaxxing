@@ -1,0 +1,212 @@
+# Unit tests for orchestrator-alerts.yml — run with:
+#   promtool test rules orchestrator-rules-test.yml
+#
+# Synthetic series exercise each alert's FIRING and NOT-FIRING sides, so a
+# threshold typo, an inverted comparison, or a broken clamp is caught before
+# the rules ever reach Prometheus. orch-verify runs this automatically when
+# promtool is on PATH (it is wherever Prometheus is deployed — the Coolify
+# hub); the YAML itself is structure-checked everywhere.
+#
+# Series notation: 'a+bxc' = start a, increment b, c more samples (one per
+# interval). interval 30s → 40 steps = 20 minutes of synthetic time.
+
+rule_files:
+  - orchestrator-alerts.yml
+
+evaluation_interval: 30s
+
+tests:
+  # ── HermesMCPRateLimitPressure ──────────────────────────────────────────
+  # FIRES: 30 rejections vs 10 admitted per 30s → ratio 0.75 (>20%) sustained.
+  - interval: 30s
+    input_series:
+      - series: 'hermes_mcp_sse_rate_limit_rejections_total'
+        values: '0+30x40'
+      - series: 'hermes_mcp_sse_requests_total'
+        values: '0+10x40'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: HermesMCPRateLimitPressure
+        exp_alerts:
+          - exp_labels:
+              alertname: HermesMCPRateLimitPressure
+              severity: warning
+              component: mcp-sse
+            exp_annotations:
+              summary: "MCP SSE rejecting 75% of requests"
+              description: "Over 20% of MCP SSE requests were 429'd for 5+ minutes. Either a client is misbehaving (find it: the request log at orchestrator/logs/api-*.log names clients; the limiter keys on the tailnet IP) or the ceiling is too tight for legitimate load (raise HERMES_MCP_RATE_LIMIT[_PRIVILEGED] on the service)."
+
+  # QUIET: 1 rejection vs 99 admitted per 30s → ratio 1% — must not fire.
+  - interval: 30s
+    input_series:
+      - series: 'hermes_mcp_sse_rate_limit_rejections_total'
+        values: '0+1x40'
+      - series: 'hermes_mcp_sse_requests_total'
+        values: '0+99x40'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: HermesMCPRateLimitPressure
+        exp_alerts: []
+
+  # QUIET: zero traffic — the clamp must keep 0/0 at 0, not NaN-fire.
+  - interval: 30s
+    input_series:
+      - series: 'hermes_mcp_sse_rate_limit_rejections_total'
+        values: '0+0x40'
+      - series: 'hermes_mcp_sse_requests_total'
+        values: '0+0x40'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: HermesMCPRateLimitPressure
+        exp_alerts: []
+
+  # ── HermesMCPAuthFailureSpike ───────────────────────────────────────────
+  # FIRES: 20 failures per 30s → ~0.67/s (>0.2/s) sustained past the 5m for.
+  - interval: 30s
+    input_series:
+      - series: 'hermes_mcp_sse_auth_failures_total{job="hermes-mcp-sse"}'
+        values: '0+20x40'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: HermesMCPAuthFailureSpike
+        exp_alerts:
+          - exp_labels:
+              alertname: HermesMCPAuthFailureSpike
+              severity: warning
+              component: mcp-sse
+              job: hermes-mcp-sse
+            exp_annotations:
+              summary: "MCP SSE auth failures at 666.7m/s"
+              description: "Sustained 401s on the MCP SSE server for 5+ minutes — a client is hitting /sse or /messages without a valid Bearer token. Either a scanner (check the source; the tailnet ACL should already bound reachability) or a real client with a stale/missing HERMES_MCP_SSE_TOKEN. 0.2/s ≈ one failed attempt every 5s."
+
+  # QUIET: the occasional stray 401 (1 per 30s ≈ 0.033/s) — under threshold.
+  - interval: 30s
+    input_series:
+      - series: 'hermes_mcp_sse_auth_failures_total{job="hermes-mcp-sse"}'
+        values: '0+1x40'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: HermesMCPAuthFailureSpike
+        exp_alerts: []
+
+  # QUIET: zero failures — no series growth, no fire.
+  - interval: 30s
+    input_series:
+      - series: 'hermes_mcp_sse_auth_failures_total{job="hermes-mcp-sse"}'
+        values: '0+0x40'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: HermesMCPAuthFailureSpike
+        exp_alerts: []
+
+  # ── HermesSessionStuckIdle ──────────────────────────────────────────────
+  # FIRES: a live-terminal session stuck at 5000s idle (>1h) past the 10m for.
+  - interval: 30s
+    input_series:
+      - series: 'hermes_sessions_attached_max_idle_seconds'
+        values: '5000+0x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: HermesSessionStuckIdle
+        exp_alerts:
+          - exp_labels:
+              alertname: HermesSessionStuckIdle
+              severity: info
+              component: sessions
+            exp_annotations:
+              summary: "A live-terminal session has been idle 1h 23m 20s"
+              description: "At least one session with an attached tmux terminal has produced no output for over an hour. Triage from any machine: `orchestrator sessions --stale --minutes 60` (names the terminal — it is the kill target). Revive-or-kill; an idle terminal is only a problem if you expected it to be working."
+
+  # QUIET: 30 minutes idle — under the hour, must not fire.
+  - interval: 30s
+    input_series:
+      - series: 'hermes_sessions_attached_max_idle_seconds'
+        values: '1800+0x40'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: HermesSessionStuckIdle
+        exp_alerts: []
+
+  # QUIET: briefly over the hour but recovers before the 10m for-window ends
+  # (the terminal was nudged/killed) — must not fire.
+  - interval: 30s
+    input_series:
+      - series: 'hermes_sessions_attached_max_idle_seconds'
+        values: '5000+0x8 0+0x32'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: HermesSessionStuckIdle
+        exp_alerts: []
+
+  # ── HermesDependencyDown ────────────────────────────────────────────────
+  # FIRES: kanban_db check at 0 for 2m+; the check label must ride along.
+  - interval: 30s
+    input_series:
+      - series: 'hermes_healthz_check_ok{check="kanban_db"}'
+        values: '0+0x20'
+      - series: 'hermes_healthz_check_ok{check="sessions_cache"}'
+        values: '1+0x20'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HermesDependencyDown
+        exp_alerts:
+          - exp_labels:
+              alertname: HermesDependencyDown
+              severity: critical
+              component: dashboard
+              check: kanban_db
+            exp_annotations:
+              summary: "Hermes dependency 'kanban_db' is down"
+              description: "A gating /healthz dependency has been failing for 2+ minutes. kanban_db: the SQLite DB is unreadable (disk? lock? path?). sessions_cache: the cache is populated but hasn't refreshed in 10x its TTL — the sweeper/refresh pipeline is dead; restart hermes-dashboard.service and check journalctl --user -u hermes-dashboard. Cross-check: curl http://<orchestrator-host>:5555/healthz"
+
+  # QUIET: both checks healthy.
+  - interval: 30s
+    input_series:
+      - series: 'hermes_healthz_check_ok{check="kanban_db"}'
+        values: '1+0x20'
+      - series: 'hermes_healthz_check_ok{check="sessions_cache"}'
+        values: '1+0x20'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HermesDependencyDown
+        exp_alerts: []
+
+  # ── HermesDashboardDown ─────────────────────────────────────────────────
+  # FIRES: scrape target down for 2m+ (job label must match the rule's).
+  - interval: 30s
+    input_series:
+      - series: 'up{job="hermes-orchestrator", instance="orchestrator-host:5555"}'
+        values: '0+0x20'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HermesDashboardDown
+        exp_alerts:
+          - exp_labels:
+              alertname: HermesDashboardDown
+              severity: critical
+              component: dashboard
+              job: hermes-orchestrator
+              instance: orchestrator-host:5555
+            exp_annotations:
+              summary: "Hermes dashboard scrape target is down"
+              description: "Prometheus cannot scrape http://<orchestrator-host>:5555/metrics. The dashboard process (and with it /healthz, the UI, and all session tooling) is likely down: systemctl --user status hermes-dashboard.service on the GPU box, or reach it via tailscale ssh."
+
+  # QUIET: target up.
+  - interval: 30s
+    input_series:
+      - series: 'up{job="hermes-orchestrator", instance="orchestrator-host:5555"}'
+        values: '1+0x20'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HermesDashboardDown
+        exp_alerts: []
+
+  # QUIET: a DIFFERENT job being down must not fire this alert.
+  - interval: 30s
+    input_series:
+      - series: 'up{job="node-exporter", instance="somewhere:9100"}'
+        values: '0+0x20'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HermesDashboardDown
+        exp_alerts: []

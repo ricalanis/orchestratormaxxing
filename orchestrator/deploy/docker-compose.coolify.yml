@@ -1,0 +1,29 @@
+# Coolify-specific docker-compose for orchestrator dashboard deployment.
+# Coolify checks out the repo to /artifacts/<deployment>/ and sets the
+# project directory to that checkout root. So paths in this file are
+# relative to the REPO ROOT, not this file's location.
+services:
+  orchestrator-api:
+    build:
+      context: ./orchestrator
+      dockerfile: Dockerfile
+    image: hermes-orchestrator-api:coolify
+    restart: unless-stopped
+    ports:
+      - "5555:5555"
+    environment:
+      DASHBOARD_BIND: "0.0.0.0"
+      DASHBOARD_PORT: "5555"
+      DASHBOARD_MAX_BODY_BYTES: "1048576"
+      HERMES_MCP_RATE_LIMIT: "60"
+      HERMES_MCP_RATE_LIMIT_PRIVILEGED: "120"
+      ORCH_INPUT_GRACE: "60"
+    volumes:
+      # Bind mount the host's Hermes data dir (SQLite DB)
+      - ${HERMES_DATA_DIR:-~/hermes-data}:/root/.hermes
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,os,sys; sys.exit(0 if urllib.request.urlopen(f\"http://127.0.0.1:5555/healthz\", timeout=4).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3

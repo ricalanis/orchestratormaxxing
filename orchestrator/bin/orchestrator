@@ -1,0 +1,344 @@
+#!/usr/bin/env python3
+"""orchestrator — admin CLI for the Hermes orchestrator.
+
+Subcommands:
+  sessions            list Claude Code sessions from the dashboard's cache
+  sessions --stale    only sessions idle longer than --minutes (default 30)
+
+Reads the RUNNING dashboard's cached scan (/api/sessions) — the same data the
+UI shows, at zero probe cost: this CLI never triggers SSH scans itself. If the
+dashboard is down there is no cache to read; start it first.
+
+Env:
+  ORCHESTRATOR_URL   dashboard base URL (default http://127.0.0.1:5555)
+"""
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+BASE = os.environ.get("ORCHESTRATOR_URL", "http://127.0.0.1:5555").rstrip("/")
+
+
+def _fetch_sessions() -> dict:
+    try:
+        with urllib.request.urlopen(f"{BASE}/api/sessions", timeout=30) as r:
+            return json.loads(r.read())
+    except urllib.error.URLError as e:
+        sys.exit(f"orchestrator: cannot reach the dashboard at {BASE} ({e.reason}) — "
+                 "the cache lives in that process; is hermes-dashboard.service running?")
+
+
+def _fmt_age(seconds: float) -> str:
+    m = int(seconds // 60)
+    if m < 60:
+        return f"{m}m"
+    return f"{m // 60}h{m % 60:02d}m"
+
+
+def cmd_sessions(args) -> int:
+    # --tag NAME=VALUE is SET mode (VALUE empty clears); --tag VALUE filters.
+    if args.tag and "=" in args.tag:
+        return _set_tag(args.tag)
+    if args.revive:
+        return _revive(args)
+    if args.prune_transcripts:
+        return _prune_transcripts(args)
+    data = _fetch_sessions()
+    now = int(time.time())
+    rows = []
+    for s in data.get("claude_code", []):
+        modified = s.get("modified") or 0
+        idle_s = max(0, now - modified)
+        if args.stale and idle_s < args.minutes * 60:
+            continue
+        if args.tag and (s.get("tag") or "") != args.tag:
+            continue
+        rows.append({
+            "session_id": s.get("session_id"),
+            "tag": s.get("tag"),
+            "project": s.get("project") or s.get("display_name") or "?",
+            "host": s.get("host", "local"),
+            "status": s.get("status"),
+            "idle": _fmt_age(idle_s),
+            "idle_seconds": idle_s,
+            "tmux": s.get("tmux_session"),
+            "live_terminal": bool(s.get("tmux_attached")),
+        })
+    rows.sort(key=lambda r: -r["idle_seconds"])
+
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+
+    label = f"stale (idle >{args.minutes}m)" if args.stale else "all"
+    if args.tag:
+        label += f" · tag={args.tag}"
+    print(f"{len(rows)} {label} session(s)  —  cached scan via {BASE}")
+    if not rows:
+        return 0
+    w_proj = max(7, max(len(r["project"]) for r in rows))
+    print(f"  {'IDLE':>7}  {'STATUS':8} {'TAG':10} {'HOST':18} {'PROJECT':{w_proj}}  {'TERMINAL':8}  SESSION")
+    for r in rows:
+        term = r["tmux"] if r["live_terminal"] else "—"
+        print(f"  {r['idle']:>7}  {r['status'] or '?':8} {r['tag'] or '—':10} {r['host']:18} "
+              f"{r['project']:{w_proj}}  {term:8}  {r['session_id']}")
+    if args.stale and not args.kill:
+        print("\nCleanup: rerun with --kill to close the live terminals above")
+        print("(transcript-only rows need no cleanup — a transcript is just a file).")
+
+    if args.kill:
+        return _kill_stale(args, rows)
+    return 0
+
+
+def _set_tag(spec: str) -> int:
+    """--tag NAME=VALUE: label a session (VALUE empty clears the label)."""
+    name, _, value = spec.partition("=")
+    if not name:
+        sys.exit("orchestrator: --tag needs SESSION=TAG (or SESSION= to clear)")
+    try:
+        req = urllib.request.Request(
+            f"{BASE}/api/session-meta", method="POST",
+            data=json.dumps({"session_key": name, "tag": value}).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            out = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read()).get("detail", "")
+        except Exception:
+            detail = ""
+        print(f"tag failed ({e.code}): {detail}", file=sys.stderr)
+        return 1
+    except urllib.error.URLError as e:
+        sys.exit(f"orchestrator: cannot reach {BASE} ({getattr(e, 'reason', e)})")
+    if value:
+        print(f"✓ tagged {name} → {out.get('tag')}")
+    else:
+        print(f"✓ cleared tag on {name}")
+    print("  (shows in listings on the next cache refresh, ≤20s)")
+    return 0
+
+
+def _revive(args) -> int:
+    """Nudge an idle session: re-send its last recorded instruction (from the
+    dashboard's prompt-history queue). Needs a live terminal — a dead session
+    must be revived (dashboard Revive button / --resume) before it can hear."""
+    name, host = args.revive, args.host
+    try:
+        req = urllib.request.Request(
+            f"{BASE}/api/sessions/{host}/{name}/resend-last", method="POST",
+            data=b"{}", headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            out = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            detail = json.loads(e.read()).get("detail", "")
+        except Exception:
+            detail = ""
+        print(f"revive failed ({e.code}): {detail}", file=sys.stderr)
+        return 1
+    except urllib.error.URLError as e:
+        sys.exit(f"orchestrator: cannot reach {BASE} ({getattr(e, 'reason', e)})")
+    shown = out["text"] if len(out["text"]) <= 100 else out["text"][:97] + "…"
+    print(f"✓ re-sent to {out['session']} ({host}):")
+    print(f"  “{shown}”")
+    print(f"  (recorded {_fmt_age(max(0, int(time.time()) - out['recorded_at']))} ago)")
+    return 0
+
+
+def _prune_transcripts(args) -> int:
+    """Hide old transcript-only rows from the listing (files untouched; a
+    pruned session that shows new activity auto-unhides)."""
+    try:
+        req = urllib.request.Request(
+            f"{BASE}/api/sessions/prune-transcripts", method="POST",
+            data=json.dumps({"hours": args.hours}).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            out = json.loads(resp.read())
+    except urllib.error.URLError as e:
+        sys.exit(f"orchestrator: prune failed — cannot reach {BASE} ({getattr(e, 'reason', e)})")
+    print(f"pruned {out['pruned']} transcript-only session(s) idle >{out['hours']:g}h "
+          f"({out['hidden_total']} hidden total)")
+    for sid in out.get("ids", []):
+        print(f"  · {sid}")
+    if out["pruned"] == 0:
+        print("  (nothing older than the cutoff — listing already clean)")
+    print("Note: transcripts are hidden, not deleted — any that wake up reappear.")
+    return 0
+
+
+def _own_tmux_session() -> str:
+    """The tmux session THIS process is running inside, or '' — the one
+    terminal --kill must never touch (self-termination guard)."""
+    if not os.environ.get("TMUX"):
+        return ""
+    try:
+        r = subprocess.run(["tmux", "display-message", "-p", "#S"],
+                           capture_output=True, text=True, timeout=3)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _kill_stale(args, rows) -> int:
+    """Close the listed sessions' live terminals via the dashboard's kill API
+    (host-aware: remote kills ride the dashboard's SSH transport)."""
+    own = _own_tmux_session()
+    targets, skipped_self = [], None
+    for r in rows:
+        if not r["live_terminal"]:
+            continue  # transcript-only: nothing to kill
+        if r["host"] == "local" and own and r["tmux"] == own:
+            skipped_self = r
+            continue
+        targets.append(r)
+
+    if skipped_self:
+        print(f"\n  ⚠ skipping {skipped_self['tmux']} — it is THIS terminal")
+    if not targets:
+        print("\nNothing to kill: no (other) live terminals in the stale set.")
+        return 0
+
+    print(f"\nWill kill {len(targets)} live terminal(s):")
+    for r in targets:
+        print(f"  {r['tmux']}  ({r['host']}, idle {r['idle']}, {r['project']})")
+    if not args.yes:
+        try:
+            answer = input("Proceed? [y/N] ").strip().lower()
+        except EOFError:
+            answer = ""
+        if answer != "y":
+            print("Aborted.")
+            return 1
+
+    failures = 0
+    for r in targets:
+        url = f"{BASE}/api/sessions/{r['host']}/{r['tmux']}/kill"
+        try:
+            req = urllib.request.Request(url, method="POST", data=b"{}",
+                                         headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                out = json.loads(resp.read())
+            print(f"  ✓ {r['tmux']}: {out.get('status')}")
+        except urllib.error.HTTPError as e:
+            print(f"  ✗ {r['tmux']}: HTTP {e.code} {e.read()[:100]}")
+            failures += 1
+        except Exception as e:
+            print(f"  ✗ {r['tmux']}: {e}")
+            failures += 1
+    return 1 if failures else 0
+
+
+def _get(path: str, timeout: int = 30):
+    try:
+        with urllib.request.urlopen(f"{BASE}{path}", timeout=timeout) as r:
+            return json.loads(r.read()), r.status
+    except urllib.error.HTTPError as e:
+        try:
+            return json.loads(e.read()), e.code
+        except Exception:
+            return {}, e.code
+    except urllib.error.URLError as e:
+        sys.exit(f"orchestrator: cannot reach the dashboard at {BASE} ({getattr(e, 'reason', e)})")
+
+
+def cmd_status(args) -> int:
+    """One-shot operational snapshot — sessions, health, errors, uptime.
+    --json emits the machine-readable document external dashboards/alerting
+    consume; exit code mirrors health (0 ok, 1 degraded)."""
+    health, _ = _get("/api/health")
+    hz, hz_code = _get("/healthz")
+    sess, _ = _get("/api/sessions")
+    errs, _ = _get("/api/errors/recent?hours=24")
+
+    cc = sess.get("claude_code", [])
+    by_status: dict = {}
+    for x in cc:
+        st = x.get("status") or "unknown"
+        by_status[st] = by_status.get(st, 0) + 1
+    doc = {
+        "ts": int(time.time()),
+        "status": hz.get("status", "unknown"),
+        "degraded": hz.get("degraded", []),
+        "uptime_seconds": health.get("uptime_seconds"),
+        "sessions": {
+            "total": len(cc),
+            "by_status": by_status,
+            "idle": by_status.get("idle", 0),
+            "tmux_attached": sum(1 for x in cc if x.get("tmux_attached")),
+            "by_tag": {t: sum(1 for x in cc if x.get("tag") == t)
+                       for t in sorted({x.get("tag") for x in cc if x.get("tag")})},
+        },
+        "errors_24h": {"count": errs.get("count", 0),
+                        "last": errs.get("errors", [])[-3:]},
+        "checks": hz.get("checks", {}),
+    }
+    if args.json:
+        print(json.dumps(doc, indent=2))
+    else:
+        up = doc["uptime_seconds"]
+        print(f"status:   {doc['status']}"
+              + (f"  (degraded: {', '.join(doc['degraded'])})" if doc["degraded"] else ""))
+        print(f"uptime:   {_fmt_age(up) if up is not None else '?'}")
+        print(f"sessions: {doc['sessions']['total']} total · "
+              f"{doc['sessions']['idle']} idle · "
+              f"{doc['sessions']['tmux_attached']} live terminals")
+        print(f"errors:   {doc['errors_24h']['count']} uncaught in 24h"
+              + (f" (last: {doc['errors_24h']['last'][-1]['exception']} "
+                 f"{doc['errors_24h']['last'][-1]['path']})" if doc["errors_24h"]["last"] else ""))
+    return 0 if hz_code == 200 else 1
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="orchestrator",
+                                     description="Admin CLI for the Hermes orchestrator.")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_sessions = sub.add_parser("sessions", help="list sessions from the dashboard's cached scan")
+    p_sessions.add_argument("--stale", action="store_true",
+                            help="only sessions idle longer than --minutes")
+    p_sessions.add_argument("--minutes", type=int, default=30,
+                            help="staleness threshold in minutes (default 30)")
+    p_sessions.add_argument("--json", action="store_true", help="machine-readable output")
+    p_sessions.add_argument("--kill", action="store_true",
+                            help="close the listed sessions' live terminals (implies --stale; "
+                                 "confirms first; never kills the terminal it runs in)")
+    p_sessions.add_argument("--yes", action="store_true",
+                            help="skip the --kill confirmation (automation)")
+    p_sessions.add_argument("--prune-transcripts", action="store_true",
+                            help="hide transcript-only sessions idle > --hours from the "
+                                 "listing (files untouched; reappear on activity)")
+    p_sessions.add_argument("--hours", type=float, default=48,
+                            help="prune cutoff in hours (default 48)")
+    p_sessions.add_argument("--revive", metavar="SESSION",
+                            help="re-send the last recorded instruction to this session "
+                                 "(id or tmux name) — the supervisor's nudge, automated")
+    p_sessions.add_argument("--host", default="local",
+                            help="host for --revive (default local)")
+    p_sessions.add_argument("--tag", metavar="TAG|SESSION=TAG",
+                            help="with '=': label a session (SESSION=TAG; SESSION= clears). "
+                                 "Without: filter listings to that tag (combines with "
+                                 "--stale and --kill — e.g. kill only stale 'experiment' sessions)")
+    p_sessions.set_defaults(fn=cmd_sessions)
+
+    p_status = sub.add_parser("status", help="operational snapshot (sessions, health, errors, uptime)")
+    p_status.add_argument("--json", action="store_true", help="machine-readable output")
+    p_status.set_defaults(fn=cmd_status)
+
+    args = parser.parse_args()
+    # --kill without --stale would target EVERY listed session — force the
+    # stale filter so the flag can only ever close idle terminals.
+    if getattr(args, "kill", False):
+        args.stale = True
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

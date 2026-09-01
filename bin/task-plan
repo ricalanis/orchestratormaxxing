@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""Launch a detached planning session for a Hermes kanban task.
+
+The DB read is deliberately read-only. Session creation stays owned by the
+shell `c` / `g` / `o` launchers; this tool only resolves context and calls them.
+Planners: fable + opus1m → Claude (`c`), sol → Codex (`g`), and kimiplan →
+OpenCode (`o`). The old oplan selector is a compatibility alias to kimiplan.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+
+
+PLANNERS = ("fable", "opus1m", "sol", "oplan", "kimiplan")
+SESSION_RE = re.compile(r"^(?:claude|codex|opencode)-[A-Za-z0-9_.-]+$")
+
+
+class TaskPlanError(RuntimeError):
+    pass
+
+
+def _db_path() -> Path:
+    return Path(os.environ.get("HERMES_KANBAN_DB", Path.home() / ".hermes" / "kanban.db"))
+
+
+def _read_task(task_id: str) -> dict:
+    path = _db_path().expanduser()
+    if not path.is_file():
+        raise TaskPlanError(f"kanban DB not found: {path}")
+    uri = path.resolve().as_uri() + "?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+        row = conn.execute(
+            "SELECT t.id, t.title, t.body, t.deal_id, "
+            "       t.project_id AS task_project_id, "
+            "       d.title AS deal_title, d.project_id AS deal_project_id, "
+            "       p.id AS project_id, p.name AS project_name, "
+            "       p.slug AS project_slug, p.repo_path AS repo_path "
+            "FROM tasks t "
+            "LEFT JOIN deals d ON d.id = t.deal_id "
+            "LEFT JOIN projects p ON p.id = t.project_id "
+            "WHERE t.id = ?",
+            (task_id,),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        raise TaskPlanError(f"could not read task {task_id}: {exc}") from exc
+    finally:
+        if "conn" in locals():
+            conn.close()
+    if row is None:
+        raise TaskPlanError(f"task not found: {task_id}")
+    return dict(row)
+
+
+def _resolve_folder(task: dict) -> Path:
+    repo_path = (task.get("repo_path") or "").strip()
+    repo_candidate = Path(repo_path).expanduser() if repo_path else None
+    if repo_path:
+        if repo_candidate.is_dir():
+            return repo_candidate.resolve()
+    slug = (task.get("project_slug") or "").strip()
+    fallback = Path.home() / "dev" / slug if slug else None
+    if fallback is not None and fallback.is_dir():
+        return fallback.resolve()
+    project = task.get("project_name") or task.get("project_id") or "(no project)"
+    hint = f" (fallback checked: {fallback})" if fallback else ""
+    if repo_candidate is not None:
+        hint = f" (repo_path missing: {repo_candidate}; fallback checked: {fallback})"
+    raise TaskPlanError(
+        f"no resolvable folder for project {project}{hint}. "
+        "Populate projects.repo_path before planning this task."
+    )
+
+
+def _acceptance(body: str) -> list[str]:
+    lines = (body or "").splitlines()
+    start = None
+    level = 7
+    for idx, line in enumerate(lines):
+        match = re.match(r"^(#{1,6})\s*(?:acceptance|criterios? de aceptaci[oó]n)\b", line, re.I)
+        if match:
+            start, level = idx + 1, len(match.group(1))
+            break
+    if start is None:
+        return []
+    found = []
+    for line in lines[start:]:
+        header = re.match(r"^(#{1,6})\s+", line)
+        if header and len(header.group(1)) <= level:
+            break
+        text = re.sub(r"^\s*[-*+]\s+", "", line).strip()
+        if text:
+            found.append(text)
+    return found
+
+
+def _brief(task: dict) -> str:
+    body = (task.get("body") or "").strip() or "(sin cuerpo)"
+    criteria = _acceptance(body)
+    acceptance = "\n".join(f"- {item}" for item in criteria) or "- No hay criterios explícitos; derívalos conservadoramente del cuerpo y pide ratificación en la sesión."
+    deal = task.get("deal_title") or task.get("deal_id") or "(sin deal)"
+    project = task.get("project_name") or task.get("project_id") or "(sin proyecto)"
+    return (
+        "Planea esta tarea del kanban.\n\n"
+        f"Task ID: {task['id']}\n"
+        f"Título: {task['title']}\n"
+        f"Linaje: deal {deal} → proyecto {project}\n\n"
+        "Cuerpo:\n"
+        f"{body}\n\n"
+        "Criterios de aceptación:\n"
+        f"{acceptance}\n\n"
+        "El plan aprobado debe convertirse en plan of record usando /plan-to-repo; "
+        "no implementes durante esta sesión de planeación."
+    )
+
+
+def _session_slug(task: dict) -> str:
+    raw = task.get("project_slug") or task.get("project_name") or task.get("project_id") or "project"
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", str(raw)).strip("-").lower()
+    return slug or "project"
+
+
+_LAUNCHERS = {
+    "claude":   ("TASK_PLAN_C_SH", "claude-c.sh"),
+    "codex":    ("TASK_PLAN_G_SH", "codex-g.sh"),
+    "opencode": ("TASK_PLAN_O_SH", "opencode-o.sh"),
+}
+
+
+def _launcher_path(host: str) -> Path:
+    env_name, script = _LAUNCHERS[host]
+    if os.environ.get(env_name):
+        return Path(os.environ[env_name]).expanduser().resolve()
+    repo_candidate = Path(__file__).resolve().parent.parent / "shell" / script
+    if repo_candidate.is_file():
+        return repo_candidate
+    return Path.home() / ".config" / "orchestratormaxxing" / script
+
+
+def _launch(task: dict, folder: Path, planner: str, brief: str) -> tuple[str, str]:
+    host = {"sol": "codex", "oplan": "opencode", "kimiplan": "opencode"}.get(planner, "claude")
+    launcher = _launcher_path(host)
+    if not launcher.is_file():
+        raise TaskPlanError(f"{host} session launcher not found: {launcher}; run ./install.sh")
+    fn = {"codex": "g", "opencode": "o"}.get(host, "c")
+    args = [_session_slug(task), "--detach", "-R", "planning", "-F", task["id"]]
+    if planner == "fable":
+        args.append(f"/fableplan {brief}")
+    elif planner == "opus1m":
+        args.extend(["--model", "opus[1m]", "--permission-mode", "plan", brief])
+    elif planner in {"oplan", "kimiplan"}:
+        # OpenCode: the kimiplan agent (read-only Kimi K3 planner) + opencode's
+        # own --prompt after `--`. oplan remains an input alias only.
+        args.extend(["--agent", "kimiplan", "--", "--prompt", brief])
+    else:
+        args.append(f"$orchestratormaxxing:solplan {brief}")
+    shell_code = 'source "$1"; cd "$2"; shift 2; "$0" "$@"'
+    proc = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-c", shell_code, fn, str(launcher), str(folder), *args],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "unknown launcher failure").strip()
+        raise TaskPlanError(f"failed to launch {planner} planning session: {detail}")
+    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    session = next((line for line in reversed(lines) if SESSION_RE.fullmatch(line)), None)
+    if session is None:
+        raise TaskPlanError(f"launcher succeeded but returned no session name: {proc.stdout.strip()}")
+    return session, host
+
+
+def _attach_hint(session: str, host: str) -> str:
+    prefix = {"codex": "codex-", "opencode": "opencode-"}.get(host, "claude-")
+    list_cmd = {"codex": "g ls", "opencode": "o ls"}.get(host, "cs")
+    proc = subprocess.run(
+        ["tmux", "list-sessions", "-F", "#{session_name}"],
+        capture_output=True,
+        text=True,
+    )
+    names = sorted(line.strip() for line in proc.stdout.splitlines() if line.startswith(prefix))
+    try:
+        index = names.index(session) + 1
+    except ValueError:
+        return f"{list_cmd} {session}"
+    return f"{list_cmd} {index}"
+
+
+def _comment(task_id: str, planner: str, session: str, attach_hint: str) -> None:
+    hermes = os.environ.get("TASK_PLAN_HERMES_BIN") or shutil.which("hermes") or str(Path.home() / ".local" / "bin" / "hermes")
+    proc = subprocess.run(
+        [hermes, "kanban", "comment", task_id,
+         f"Planeación {planner} lanzada: {session} · ábrela: {attach_hint}",
+         "--author", "task-plan"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "unknown comment failure").strip()
+        print(f"task-plan: warning: session created but kanban comment failed: {detail}", file=sys.stderr)
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Launch a detached planning session for a kanban task")
+    parser.add_argument("task_id")
+    parser.add_argument("--planner", choices=PLANNERS, required=True)
+    parser.add_argument("--json", action="store_true", dest="as_json")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = _parse_args()
+    try:
+        task = _read_task(args.task_id)
+        folder = _resolve_folder(task)
+        session, host = _launch(task, folder, args.planner, _brief(task))
+        hint = _attach_hint(session, host)
+        _comment(args.task_id, args.planner, session, hint)
+        result = {"session": session, "attach_hint": hint,
+                  "folder": str(folder), "planner": args.planner}
+        if args.as_json:
+            print(json.dumps(result, ensure_ascii=False))
+        else:
+            print(f"→ {session} · ábrela: {hint}")
+        return 0
+    except TaskPlanError as exc:
+        print(f"task-plan: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,9 @@
+[Unit]
+Description=Hermes weekly conversion-funnel snapshot — the Monday-9am pipeline capture
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/dev/orchestratormaxxing/orchestrator
+ExecStart=/usr/bin/env bash %h/dev/orchestratormaxxing/orchestrator/bin/funnel-snapshot.sh
+# Override the log location here if desired (default: ~/.hermes/memories/funnel-snapshot.log).
+# Environment=HERMES_FUNNEL_LOG=%h/.hermes/memories/funnel-snapshot.log

@@ -1,0 +1,13 @@
+[Unit]
+Description=cogload weekly brief — Sunday 18:00
+
+[Timer]
+# Sunday evening: a WEEKLY cadence is deliberate. Reviewing your own stress
+# daily is itself a stressor (reactivity is the top validity threat here), so
+# the interpretive read is weekly and the daily message only collects a label.
+OnCalendar=Sun *-*-* 18:00:00
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

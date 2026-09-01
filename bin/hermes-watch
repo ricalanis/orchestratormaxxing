@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""hermes-watch — business watchers that turn live signals into proactive INTENTS.
+
+The perception half of the proactive layer (knowledge/hermes-strategic-evolution-plan.md §1;
+council-proactivity.md). Each watcher is a pure READ of an already-computed dashboard signal
+(on-demand perception, never busy-poll) that, when it trips, enqueues a one-line intent via
+`intent-queue add`. It NEVER executes the action — it only proposes. Idempotency + dedup live in
+intent-queue (content-hash), so running this every SessionStart / on a tick is safe and quiet.
+
+The load-bearing split is set DETERMINISTICALLY here (never LLM-inferred) — the safety boundary
+the proactive round obeys:
+  AUTO (internal, idempotent, reversible)      → --load-bearing OFF: score leads, capture funnel
+  STOP-AT-SELECT (external/irreversible)       → --load-bearing ON:  touch a deal, re-scope a sprint
+
+Watchers (each guarded — a missing/again-shaped endpoint is skipped silently, never a crash):
+  unscored-leads  active deals with null lead_score      → AUTO   (run score_all_leads)
+  funnel-missing  no funnel snapshot this week           → AUTO   (run capture_funnel)
+  velocity-gap    active cycle velocity < 60% committed  → SELECT (re-scope the cycle with the operator)
+  scorecard-miss  ≥2 weekly KPIs below target            → SELECT (re-scope tactical objectives)
+  cltv-cac-low    CLTV:CAC rating below green (<3)        → SELECT (re-weight channel mix)
+
+Read-only against the dashboard. Exit 0 always (a watcher is advisory; it must not fail a hook).
+Prints a one-line summary of what it enqueued (silent-ish: only the intents it added).
+
+Usage:
+  hermes-watch                 # run all watchers, enqueue tripped intents
+  hermes-watch --dry-run       # print what WOULD be enqueued, add nothing
+  hermes-watch --json          # machine-readable list of signals
+Env: HERMES_DASHBOARD_URL (default http://127.0.0.1:3000)
+"""
+import argparse, json, os, subprocess, sys, urllib.request
+
+DEFAULT_URL = os.environ.get("HERMES_DASHBOARD_URL", "http://127.0.0.1:3000")
+
+
+def _get(base, path, timeout=8):
+    try:
+        with urllib.request.urlopen(base.rstrip("/") + path, timeout=timeout) as r:
+            return json.loads(r.read().decode())
+    except Exception:
+        return None
+
+
+def _intent_queue_bin():
+    """Prefer the sibling bin/intent-queue; fall back to `intent-queue` on PATH (global install)."""
+    sib = os.path.join(os.path.dirname(os.path.abspath(__file__)), "intent-queue")
+    return sib if os.path.isfile(sib) else "intent-queue"
+
+
+def enqueue(intent, kind, urgency, load_bearing, dry):
+    if dry:
+        return True
+    iq = _intent_queue_bin()
+    cmd = [sys.executable, iq] if iq.endswith("intent-queue") and os.path.isfile(iq) else [iq]
+    cmd += ["add", intent, "--kind", kind, "--source", "hermes-watch", "--urgency", str(urgency)]
+    if load_bearing:
+        cmd.append("--load-bearing")
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def watch(base):
+    """Run every watcher, return a list of tripped signals (dicts) — pure, no enqueue."""
+    signals = []
+
+    # --- unscored-leads (AUTO): active deals missing a lead_score ---
+    ls = _get(base, "/api/growth/lead-scores")
+    if ls and isinstance(ls.get("deals"), list) and ls["deals"]:
+        unscored = [d for d in ls["deals"] if d.get("lead_score") is None]
+        if unscored:
+            signals.append({
+                "kind": "unscored-leads", "load_bearing": False, "urgency": 1,
+                "intent": f"{len(unscored)} active deal(s) have no lead_score — run score_all_leads"})
+
+    # --- velocity-gap (SELECT): active cycle delivering < 60% of commit ---
+    vel = _get(base, "/api/velocity")
+    if vel and isinstance(vel.get("cycles"), list):
+        active = next((c for c in vel["cycles"] if c.get("status") == "active"), None)
+        if active and active.get("committed"):
+            rate = (active.get("velocity") or 0) / active["committed"]
+            if rate < 0.60:
+                signals.append({
+                    "kind": "velocity-gap", "load_bearing": True, "urgency": 2,
+                    "intent": (f"active cycle {active.get('name','?')} delivery-rate "
+                               f"{rate:.0%} (<60%) — re-scope the cycle with the operator")})
+
+    # --- scorecard-miss (SELECT): ≥2 weekly KPIs below target ---
+    sc = _get(base, "/api/scorecard")
+    if sc and isinstance(sc.get("kpis"), list) and sc["kpis"]:
+        below = [k for k in sc["kpis"] if (k.get("value") or 0) < (k.get("target") or 0)]
+        if len(below) >= 2:
+            names = ", ".join(k.get("label", k.get("key", "?")) for k in below)
+            signals.append({
+                "kind": "scorecard-miss", "load_bearing": True, "urgency": 2,
+                "intent": f"{len(below)} weekly KPIs below target ({names}) — re-scope tactical objectives"})
+
+    # --- cltv-cac-low (SELECT): unit economics below the green threshold ---
+    cc = _get(base, "/api/growth/cltv-cac")
+    if cc:
+        ratio = cc.get("totals", {}).get("ratio")
+        if ratio is not None and ratio < 3.0:
+            signals.append({
+                "kind": "cltv-cac-low", "load_bearing": True, "urgency": 2,
+                "intent": f"CLTV:CAC {ratio:.1f} below 3.0 — re-weight channel mix / acquisition spend"})
+
+    # --- funnel-missing (AUTO): no funnel trend data ---
+    ft = _get(base, "/api/funnel-trend")
+    if ft is not None:
+        pts = ft.get("points") if isinstance(ft, dict) else ft
+        if isinstance(pts, list) and not pts:
+            signals.append({
+                "kind": "funnel-missing", "load_bearing": False, "urgency": 1,
+                "intent": "no funnel snapshot captured — run capture_funnel"})
+
+    # --- review-wip-high (SELECT): the human gate is backing up (Little's law) ---
+    # Re-scoping review policy (raise μ, lower λ, or shed gate-cleared classes)
+    # is the operator's call — the watcher only proposes. Threshold is policy, not
+    # derivation: default 5, override with HERMES_REVIEW_WIP_MAX.
+    rq = _get(base, "/api/review-queue")
+    if rq and rq.get("wip") is not None:
+        wip_max = int(os.environ.get("HERMES_REVIEW_WIP_MAX", "5"))
+        if rq["wip"] >= wip_max:
+            signals.append({
+                "kind": "review-wip-high", "load_bearing": True, "urgency": 2,
+                "intent": (f"review queue WIP {rq['wip']} ≥ {wip_max} "
+                           f"(oldest {rq.get('wait_hours', {}).get('oldest_open_hours')}h, "
+                           f"rework {rq.get('rework_events')}) — review is the bottleneck; "
+                           f"re-scope review policy with the operator")})
+
+    return signals
+
+
+def main():
+    ap = argparse.ArgumentParser(description="business watchers → proactive intent queue")
+    ap.add_argument("--url", default=DEFAULT_URL)
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args()
+
+    signals = watch(args.url)
+    added = 0
+    for s in signals:
+        if enqueue(s["intent"], s["kind"], s["urgency"], s["load_bearing"], args.dry_run):
+            added += 1
+
+    if args.json:
+        print(json.dumps({"url": args.url, "tripped": len(signals),
+                          "enqueued": (0 if args.dry_run else added),
+                          "dry_run": args.dry_run, "signals": signals}, indent=2))
+        return 0
+
+    if not signals:
+        print("hermes-watch: no signals tripped (or dashboard unreachable)")
+        return 0
+    verb = "would enqueue" if args.dry_run else "enqueued"
+    print(f"hermes-watch: {len(signals)} signal(s) {verb}")
+    for s in signals:
+        lb = "SELECT" if s["load_bearing"] else "auto  "
+        print(f"  [{s['kind']:14}] {lb} u{s['urgency']}  {s['intent']}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

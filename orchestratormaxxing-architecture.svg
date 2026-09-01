@@ -28,7 +28,7 @@
   <rect x="40" y="42" width="4" height="248" rx="2" fill="url(#rail)"/>
   <circle cx="70" cy="72" r="3.5" fill="#3fd0c5"/>
   <text class="m faint" x="84" y="76" font-size="11.5" letter-spacing="3">ORCHESTRATION LAB · CLAUDE · CODEX · OPENCODE · OLLAMA CLOUD</text>
-  <text class="m" x="64" y="132" font-size="38" font-weight="650" letter-spacing="-0.5"><tspan class="ink">claude</tspan><tspan class="c-orch">maxxing</tspan><tspan class="ink"> — the orchestration board</tspan></text>
+  <text class="m" x="64" y="132" font-size="38" font-weight="650" letter-spacing="-0.5"><tspan class="c-orch">orchestratormaxxing</tspan><tspan class="ink"> — the orchestration board</tspan></text>
   <text class="dim" x="64" y="164" font-size="13.5">A few <tspan class="ink" font-weight="600">frontier orchestrators</tspan> conduct a fabric of <tspan class="ink" font-weight="600">cheap parallel workers</tspan> —</text>
   <text class="dim" x="64" y="184" font-size="13.5">and everything they produce passes through <tspan class="ink" font-weight="600">deterministic gates</tspan> before it counts.</text>
 

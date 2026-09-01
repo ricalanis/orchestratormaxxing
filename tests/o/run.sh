@@ -34,6 +34,16 @@ cleanup() {
 trap cleanup EXIT
 fail() { printf 'o-runtime: %s\n' "$*" >&2; exit 1; }
 
+wait_pane_marker() {   # session marker seconds — respawned panes repaint asynchronously
+  local session="$1" marker="$2" deadline=$((SECONDS + ${3:-6})) snap
+  while (( SECONDS < deadline )); do
+    snap="$(tmux capture-pane -p -t "=$session:" 2>/dev/null | tr -d '\n')"
+    [[ "$snap" == *"$marker"* ]] && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
 ln -s "$ROOT/tests/o/fake-opencode.py" "$STUBS/opencode"
 ln -s "$TMUX_BIN" "$STUBS/tmux"
 cat > "$STUBS/agent-tab-status" <<'SH'
@@ -52,6 +62,7 @@ chmod +x "$STUBS/agent-tab-status"
 export PATH="$STUBS:$ROOT/bin:/usr/bin:/bin"
 export ORCHESTRATORMAXXING_O_SHELL="${O_SHELL_UNDER_TEST:-$ROOT/shell/opencode-o.sh}"
 export O_READY_TIMEOUT_SECONDS=5
+export O_TURN_TIMEOUT_SECONDS=3   # NO_EVENT turns type out fast in the contract
 export OPENCODE_ARGS_LOG="$SCRATCH/opencode-args.log"
 
 # OpenTUI queries terminal capabilities during process birth. Starting it in a
@@ -240,8 +251,10 @@ assert row["turn1_mode"] == "legacy", row
 assert len(row["contract_sha256"]) == 64, row
 assert len(row["brief_sha256"]) == 64, row
 PY
-grep -Fxq -- '--agent glm-coder --auto' "$OPENCODE_ARGS_LOG" \
-  || fail 'delegated OpenCode worker did not launch in auto permission mode'
+grep -Eq -- '^run --format json --agent glm-coder ' "$OPENCODE_ARGS_LOG" \
+  || fail 'delegated worker did not use the TUI-less run transport'
+[[ "$(tmux show-options -v -t '=opencode-contract-first:' @orchestratormaxxing_transport 2>/dev/null)" == run ]] \
+  || fail 'delegated worker not tagged with the run transport'
 
 # Canonical profiles are resolved by the shared Ollama policy before OpenCode
 # starts. The receipt surface attests both the selected agent and exact model.
@@ -256,8 +269,8 @@ assert row["model"] == "kimi-k2.7-code", row
 assert row["selection_source"] == "profile", row
 PY
 sleep 1
-grep -Fxq -- '--agent kimi-coder --auto' "$OPENCODE_ARGS_LOG" \
-  || fail 'profile selected worker did not launch in auto permission mode'
+grep -Eq -- '^run --format json --agent kimi-coder ' "$OPENCODE_ARGS_LOG" \
+  || fail 'profile-selected worker did not use the TUI-less run transport'
 $O close opencode-profile-route --json >/dev/null
 
 # A caller can still name a custom installed agent, but cannot combine that
@@ -273,10 +286,8 @@ set -e
 ! tmux has-session -t '=opencode-collision' 2>/dev/null || fail 'collision created a worker'
 ! tmux has-session -t '=opencode-legacy' 2>/dev/null || fail 'legacy route created a worker'
 tmux has-session -t '=opencode-contract-first' 2>/dev/null || fail 'delegated session is not attachable'
-sleep 1
-pane="$(tmux capture-pane -p -t '=opencode-contract-first:')"
-pane_compact="$(printf '%s' "$pane" | tr -d '\n')"
-[[ "$pane_compact" == *'TURN-1-IDLE'* ]] || fail 'initial turn never reached the durable idle event'
+wait_pane_marker opencode-contract-first TURN-DONE-IDLE 6 \
+  || fail 'initial turn never reached the durable idle event'
 
 # Durable handoff is event-bound, not reconstructed from alternate-screen
 # pixels. The fake emits no post-turn "Ask anything", so this is a negative
@@ -296,9 +307,8 @@ sent="$($O send opencode-contract-first --prompt 'repair literal $HOME Enter' --
 after="$(tmux list-sessions -F '#{session_name}' | wc -l)"
 [[ "$before" == "$after" ]] || fail 'repair spawned another OpenCode session'
 [[ "$sent" == *'"status":"sent"'* ]] || fail 'send lacks typed success'
-sleep 1
-pane="$(tmux capture-pane -p -t '=opencode-contract-first:')"
-[[ "$pane" == *'TURN-2-IDLE'* ]] || fail 'follow-up was not delivered to the bound worker'
+wait_pane_marker opencode-contract-first TURN-DONE-IDLE 6 \
+  || fail 'follow-up was not delivered to the bound worker'
 handoff="$($O handoff opencode-contract-first --timeout 5 --json)"
 python3 - "$handoff" <<'PY'
 import json, sys
@@ -405,7 +415,7 @@ tmux has-session -t '=opencode-contract-first' 2>/dev/null || fail 'dry-run reap
 # A turn without a terminal plugin event remains observably pending. Handoff
 # and a second send both fail with distinct typed states; neither may submit an
 # overlapping task or fall back to pane lore.
-$O send opencode-contract-first --prompt NO_EVENT --json >/dev/null
+O_TURN_TIMEOUT_SECONDS=300 $O send opencode-contract-first --prompt NO_EVENT --json >/dev/null
 set +e
 pending="$($O handoff opencode-contract-first --timeout 0 --json)"
 pending_rc=$?
@@ -417,11 +427,22 @@ set -e
 [[ "$overlap_rc" -eq 4 && "$overlap" == *'"status":"not_ready"'* ]] \
   || fail 'overlapping send was not refused as not_ready'
 
+# Closing a worker with an IN-FLIGHT turn must take the turn's process group too:
+# the NO_EVENT run above is still sleeping inside the pane's process tree.
+inflight_pids="$(pgrep -f "o-runtime-$$/turn-.*\.prompt|NO_EVENT" 2>/dev/null | tr '\n' ' ' || true)"
+[[ -n "${inflight_pids// /}" ]] || fail 'expected an in-flight NO_EVENT run before close'
 closed="$($O close opencode-contract-first --json)"
 [[ "$closed" == *'"status":"closed"'* ]] || fail 'close lacks typed success'
 ! tmux has-session -t '=opencode-contract-first' 2>/dev/null || fail 'closed session still exists'
 for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$worker_pid" 2>/dev/null || break; sleep 0.2; done
 ! kill -0 "$worker_pid" 2>/dev/null || fail 'close left the worker process running'
+# every in-flight fake run process must be gone (the trap forwards TERM to the group)
+sleep 1
+for ip in $inflight_pids; do
+  if kill -0 "$ip" 2>/dev/null && ps -o args= -p "$ip" 2>/dev/null | grep -Eq 'NO_EVENT|turn-.*\.prompt'; then
+    fail "close left an in-flight turn process running: $(ps -o pid=,pgid=,ppid=,args= -p "$ip" 2>/dev/null)"
+  fi
+done
 
 set +e
 gone="$($O close opencode-contract-first --json 2>/dev/null)"
@@ -436,8 +457,14 @@ set -e
 # untagged session beside it survives.
 second="$($O delegate contract-second --agent glm-coder --run-dir "$RUN_DIR" --json)"
 [[ "$second" == *'"status":"sent"'* ]] || fail 'second delegation did not dispatch'
-sleep 2
-reaped="$(O_REAP_IDLE_SECONDS=1 $O reap --json)"
+# Poll instead of a fixed sleep: under load the turn can finish late enough
+# that (now - window_activity) has not yet crossed the 1s idle threshold.
+reaped=""
+for _ in $(seq 1 30); do
+  sleep 0.5
+  reaped="$(O_REAP_IDLE_SECONDS=1 $O reap --json)"
+  [[ "$reaped" == *'opencode-contract-second'* ]] && break
+done
 python3 - "$reaped" <<'PY'
 import json, sys
 row = json.loads(sys.argv[1])

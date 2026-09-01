@@ -1,0 +1,62 @@
+# wacli — espejo READ-ONLY de WhatsApp (Fase 2)
+#
+# ⛔ SE DESPLIEGA DESARMADO. Armarlo requiere que el operador empareje el dispositivo
+#    escaneando un QR desde su teléfono (`wacli auth`). Ese acto es suyo, nunca
+#    scripteado: es la decisión que acepta el riesgo de ban sobre el número
+#    principal del negocio.
+#
+# LA POSTURA DE SOLO-LECTURA, DICHA CON PRECISIÓN (medido 2026-08-04, v0.15.2):
+#
+#   `--read-only` rechaza `sync`. No es un descuido: sync escribe el store local
+#   por definición, y esa bandera prohíbe escribir "WhatsApp O el store local".
+#   Así que el demonio NO puede llevarla, y sería deshonesto decir que "la
+#   herramienta impide escribir". Lo que sí se sostiene, y es lo que importa:
+#
+#     1. `sync` lee de WhatsApp y escribe SOLO el espejo local. No envía. Eso es
+#        propiedad del comando, no de una bandera.
+#     2. TODA otra invocación desde el código lleva `--read-only`, y ahí sí un
+#        `send` se rechaza — verificado: se niega antes incluso de comprobar la
+#        autenticación.
+#     3. El dashboard lee el espejo con SQLite en `mode=ro`.
+#     4. `tests/test_whatsapp_readonly.py` prohíbe por lint que aparezca un
+#        `send`/`presence`/`mark-read` en cualquier argv de wacli del repo.
+#
+# MITIGACIONES DE BAN (nota de investigación §1.2): presencia silenciosa para no
+# robarle las notificaciones al teléfono, un solo slot de dispositivo, caps de
+# almacenamiento, y cero rutas de envío.
+
+[Unit]
+Description=wacli — espejo read-only de WhatsApp para la digestión diferencial
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=WACLI_STORE_DIR=%h/.wacli
+
+# `--presence-mode quiet` NO difunde presencia: sin esto, el espejo le roba al
+# teléfono del operador la señal de "en línea/leído" y sus notificaciones cambian.
+# Los caps existen para que un espejo desatendido no llene el disco.
+# El webhook apunta a localhost — `--webhook-allow-private` es obligatorio para
+# destinos privados — y va firmado con HMAC, aunque no salga de la máquina.
+ExecStart=%h/.local/opt/wacli-0.15.2/wacli \
+    --store %h/.wacli \
+    --events \
+    sync --follow \
+    --presence-mode quiet \
+    --download-media \
+    --max-db-size 2GB \
+    --max-messages 200000 \
+    --stale-threshold 90s \
+    --webhook http://127.0.0.1:5556/webhooks/whatsapp \
+    --webhook-allow-private \
+    --webhook-events message
+
+Restart=on-failure
+RestartSec=30
+# Un `logged_out` es terminal: WhatsApp desvinculó el dispositivo y reintentar no
+# lo arregla — hay que volver a emparejar. Se detiene y se avisa.
+SuccessExitStatus=0
+
+[Install]
+WantedBy=default.target

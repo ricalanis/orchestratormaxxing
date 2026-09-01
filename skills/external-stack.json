@@ -208,23 +208,6 @@
       "tree_sha256": "4c4b51bd398b159945c88f11d9befa8ff78eb64670ee9d008d8b799319bcfb5f"
     },
     {
-      "name": "graduate",
-      "kind": "orchestratormaxxing-workflow",
-      "repo": "local://orchestratormaxxing",
-      "commit": "0000000000000000000000000000000000000000",
-      "path": "plugins/orchestratormaxxing/skills/graduate",
-      "include": [
-        "SKILL.md",
-        "agents"
-      ],
-      "targets": [
-        "OpenCode",
-        "Hermes"
-      ],
-      "license": "MIT",
-      "tree_sha256": "f8b2d0db4d7e7374caf4d51f146f96db7ae44f4b9ea21c0c5347d94159b338a2"
-    },
-    {
       "name": "ideas",
       "kind": "orchestratormaxxing-workflow",
       "repo": "local://orchestratormaxxing",

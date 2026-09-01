@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily Hermes kanban DB backup (P2-5)
+
+[Timer]
+OnCalendar=daily
+# Catch up a missed run (laptop asleep at midnight) on next wake.
+Persistent=true
+# Spread the write so it doesn't collide with other midnight jobs.
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

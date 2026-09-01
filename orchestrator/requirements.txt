@@ -1,0 +1,7 @@
+# Runtime deps for the orchestrator dashboard API (deploy/docker-compose.yml
+# builds from this; the dev venv is managed separately). Pinned to the
+# versions the live service runs.
+fastapi==0.139.0
+uvicorn==0.49.0
+jinja2==3.1.6
+pydantic==2.13.4

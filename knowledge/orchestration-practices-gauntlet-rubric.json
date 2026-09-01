@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "goal": "Turn Orchestra of One practices into a governed match-preflight-brake-rescue-receipt loop across the orchestratormaxxing environment.",
+  "increments": [
+    {
+      "id": "vocabulary-contract",
+      "load_bearing": [
+        "five-level catalog has stable practice IDs and evidence refs",
+        "known-bad false-positive, unhealthy dependency, no-progress, false-green, retired noun, and unsupported-host fixtures are red before implementation",
+        "match and evaluation are side-effect free",
+        "only allowlisted check and rescue IDs validate"
+      ],
+      "reference": {
+        "path": "~/Documents/orchestra-of-one/orchestra-of-one.txt",
+        "provenance": "human-authored book; Recall Layer and Operator's Creed"
+      }
+    },
+    {
+      "id": "advisory-practice-pack",
+      "load_bearing": [
+        "matcher normalizes NFKC and abstains on no match or unsupported host",
+        "practice pack contains deterministic preflights, four-brake requirements, typed rescue, and evidence",
+        "existing concept vocabulary remains backward compatible",
+        "Semantica remains read-only and non-authoritative"
+      ],
+      "reference": {
+        "path": "~/Documents/orchestra-of-one/orchestra-of-one-second-movement.md",
+        "provenance": "human-commissioned extension; chapters 14-18"
+      }
+    },
+    {
+      "id": "task-run-envelope",
+      "load_bearing": [
+        "creator supplies runnable contract before dispatch",
+        "all four brakes are declared and enforced",
+        "checkpoint state is distinct from governed memory",
+        "independent objective completion and adequacy evidence gate acceptance",
+        "rescue decisions and receipts are append-only and cannot widen AUTO/SELECT authority"
+      ],
+      "reference": {
+        "path": "knowledge/loop-graph-mastery-program-2026-08-10.md",
+        "provenance": "existing ratified local mastery program"
+      }
+    },
+    {
+      "id": "fleet-propagation-ledger",
+      "load_bearing": [
+        "one canonical catalog reaches Hermes, Orchestrator, Claude, Codex, OpenCode, and Open Design",
+        "host adapters abstain on unsupported capabilities",
+        "drift tests fail on semantic or deployment divergence",
+        "routing remains shadow-only until live holdout evidence",
+        "leading metrics are paired with cost, rework, rescue, and incident countermetrics"
+      ],
+      "reference": {
+        "path": "tests/skill-stack-install/run.sh",
+        "provenance": "existing deterministic four-host deployment contract, extended to six surfaces"
+      }
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+# Coolify deploy for <your-vm> (GCP VM, Tailscale <tailnet-ip>, Docker 24,
+# Coolify + Traefik). TWO services off ONE image (same code, different entry):
+#   dashboard  → dashboard.api        (:5555)  → orch.example.com
+#   mcp-sse    → mcp_sse_server.py     (:5556)  → mcp.example.com
+#
+# Both share the SQLite DB on a named volume at /data/orchestrator.db
+# (HERMES_KANBAN_DB points the code there — no ~/.hermes in a container).
+#
+# TAILNET-ONLY: Traefik/Let's-Encrypt terminate HTTPS, but the router rule
+# should bind these hosts to the Tailscale interface, never the public IP
+# (see deploy-coolify.sh notes + Coolify's "Direct IP / bind address").
+# Secrets (HERMES_MCP_SSE_TOKEN, scope) come from Coolify's env UI, NOT here.
+services:
+  dashboard:
+    image: ${IMAGE:-hermes-orchestrator:latest}
+    command: ["python", "-m", "dashboard.api"]
+    restart: unless-stopped
+    environment:
+      DASHBOARD_BIND: 0.0.0.0
+      DASHBOARD_PORT: "5555"
+      HERMES_KANBAN_DB: /data/orchestrator.db
+      DASHBOARD_MAX_BODY_BYTES: ${DASHBOARD_MAX_BODY_BYTES:-1048576}
+    volumes:
+      - orchestrator-db:/data
+    ports:
+      - "5555:5555"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5555/healthz',timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  mcp-sse:
+    image: ${IMAGE:-hermes-orchestrator:latest}
+    command: ["python", "mcp_sse_server.py"]
+    restart: unless-stopped
+    environment:
+      HERMES_MCP_SSE_BIND: 0.0.0.0
+      HERMES_MCP_SSE_PORT: "5556"
+      HERMES_KANBAN_DB: /data/orchestrator.db
+      # Set these in Coolify's env UI (do NOT commit secrets):
+      HERMES_MCP_SSE_TOKEN: ${HERMES_MCP_SSE_TOKEN:-}
+      HERMES_MCP_SCOPE: ${HERMES_MCP_SCOPE:-default}
+      HERMES_MCP_CORS_ORIGINS: ${HERMES_MCP_CORS_ORIGINS:-https://orch.example.com}
+    volumes:
+      - orchestrator-db:/data
+    ports:
+      - "5556:5556"
+    depends_on:
+      - dashboard
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5556/health',timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+volumes:
+  orchestrator-db:

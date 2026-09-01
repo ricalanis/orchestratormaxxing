@@ -85,7 +85,7 @@ Project memory is **shared by Claude and Codex, governed, and not append-only**.
 
 ## Self-improvement loop
 
-`/self-improve` runs one governed round: **MINE** (internal: `harness-verify` + `mem-audit`; external: `harness-scan` over fresh arXiv/X) → attribute the flaw to an **ETCLOVG** layer (Execution / Tool / Context / Lifecycle / Observability / Verification / Governance, per HarnessFix arXiv:2606.06324) → **PROPOSE** 2–3 diverse candidate fixes via workers → **EVALUATE** with the deterministic verifier (a fix that reds `harness-verify` is not a fix) → **SELECT** via cross-model critics prompted to refute → **Opus sign-off** (human gate on doctrine) → **ARCHIVE** every round, accepted *and* rejected, to [`knowledge/self-improve-log.md`](knowledge/self-improve-log.md).
+`/self-improve` runs one governed round: **MINE** (internal: `harness-verify` + `mem-audit`; external: `harness-scan` over fresh arXiv/X) → attribute the flaw to an **ETCLOVG** layer (Execution / Tool / Context / Lifecycle / Observability / Verification / Governance, per HarnessFix arXiv:2606.06324) → **PROPOSE** 2–3 diverse candidate fixes via workers → **EVALUATE** with the deterministic verifier (a fix that reds `harness-verify` is not a fix) → **SELECT** via cross-model critics prompted to refute → **Opus sign-off** (human gate on doctrine) → **ARCHIVE** every round, accepted *and* rejected, to `knowledge/self-improve-log.md` (created by the loop's first round).
 
 It's propose-evaluate-select (ADAS / Darwin-Gödel Machine), with the one substitution that makes it safe: selection is a verifier, never the harness's preference for its own rewrite.
 
@@ -106,7 +106,7 @@ The doctrine isn't folklore — each rule traces to a verified paper (full notes
 
 ## Fleet mode (private half)
 
-The tools `folder-sync`, `gpu-agent`, and `project-new` ship only from the private installer. They are not part of this public projection.
+These tools ship only from the private installer and are not part of this public projection: `folder-sync`, `gpu-agent`, `gpu-desktop`, `harness-remote`, `project-new`, `semantica`, `firecrawl`, `opendesign`, `drive`, `design-eval`, `worker-path-bench`, `transcription-fix`, and the proposal toolchain. The maintainer's graduation workflow (`/graduate`) is also private; `bin/core-export` itself ships so you can run your own projection.
 
 ## Graduation
 
@@ -121,7 +121,6 @@ Tools are dependency-free (Python stdlib or plain bash), read-only where they au
 | `bin/oll` | One-shot Ollama worker. `deepseek-v4-flash:0731` is the volume default; `glm-5.3` is explicit reasoning; `kimi-k3` the higher-consumption long-horizon route. |
 | `bin/oll-council` | Same prompt to several *diverse* frontier models in parallel (Zhipu / DeepSeek / Moonshot / Alibaba / MiniMax / Mistral) — for design decisions and getting unstuck. |
 | `bin/oll-sync` | Sync OpenCode's `ollama-cloud` model list with the live catalog (adds new, prunes dead, preserves curated names). |
-| `bin/worker-path-bench` | Run identical contracts and hidden-answer long-context canaries through argv-based worker adapters, with normalized JSONL, attributable failures, context/cache/compaction telemetry, and reproducible summaries. |
 | `bin/ticket-route` | Proposal-only "Purrly-lite" router: rejects missing ACs, permits fan-out only for disjoint independent chunks, and activates review from explicit risk/domain signals. |
 | `bin/mut` | **Tier-1b mutation gate** — "who tests the tests?". Deterministically mutates a source file's AST, runs your contract against each mutant, reports only the *survivors* (mutations the contract failed to catch). |
 | `bin/mem-audit` | Deterministic health check for project memory: staleness (bitemporal TTLs), index drift, supersede-link integrity, secret/PII backstop. Runs at SessionStart via hook. |
@@ -145,7 +144,7 @@ Tools are dependency-free (Python stdlib or plain bash), read-only where they au
 | `/self-improve [focus]` | One governed round of harness self-improvement (see below). |
 | `ollama-worker` (subagent) | A cheap dispatcher (Haiku) that hands a single well-scoped task to an Ollama Cloud model via `oll` and returns the output verbatim. |
 
-Codex exposes `$orchestratormaxxing:fanout`, `$orchestratormaxxing:ideas`, `$orchestratormaxxing:self-improve`, `$orchestratormaxxing:wrap-up`, `$orchestratormaxxing:solplan`, `$orchestratormaxxing:product-manager`, and `$orchestratormaxxing:memory`. Planning is host-native: Claude's `/fableplan` delegates to Fable, while Codex prioritizes `$orchestratormaxxing:solplan` with GPT-5.6 Sol Ultra and bounded read-only delegation for nontrivial unplanned work. After root review, `$orchestratormaxxing:fanout` is used only for genuinely independent implementation chunks.
+Codex exposes `$orchestratormaxxing:fanout`, `$orchestratormaxxing:ideas`, `$orchestratormaxxing:self-improve`, `$orchestratormaxxing:wrap-up`, `$orchestratormaxxing:solplan`, and `$orchestratormaxxing:memory`. Planning is host-native: Claude's `/fableplan` delegates to Fable, while Codex prioritizes `$orchestratormaxxing:solplan` with GPT-5.6 Sol Ultra and bounded read-only delegation for nontrivial unplanned work. After root review, `$orchestratormaxxing:fanout` is used only for genuinely independent implementation chunks.
 
 ### Worker models — heavy frontier only
 

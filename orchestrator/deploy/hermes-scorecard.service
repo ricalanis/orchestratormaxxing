@@ -1,0 +1,9 @@
+[Unit]
+Description=Hermes weekly scorecard reminder — the Friday-5pm growth ritual (Phase 4)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/dev/orchestratormaxxing/orchestrator
+ExecStart=/usr/bin/env bash %h/dev/orchestratormaxxing/orchestrator/bin/scorecard-reminder.sh
+# Override the log location here if desired (default: ~/.hermes/memories/weekly-scorecard.log).
+# Environment=HERMES_SCORECARD_LOG=%h/.hermes/memories/weekly-scorecard.log

@@ -1,0 +1,38 @@
+[
+ {
+  "_comment": "Estructura VERIFICADA en vivo contra la API de Fireflies (2026-08-03, 12 juntas, 101 action items, 100% con ancla (MM:SS)). El CONTENIDO es sintético a propósito: el fixture real traía habla textual de clientes y datos personales de terceros, que no pertenecen a un repositorio git. Lo que este fixture debe preservar es la FORMA — `**Nombre**` abriendo bloque, un item por línea terminando en (MM:SS), sentences con index/speaker_name/text/start_time — porque es contra la forma real que se prueba el parser.",
+  "id": "tr_synthetic_001",
+  "title": "Dora <> Op: Proyecto Demo",
+  "summary": {
+   "action_items": "\n**Dora Cliente**\nEnviar resumen de funcionalidades y anexos del MVP para facilitar la cotización (14:02)\nSolicitar al equipo comercial el número esperado de usuarios y conductores (21:35)\n**Op Host**\nPreparar la propuesta económica con dos escenarios de alcance (28:10)\n",
+   "overview": "Sesión de alcance del MVP. Se revisaron funcionalidades base y quedó pendiente la cotización."
+  },
+  "sentences": [
+   {"index": 0, "speaker_name": "Op Host", "text": "Pues aquí puestísimo Dora, cuéntame.", "start_time": 12.4},
+   {"index": 1, "speaker_name": "Dora Cliente", "text": "Te mando hoy mismo el resumen de funcionalidades y los anexos para que puedan cotizar.", "start_time": 842.1},
+   {"index": 2, "speaker_name": "Dora Cliente", "text": "Le pregunto al equipo comercial cuántos usuarios y conductores esperan.", "start_time": 1295.7},
+   {"index": 3, "speaker_name": "Op Host", "text": "Va, yo preparo la propuesta con dos escenarios de alcance.", "start_time": 1690.3}
+  ]
+ },
+ {
+  "_comment": "Caso degradado: blob sin encabezados de responsable ni timestamps. El parser debe producir items SIN ancla en vez de tirar el evento.",
+  "id": "tr_synthetic_002",
+  "title": "Nota suelta sin formato",
+  "summary": {
+   "action_items": "Revisar el contrato\nAgendar seguimiento",
+   "overview": "Conversación corta."
+  },
+  "sentences": [
+   {"index": 0, "speaker_name": "Op Host", "text": "Reviso el contrato esta semana.", "start_time": 5.0}
+  ]
+ },
+ {
+  "_comment": "Junta sin action items: debe ingerirse igual (el evento existe) y simplemente no producir candidatos.",
+  "id": "tr_synthetic_003",
+  "title": "Sync corto sin acuerdos",
+  "summary": {"action_items": "", "overview": "Sin acuerdos."},
+  "sentences": [
+   {"index": 0, "speaker_name": "Op Host", "text": "Nada nuevo por hoy.", "start_time": 3.2}
+  ]
+ }
+]

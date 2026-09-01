@@ -1,0 +1,122 @@
+# Prometheus alert rules for the Hermes orchestrator.
+#
+# Pair with a scrape config like (job name matters — HermesDashboardDown keys on it):
+#
+#   scrape_configs:
+#     - job_name: hermes-orchestrator
+#       scrape_interval: 30s
+#       static_configs:
+#         - targets: ["<orchestrator-host>:5555"]   # tailnet MagicDNS; /metrics
+#
+# Load with:  rule_files: ["orchestrator-alerts.yml"]
+#
+# Philosophy (matches the harness's condition-first doctrine): every alert is
+# a condition a human should ACT on, with the action in the annotation. No
+# FYI alerts.
+
+groups:
+  - name: hermes-orchestrator
+    rules:
+      # ── 1. MCP rate-limit pressure ────────────────────────────────────────
+      # More than 20% of MCP SSE traffic rejected over 5m. Zero traffic can't
+      # fire (0/0 clamps to 0). Absent series (SSE transport not armed) can't
+      # fire either — vector() math over absent series yields no samples.
+      - alert: HermesMCPRateLimitPressure
+        expr: |
+          rate(hermes_mcp_sse_rate_limit_rejections_total[5m])
+            / clamp_min(
+                rate(hermes_mcp_sse_rate_limit_rejections_total[5m])
+                + rate(hermes_mcp_sse_requests_total[5m]),
+                1e-9)
+          > 0.20
+        for: 5m
+        labels:
+          severity: warning
+          component: mcp-sse
+        annotations:
+          summary: "MCP SSE rejecting {{ $value | humanizePercentage }} of requests"
+          description: >-
+            Over 20% of MCP SSE requests were 429'd for 5+ minutes. Either a
+            client is misbehaving (find it: the request log at
+            orchestrator/logs/api-*.log names clients; the limiter keys on the
+            tailnet IP) or the ceiling is too tight for legitimate load
+            (raise HERMES_MCP_RATE_LIMIT[_PRIVILEGED] on the service).
+
+      # ── 1b. MCP auth-failure spike ────────────────────────────────────────
+      # Sustained 401s = someone probing /sse or /messages without a valid
+      # Bearer token (a scanner, or a misconfigured client). Only fires when
+      # the SSE server exposes /metrics (auth_failures_total absent otherwise).
+      - alert: HermesMCPAuthFailureSpike
+        expr: rate(hermes_mcp_sse_auth_failures_total[5m]) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+          component: mcp-sse
+        annotations:
+          summary: "MCP SSE auth failures at {{ $value | humanize }}/s"
+          description: >-
+            Sustained 401s on the MCP SSE server for 5+ minutes — a client is
+            hitting /sse or /messages without a valid Bearer token. Either a
+            scanner (check the source; the tailnet ACL should already bound
+            reachability) or a real client with a stale/missing
+            HERMES_MCP_SSE_TOKEN. 0.2/s ≈ one failed attempt every 5s.
+
+      # ── 2. Session stuck idle with a live terminal ───────────────────────
+      # A session HOLDING A TMUX TERMINAL idle for over an hour. Deliberately
+      # scoped to attached sessions: transcript-only sessions idle for days
+      # are normal (a transcript is just a file); a held terminal idle 1h is
+      # a session someone forgot about, eating a tmux slot and (if the agent
+      # is mid-task) possibly wedged.
+      - alert: HermesSessionStuckIdle
+        expr: hermes_sessions_attached_max_idle_seconds > 3600
+        for: 10m
+        labels:
+          severity: info
+          component: sessions
+        annotations:
+          summary: "A live-terminal session has been idle {{ $value | humanizeDuration }}"
+          description: >-
+            At least one session with an attached tmux terminal has produced
+            no output for over an hour. Triage from any machine:
+            `orchestrator sessions --stale --minutes 60` (names the terminal —
+            it is the kill target). Revive-or-kill; an idle terminal is only a
+            problem if you expected it to be working.
+
+      # ── 3. /healthz gating dependency down ───────────────────────────────
+      # The dashboard exports its own gating checks as 0/1 gauges (kanban_db:
+      # a live SELECT; sessions_cache: flatline detector). Any zero for 2m =
+      # the same condition that turns /healthz 503.
+      - alert: HermesDependencyDown
+        expr: hermes_healthz_check_ok == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: dashboard
+        annotations:
+          summary: "Hermes dependency '{{ $labels.check }}' is down"
+          description: >-
+            A gating /healthz dependency has been failing for 2+ minutes.
+            kanban_db: the SQLite DB is unreadable (disk? lock? path?).
+            sessions_cache: the cache is populated but hasn't refreshed in
+            10x its TTL — the sweeper/refresh pipeline is dead; restart
+            hermes-dashboard.service and check journalctl --user -u
+            hermes-dashboard. Cross-check: curl http://<orchestrator-host>:5555/healthz
+
+      # ── 3b. The meta-alert the other three depend on ─────────────────────
+      # If the dashboard itself is down, every rule above silently produces
+      # no data — this is the alert that fires INSTEAD. Without it the file
+      # is decorative precisely when things are worst.
+      - alert: HermesDashboardDown
+        expr: up{job="hermes-orchestrator"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: dashboard
+        annotations:
+          summary: "Hermes dashboard scrape target is down"
+          description: >-
+            Prometheus cannot scrape http://<orchestrator-host>:5555/metrics. The
+            dashboard process (and with it /healthz, the UI, and all session
+            tooling) is likely down: systemctl --user status
+            hermes-dashboard.service on the GPU box, or reach it via
+            tailscale ssh.
