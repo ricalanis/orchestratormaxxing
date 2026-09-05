@@ -18,3 +18,15 @@ You are the primary Codex orchestrator. Keep requirements, contracts, verificati
 8. Reconcile only verified outputs and make the final decision in the root thread.
 
 Report the models used, which contracts ran, pass/fail, and any mutation score. Agreement between LLMs is corroboration, never proof.
+
+Workspace isolation is required before parallel writers start. Give each writer a
+separate `git worktree` and branch (or a separate clone), then verify its actual
+working directory and Git root before `o delegate`. A distinct run directory or
+session does not isolate repository state. Specify owned paths in every brief;
+workers must preserve others' edits and must not run reset, checkout, stash or
+clean against a shared checkout. Keep planning and read-only reviews read-only.
+
+After integrating every accepted chunk, root reruns all affected contracts on the
+final combined tree. Individual worker passes do not establish that the combined
+result works. Resolve integration failures before publishing or merging; retain
+both per-chunk and combined verification evidence.

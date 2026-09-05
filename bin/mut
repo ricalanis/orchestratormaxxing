@@ -266,6 +266,20 @@ def _terminate_active_contracts():
     return failed
 
 
+def _pre_exec_unblock_handled():
+    """Unblock the handled signals in the child before exec.
+
+    The parent blocks SIGTERM/INT/HUP around Popen+registration so that a signal
+    arriving in that window cannot run cleanup while the child process exists
+    but is not yet tracked. Because the signal mask is inherited across exec,
+    the contract child would inherit the same blocked set and its graceful TERM
+    handlers could not run. Restore the mask to the child's benefit only for the
+    signals mut itself handles; other masks the caller may carry are preserved.
+    """
+    if hasattr(signal, "pthread_sigmask"):
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, _HANDLED_SIGNALS)
+
+
 def _spawn_contract(cmd, env):
     """Spawn and register atomically with respect to handled termination signals."""
     old_mask = None
@@ -276,6 +290,7 @@ def _spawn_contract(cmd, env):
             cmd, shell=True, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=env, start_new_session=True,
+            preexec_fn=_pre_exec_unblock_handled,
         )
         _ACTIVE_CONTRACTS[proc.pid] = proc
         return proc

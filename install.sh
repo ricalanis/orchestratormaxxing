@@ -20,6 +20,8 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Containers and service shells may have no login USER environment.
+INSTALL_USER="${USER:-$(id -un)}"
 say(){ printf "\n\033[1;36m== %s\033[0m\n" "$*"; }
 # 0 iff launchd agent $1 is loaded AND its plist is exactly $2 (i.e. owned by THIS $HOME).
 _launchd_owned_here(){
@@ -86,6 +88,7 @@ cp "$REPO_DIR/bin/mut"         "$BIN_DST/mut"
 cp "$REPO_DIR/bin/harness-verify" "$BIN_DST/harness-verify"
 cp "$REPO_DIR/bin/harness-scan"   "$BIN_DST/harness-scan"
 cp "$REPO_DIR/bin/loop-queue"     "$BIN_DST/loop-queue"
+cp "$REPO_DIR/bin/intent-queue"   "$BIN_DST/intent-queue"
 cp "$REPO_DIR/bin/loop-tick"      "$BIN_DST/loop-tick"
 cp "$REPO_DIR/bin/token-ledger"   "$BIN_DST/token-ledger"
 cp "$REPO_DIR/bin/model-catalog"  "$BIN_DST/model-catalog"
@@ -115,7 +118,7 @@ chmod +x "$BIN_DST/o"
 rm -rf -- "$SHARE_DIR/orchestration_practices"
 cp -R "$REPO_DIR/orchestration_practices" "$SHARE_DIR/orchestration_practices"
 cp "$REPO_DIR/prompts/context/compact.md" "$SHARE_DIR/context-compact.md"
-chmod +x "$BIN_DST/oll" "$BIN_DST/oll-council" "$BIN_DST/oll-sync" "$BIN_DST/occ" "$BIN_DST/agent-tab-status" "$BIN_DST/warp-agent-event" "$BIN_DST/warp-agent-recovery" "$BIN_DST/codex-stop-hook" "$BIN_DST/agent-done-notify" "$BIN_DST/ticket-route" "$BIN_DST/provider-ask" "$BIN_DST/multi-council" "$BIN_DST/cross-review" "$BIN_DST/mem-audit" "$BIN_DST/memoryctl" "$BIN_DST/harness-sync" "$BIN_DST/core-export" "$BIN_DST/mut" "$BIN_DST/harness-verify" "$BIN_DST/harness-scan" "$BIN_DST/loop-queue" "$BIN_DST/loop-tick" "$BIN_DST/token-ledger" "$BIN_DST/model-catalog" "$BIN_DST/model-bench" "$BIN_DST/model-eval" "$BIN_DST/win-log" "$BIN_DST/delegate-ledger" "$BIN_DST/warp-ollama" "$BIN_DST/warp-model-pin" "$BIN_DST/zed-setup" "$BIN_DST/session-log" "$BIN_DST/sync-agent-skills" "$BIN_DST/orchestration-practice" "$BIN_DST/cogload" "$BIN_DST/tmux" "$BIN_DST/tmux-send" "$BIN_DST/harness-agent-run" "$BIN_DST/opencode-browser-mcp" "$BIN_DST/browser-mcp-contract" "$BIN_DST/gauntlet-judge" "$BIN_DST/xsearch" "$BIN_DST/memory-bridge-hermes.sh" "$BIN_DST/hermes-watch" "$BIN_DST/kpi-brief" "$BIN_DST/capacity" "$BIN_DST/task-plan"
+chmod +x "$BIN_DST/oll" "$BIN_DST/oll-council" "$BIN_DST/oll-sync" "$BIN_DST/occ" "$BIN_DST/agent-tab-status" "$BIN_DST/warp-agent-event" "$BIN_DST/warp-agent-recovery" "$BIN_DST/codex-stop-hook" "$BIN_DST/agent-done-notify" "$BIN_DST/ticket-route" "$BIN_DST/provider-ask" "$BIN_DST/multi-council" "$BIN_DST/cross-review" "$BIN_DST/mem-audit" "$BIN_DST/memoryctl" "$BIN_DST/harness-sync" "$BIN_DST/core-export" "$BIN_DST/mut" "$BIN_DST/harness-verify" "$BIN_DST/harness-scan" "$BIN_DST/loop-queue" "$BIN_DST/intent-queue" "$BIN_DST/loop-tick" "$BIN_DST/token-ledger" "$BIN_DST/model-catalog" "$BIN_DST/model-bench" "$BIN_DST/model-eval" "$BIN_DST/win-log" "$BIN_DST/delegate-ledger" "$BIN_DST/warp-ollama" "$BIN_DST/warp-model-pin" "$BIN_DST/zed-setup" "$BIN_DST/session-log" "$BIN_DST/sync-agent-skills" "$BIN_DST/orchestration-practice" "$BIN_DST/cogload" "$BIN_DST/tmux" "$BIN_DST/tmux-send" "$BIN_DST/harness-agent-run" "$BIN_DST/opencode-browser-mcp" "$BIN_DST/browser-mcp-contract" "$BIN_DST/gauntlet-judge" "$BIN_DST/xsearch" "$BIN_DST/memory-bridge-hermes.sh" "$BIN_DST/hermes-watch" "$BIN_DST/kpi-brief" "$BIN_DST/capacity" "$BIN_DST/task-plan"
 
 # bin/chrome-debug-wayland-shim → shadows google-chrome(-stable) on PATH (Linux only).
 # Any launch carrying --remote-debugging-port under a Wayland session gets
@@ -1004,7 +1007,7 @@ Linux)
     else
       printf '  \033[1;33mautonomous loop NOT armed\033[0m — to enable the daily 07:00 self-improve round:\n'
       printf '    systemctl --user enable --now orchestratormaxxing-loop.timer\n'
-      printf '    sudo loginctl enable-linger %s   # once: so it fires without an active login\n' "$USER"
+      printf '    sudo loginctl enable-linger %s   # once: so it fires without an active login\n' "$INSTALL_USER"
     fi
   fi
   ;;
@@ -1073,9 +1076,9 @@ if [ "$(uname -s)" = "Linux" ] && command -v systemctl >/dev/null 2>&1 \
     # groups across logout/login — so a plain re-login leaves the collector
     # exactly as blind as before.
     if ! id -nG 2>/dev/null | tr " " "\n" | grep -qx input; then
-      printf '  \033[1;33mcogload: %s is not in the `input` group\033[0m — evdev cannot read keyboards.\n' "$USER"
-      printf '    sudo usermod -aG input %s\n' "$USER"
-      printf '    loginctl terminate-user %s   # REQUIRED: a plain logout keeps the old groups while lingering is on\n' "$USER"
+      printf '  \033[1;33mcogload: %s is not in the `input` group\033[0m — evdev cannot read keyboards.\n' "$INSTALL_USER"
+      printf '    sudo usermod -aG input %s\n' "$INSTALL_USER"
+      printf '    loginctl terminate-user %s   # REQUIRED: a plain logout keeps the old groups while lingering is on\n' "$INSTALL_USER"
     fi
   fi
 fi

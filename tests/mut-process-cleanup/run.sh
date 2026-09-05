@@ -6,6 +6,7 @@
 #   C2 a successful leader cannot leave a background descendant behind
 #   C3 SIGTERM of mut cleans the active contract before restoring the source
 #   C4 cleanup never reaches an unrelated process outside the contract group
+#   C6 child inherits TERM/INT/HUP unblocked so graceful handlers can run
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -191,9 +192,7 @@ data = json.load(open(sys.argv[1], encoding="utf-8"))
 assert data["valid"] == 1, data
 assert data["survived"] == 1, data
 PY
-if [[ "$(uname -s)" != Darwin ]]; then
-  [[ -s "$background_term" ]] || fail "C2 skipped graceful TERM before escalation"
-fi
+[[ -s "$background_term" ]] || fail "C2 skipped graceful TERM before escalation"
 assert_gone "$background_receipt" "C2 normal leader exit"
 assert_sentinel C2
 
@@ -362,4 +361,19 @@ else:
     raise AssertionError("main continued after cleanup failure")
 PY
 
-echo "mut-process-cleanup: C1-C5 pass"
+# C6 — The child contract must receive TERM unblocked even when the parent
+# blocked it around spawn+registration. The helper writes a receipt only after
+# installing its handler and then blocks until TERM. A blocked TERM would be
+# silently redirected to the default action (termination with no marker).
+mask_receipt="$SCRATCH/mask.receipt"
+mask_term="$SCRATCH/mask.term"
+RECEIPTS+=("$mask_receipt")
+"$MUT" --src "$SRC" \
+  --test "python3 '$HELPER' graceful '$mask_receipt' '$mask_term'" \
+  --max-mutants 1 --timeout 2 --threshold 0 >/dev/null 2>&1
+wait_receipt "$mask_receipt"
+[[ -s "$mask_term" ]] || fail "C6 child TERM handler did not run"
+assert_gone "$mask_receipt" "C6 graceful handler"
+assert_sentinel C6
+
+echo "mut-process-cleanup: C1-C6 pass"

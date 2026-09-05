@@ -17,3 +17,15 @@ Do this:
    - *On failure — repair before escalating:* feed the contract's failure diff back to the **same worker** for up to **2** bounded rounds before falling back to Opus (Asuka-Bench 2606.05920). A **repaired chunk must then clear 1b (mutation)** before accept — that's the anti-gaming gate (stops the worker overfitting the visible contract); escalate early if the diff isn't shrinking. Don't repair-loop non-testable chunks.
    - Then reconcile conflicts and produce one coherent result. (Full policy: CLAUDE.md → "Verifying worker output".)
 4. **Report** which workers/models ran, a one-line cost note, and the mutation score for any chunk that ran 1b. Spend Opus only on decomposition, verification, and merge — push the bulk work to the workers.
+
+Workspace isolation is required before parallel writers start. Give each writer a
+separate `git worktree` and branch (or a separate clone), then verify its actual
+working directory and Git root before `o delegate`. A distinct run directory or
+session does not isolate repository state. Specify owned paths in every brief;
+workers must preserve others' edits and must not run reset, checkout, stash or
+clean against a shared checkout. Keep planning and read-only reviews read-only.
+
+After integrating every accepted chunk, root reruns all affected contracts on the
+final combined tree. Individual worker passes do not establish that the combined
+result works. Resolve integration failures before publishing or merging; retain
+both per-chunk and combined verification evidence.

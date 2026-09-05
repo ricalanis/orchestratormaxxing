@@ -26,7 +26,7 @@ Commands:
 
 Exit codes: 0 ok · 1 unexpected error · 2 usage/validation · 3 integrity refusal.
 """
-import argparse, fcntl, glob, hashlib, json, os, re, sys
+import argparse, fcntl, glob, hashlib, json, os, re, stat, sys
 from datetime import datetime, timezone
 
 LANES = ["oll", "o", "codex", "anthropic", "in-session"]
@@ -370,6 +370,31 @@ def cmd_receipt(args, path, items):
               file=sys.stderr)
         return EXIT_REFUSAL
 
+    # A passing receipt is evidence that the worker's output cleared the
+    # contract, so it must point at a real output.md. A missing, symlinked, or
+    # nonregular output.md cannot substantiate that pass. Failed attempts may
+    # have no output artifact.
+    if args.verdict == "pass":
+        out_md = os.path.join(args.run_dir, "output.md")
+        if os.path.islink(out_md) or not os.path.isfile(out_md):
+            print(f"receipt: pass verdict requires a regular output.md "
+                  f"(missing, symlinked, or nonregular): {out_md}", file=sys.stderr)
+            return EXIT_REFUSAL
+        try:
+            # Pin the checked file while hashing. A path swapped for a symlink
+            # or FIFO after the preliminary check must never become a pass.
+            fd = os.open(out_md, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as fh:
+                if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                    raise ValueError("output.md is not regular")
+                digest = hashlib.sha256()
+                for block in iter(lambda: fh.read(65536), b""):
+                    digest.update(block)
+                output_digest = digest.hexdigest()
+        except (OSError, ValueError) as exc:
+            print(f"receipt: cannot hash regular output.md: {exc}", file=sys.stderr)
+            return EXIT_REFUSAL
+
     receipt = {
         "schema_version": RECEIPT_SCHEMA_VERSION,
         "ts": now_iso(),
@@ -390,7 +415,8 @@ def cmd_receipt(args, path, items):
         "note": args.note,
     }
     for field, fname in RECEIPT_HASHED:
-        receipt[field] = sha256_file(os.path.join(args.run_dir, fname))
+        receipt[field] = (output_digest if fname == "output.md" and args.verdict == "pass"
+                          else sha256_file(os.path.join(args.run_dir, fname)))
 
     if set(receipt) != set(RECEIPT_FIELDS):
         print("receipt: internal schema drift — refusing to write", file=sys.stderr)

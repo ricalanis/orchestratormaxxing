@@ -193,5 +193,48 @@ EOF
   && ok   C10 "a zero stderr budget suppresses the tail instead of emitting all of it" \
   || bad  C10 "zero budget did not bound the tail (len=$Z_LEN, cause_present=$Z_MARKER)"
 
+# Startup and inspection capability must be observable independently.
+if python3 - "$ROOT/bin/harness-verify" <<'PYTEST'
+import builtins, pathlib, runpy, subprocess, sys, tempfile
+path = sys.argv[1]
+original_import = builtins.__import__
+def without_toml(name, *args, **kwargs):
+    if name == "tomllib":
+        raise ModuleNotFoundError("fixture: tomllib unavailable", name="tomllib")
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = without_toml
+try:
+    ns = runpy.run_path(path)
+    with tempfile.TemporaryDirectory() as tmp:
+        home = pathlib.Path(tmp)
+        (home / ".config/orchestratormaxxing").mkdir(parents=True)
+        (home / ".codex").mkdir()
+        (home / ".codex/config.toml").write_text("notify = []\n")
+        issues = ns["deployed_host_state_ok"](str(pathlib.Path(path).parent.parent), str(home))
+        assert any("inspection unavailable" in row[2] for row in issues), issues
+        assert not any("unparseable TOML" in row[2] for row in issues), issues
+finally:
+    builtins.__import__ = original_import
+probe = """import os, runpy, shutil, sys
+sys.version_info = (3, 9, 0)
+shutil.which = lambda *_a: None
+os.access = lambda *_a: False
+os.environ.pop('_HARNESS_VERIFY_REEXEC', None)
+sys.argv = [sys.argv[1], '--help']
+runpy.run_path(sys.argv[0], run_name='__main__')
+"""
+r = subprocess.run([sys.executable, "-c", probe, path], capture_output=True, text=True, timeout=10)
+assert r.returncode == 2 and "Python >= 3.11" in r.stderr, (r.returncode, r.stderr)
+old = pathlib.Path("/usr/bin/python3")
+if old.exists():
+    v = subprocess.run([str(old), "-c", "import sys; print(sys.version_info < (3, 11))"], capture_output=True, text=True)
+    if v.stdout.strip() == "True":
+        r = subprocess.run([str(old), path, "--help"], capture_output=True, text=True, timeout=20)
+        assert r.returncode == 0 and "--repo" in r.stdout, (r.returncode, r.stderr)
+PYTEST
+then ok C11 "runtime recovery and honest unavailable inspection"
+else bad C11 "runtime recovery or inspection diagnostics failed"
+fi
+
 printf 'harness-observer-diagnostics: %d/%d PASS\n' "$pass" "$((pass+fail))"
 [ "$fail" -eq 0 ] || exit 1
