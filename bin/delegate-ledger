@@ -103,9 +103,20 @@ def now_iso():
 
 # ── row identity + load ───────────────────────────────────────────────────────
 
-def row_id(run_id, attempt, lane):
-    """Stable short hash of (run_id, attempt, lane) — the idempotency key."""
-    key = f"{run_id}\x00{attempt}\x00{lane}"
+def row_identity(row):
+    """Canonical identity, including models stored by either writer.
+
+    JSON preserves field boundaries and distinguishes null from the string "None".
+    Sorted object keys keep JSON-valued models accepted by import repeatable too.
+    Historical rows carry these fields even when their ID omitted the model.
+    """
+    return json.dumps([row.get(field) for field in ("run_id", "attempt", "lane", "model")],
+                      ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def row_id(run_id, attempt, lane, model):
+    """Stable display label; deduplication uses the complete identity, not this hash."""
+    key = row_identity({"run_id": run_id, "attempt": attempt, "lane": lane, "model": model})
     return f"dl-{hashlib.sha1(key.encode()).hexdigest()[:8]}"
 
 
@@ -125,18 +136,19 @@ def load(path):
 
 
 def append_row(path, row):
-    """Append a row under an exclusive flock, checking idempotency by id.
+    """Append under an exclusive flock, checking the complete identity.
 
     Holds a bounded flock on a sidecar lock file and appends with a single
     O_APPEND write, so two concurrent `record` calls both land intact.
-    Returns True if appended, False if the id already existed (no-op).
+    Returns True if appended, False if the identity already existed (no-op).
+    Short ID collisions cannot suppress rows, and legacy IDs need no migration.
     """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     lock_path = path + ".lock"
     with open(lock_path, "w") as lock_fh:
         fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
         try:
-            existing_ids = set()
+            existing = set()
             if os.path.isfile(path):
                 with open(path, encoding="utf-8") as fh:
                     for line in fh:
@@ -144,10 +156,10 @@ def append_row(path, row):
                         if not line:
                             continue
                         try:
-                            existing_ids.add(json.loads(line).get("id"))
+                            existing.add(row_identity(json.loads(line)))
                         except ValueError:
                             pass
-            if row["id"] in existing_ids:
+            if row_identity(row) in existing:
                 return False
             with open(path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -283,7 +295,7 @@ def cmd_record(args, path, items):
                               file=sys.stderr)
 
     row = {
-        "id": row_id(args.run_id, args.attempt, args.lane),
+        "id": row_id(args.run_id, args.attempt, args.lane, args.model),
         "ts": now_iso(),
         "run_id": args.run_id,
         "task_class": args.task_class,
@@ -521,7 +533,7 @@ def cmd_import(args, path, items):
             continue
 
         row = {
-            "id": row_id(str(run_id_val), 1, lane),
+            "id": row_id(str(run_id_val), 1, lane, receipt.get("model")),
             "ts": now_iso(),
             "run_id": str(run_id_val),
             "task_class": str(task_class),
