@@ -1109,9 +1109,18 @@ while True:
     [[ "$as_json" == 1 ]] && _o_json_status invalid_turn1_task '' "$turn1_mode"
     return 2
   fi
-  # Keep completed evidence bound to its original run; retries use a fresh gate.
-  if [[ -e "$run_abs/output.md" || -L "$run_abs/output.md" ]]; then
-    [[ "$as_json" == 1 ]] && _o_json_status invalid_contract '' 'output.md already exists; use a fresh run-dir'
+  # A run directory belongs to one worker session, including before its first
+  # output. Refuse legacy runtime traces and atomically claim fresh admission;
+  # otherwise a concurrent/late handoff could publish into a new worker's run.
+  local prior_artifact
+  for prior_artifact in output.md binding.json handoff.json turn-1.prompt; do
+    if [[ -e "$run_abs/$prior_artifact" || -L "$run_abs/$prior_artifact" ]]; then
+      [[ "$as_json" == 1 ]] && _o_json_status invalid_contract '' 'run-dir already contains worker evidence; use a fresh run-dir'
+      return 2
+    fi
+  done
+  if ! (umask 077; mkdir -- "$run_abs/.delegation-started") 2>/dev/null; then
+    [[ "$as_json" == 1 ]] && _o_json_status invalid_contract '' 'run-dir is already claimed or unavailable; use a fresh run-dir'
     return 2
   fi
   contract_sha="$(_o_sha256 "$contract")" || return 2

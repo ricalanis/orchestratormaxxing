@@ -13,12 +13,13 @@ TMUX_BIN="$(command -v tmux)"
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/o-runtime.XXXXXX")"
 STUBS="$SCRATCH/bin"
 RUN_DIR="$ROOT/.results/delegation/o-runtime-$$"
+SECOND_RUN_DIR="$ROOT/.results/delegation/o-runtime-second-$$"
 PROFILE_RUN_DIR="$ROOT/.results/delegation/o-runtime-profile-$$"
 DEFERRED_RUN_DIR="$ROOT/.results/delegation/o-runtime-deferred-$$"
 ENGLISH_RUN_DIR="$ROOT/.results/delegation/o-runtime-english-deferred-$$"
 MALFORMED_RUN_DIR="$ROOT/.results/delegation/o-runtime-malformed-$$"
 MARKED_RUN_DIR="$ROOT/.results/delegation/o-runtime-marked-$$"
-mkdir -p "$STUBS" "$RUN_DIR" "$PROFILE_RUN_DIR" "$DEFERRED_RUN_DIR" \
+mkdir -p "$STUBS" "$RUN_DIR" "$SECOND_RUN_DIR" "$PROFILE_RUN_DIR" "$DEFERRED_RUN_DIR" \
   "$ENGLISH_RUN_DIR" "$MALFORMED_RUN_DIR" "$MARKED_RUN_DIR"
 export TMUX_TMPDIR="$SCRATCH/tmux"
 mkdir -p "$TMUX_TMPDIR"
@@ -28,7 +29,7 @@ cleanup() {
   while IFS= read -r session; do
     [[ -n "$session" ]] && tmux kill-session -t "=$session" 2>/dev/null || true
   done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
-  rm -rf "$SCRATCH" "$RUN_DIR" "$PROFILE_RUN_DIR" "$DEFERRED_RUN_DIR" \
+  rm -rf "$SCRATCH" "$RUN_DIR" "$SECOND_RUN_DIR" "$PROFILE_RUN_DIR" "$DEFERRED_RUN_DIR" \
     "$ENGLISH_RUN_DIR" "$MALFORMED_RUN_DIR" "$MARKED_RUN_DIR"
 }
 trap cleanup EXIT
@@ -496,7 +497,17 @@ set -e
 
 # Real reap: a delegated worker idle past the threshold is collected, and the
 # untagged session beside it survives.
-second="$($O delegate contract-second --agent glm-coder --run-dir "$RUN_DIR" --json)"
+# Even a run with no output is already owned once a worker was admitted.
+set +e
+reused_empty="$($O delegate reused-empty --agent glm-coder --run-dir "$RUN_DIR" --json 2>/dev/null)"
+reused_empty_rc=$?
+set -e
+[[ "$reused_empty_rc" -eq 2 && "$reused_empty" == *'"status":"invalid_contract"'* ]] \
+  || fail 'new delegation reused an already bound run directory without output'
+cp "$RUN_DIR/brief.md" "$SECOND_RUN_DIR/brief.md"
+cp "$RUN_DIR/contract.md" "$SECOND_RUN_DIR/contract.md"
+chmod 444 "$SECOND_RUN_DIR/brief.md" "$SECOND_RUN_DIR/contract.md"
+second="$($O delegate contract-second --agent glm-coder --run-dir "$SECOND_RUN_DIR" --json)"
 [[ "$second" == *'"status":"sent"'* ]] || fail 'second delegation did not dispatch'
 # Poll instead of a fixed sleep: under load the turn can finish late enough
 # that (now - window_activity) has not yet crossed the 1s idle threshold.
