@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one observable, read-only Sol planner and emit its validated final plan."""
+"""Run one observable, read-only Codex planner and emit its validated final plan."""
 
 from __future__ import annotations
 
@@ -53,6 +53,9 @@ class PlannerInterrupted(Exception):
         super().__init__(f"interrupted by signal {signum}")
 
 
+REQUIRED_SECTIONS = SECTIONS
+
+
 def validate_plan(plan: str) -> str:
     text = plan.strip()
     lines = text.splitlines()
@@ -63,24 +66,36 @@ def validate_plan(plan: str) -> str:
         raise ValueError(f"expected headings {SECTIONS!r}, got {tuple(headings)!r}")
     if len(text.split()) > 1_200:
         raise ValueError("plan exceeds the 1,200-word contract")
+    for i, (start, heading) in enumerate(matches):
+        end = matches[i + 1][0] if i + 1 < len(matches) else len(lines)
+        content = " ".join(lines[start + 1:end]).strip()
+        if heading in REQUIRED_SECTIONS and not content:
+            raise ValueError(f"{heading} section is empty")
     shape_start = matches[3][0] + 1
     shape_end = matches[4][0]
     shape = " ".join(lines[shape_start:shape_end]).upper()
     for dash in ("‐", "‑", "‒", "–", "—", "−"):
         shape = shape.replace(dash, "-")
-    if not re.search(r"\b(?:ROOT\s*-\s*DIRECT|FANOUT)\b", shape):
+    has_root = re.search(r"\bROOT\s*-\s*DIRECT\b", shape) is not None
+    has_fanout = re.search(r"\bFANOUT\b", shape) is not None
+    if has_root and has_fanout:
+        raise ValueError("EXECUTION SHAPE must choose exactly one of ROOT-DIRECT or FANOUT")
+    if not (has_root or has_fanout):
         raise ValueError("EXECUTION SHAPE must choose ROOT-DIRECT or FANOUT")
     return text
 
 
-def command(*, codex: str, output: Path, workdir: Path, brief: str) -> list[str]:
+def command(*, codex: str, output: Path, workdir: Path, brief: str, planner: str = "sol") -> list[str]:
+    models = {"sol": "gpt-5.6-sol", "astra": "gpt-6-astra"}
+    if not isinstance(planner, str) or planner not in models:
+        raise ValueError(f"unknown planner: {planner}")
     return [
         codex,
         "exec",
         "--ignore-user-config",
         "--ephemeral",
         "--model",
-        "gpt-5.6-sol",
+        models[planner],
         "--config",
         'model_reasoning_effort="ultra"',
         "--enable",
@@ -289,17 +304,19 @@ def _read_ready(
     return last_update
 
 
-def read_final_plan(output: Path) -> str:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+def read_final_plan(output: Path, planner: str = "sol") -> str:
+    # O_NONBLOCK keeps opening a FIFO/socket from blocking on a missing writer;
+    # the fstat below still rejects any non-regular file.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(output, flags)
     except FileNotFoundError as exc:
-        raise RuntimeError("Sol planner returned success without a final response") from exc
+        raise RuntimeError(f"{planner.title()} planner returned success without a final response") from exc
     except OSError as exc:
-        raise RuntimeError("Sol planner final response is not a regular file") from exc
+        raise RuntimeError(f"{planner.title()} planner final response is not a regular file") from exc
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise RuntimeError("Sol planner final response is not a regular file")
+            raise RuntimeError(f"{planner.title()} planner final response is not a regular file")
         with os.fdopen(fd, "rb", closefd=True) as handle:
             fd = -1
             payload = handle.read(MAX_PLAN_BYTES + 1)
@@ -307,15 +324,15 @@ def read_final_plan(output: Path) -> str:
         if fd >= 0:
             os.close(fd)
     if len(payload) > MAX_PLAN_BYTES:
-        raise RuntimeError(f"Sol planner final response exceeds {MAX_PLAN_BYTES} bytes")
+        raise RuntimeError(f"{planner.title()} planner final response exceeds {MAX_PLAN_BYTES} bytes")
     try:
         plan = payload.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
-        raise RuntimeError("Sol planner final response is not valid UTF-8") from exc
+        raise RuntimeError(f"{planner.title()} planner final response is not valid UTF-8") from exc
     try:
         return validate_plan(plan)
     except ValueError as exc:
-        raise RuntimeError(f"invalid Sol plan: {exc}") from exc
+        raise RuntimeError(f"invalid {planner.title()} plan: {exc}") from exc
 
 
 def _stderr_progress(message: str) -> None:
@@ -329,6 +346,7 @@ def run(
     codex: str = "codex",
     progress: Callable[[str], None] = _stderr_progress,
     heartbeat_seconds: float = 30,
+    planner: str = "sol",
 ) -> str:
     if not brief.strip():
         raise ValueError("the planning brief is empty")
@@ -340,12 +358,16 @@ def run(
     if not workdir.is_dir():
         raise ValueError(f"workdir is not a directory: {workdir}")
 
+    original_progress = progress
+    progress = lambda message: original_progress(message.replace("solplan:", f"{planner}plan:", 1))
     env = os.environ.copy()
+    env["OMAXX_PLANNER_CHILD"] = planner
     env["SOLPLAN_CHILD"] = "1"
+    env["ORCHESTRATORMAXXING_HARNESS_CHILD"] = "1"
     with tempfile.TemporaryDirectory(prefix="solplan-") as tmp:
         output = Path(tmp) / "plan.md"
         proc = subprocess.Popen(
-            command(codex=codex, output=output, workdir=workdir, brief=brief),
+            command(codex=codex, output=output, workdir=workdir, brief=brief, planner=planner),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -365,7 +387,7 @@ def run(
             selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
             started_at = last_update = time.monotonic()
             last_phase = "process launched"
-            progress("solplan: Sol Ultra planner launched; no wall-clock deadline")
+            progress(f"{planner}plan: {planner.title()} Ultra planner launched; no wall-clock deadline")
 
             while proc.poll() is None:
                 now = time.monotonic()
@@ -416,11 +438,11 @@ def run(
                 details.append(f"malformed events: {stats['malformed_events']}")
             if framer.oversized:
                 details.append(f"oversized events: {framer.oversized}")
-            raise RuntimeError(f"Sol planner exited with status {status} ({'; '.join(details)})")
-        return read_final_plan(output)
+            raise RuntimeError(f"{planner.title()} planner exited with status {status} ({'; '.join(details)})")
+        return read_final_plan(output, planner=planner)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, planner: str = "sol") -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workdir", default=os.getcwd())
     parser.add_argument("--heartbeat-seconds", type=float, default=30)
@@ -438,15 +460,15 @@ def main(argv: list[str] | None = None) -> int:
         previous_handlers[signum] = signal.signal(signum, interrupt)
     try:
         print(run(brief=sys.stdin.read(), workdir=Path(args.workdir),
-                  heartbeat_seconds=args.heartbeat_seconds, codex=args.codex_bin))
+                  heartbeat_seconds=args.heartbeat_seconds, codex=args.codex_bin, planner=planner))
     except PlannerInterrupted as exc:
-        print(f"solplan: {exc}", file=sys.stderr)
+        print(f"{planner}plan: {exc}", file=sys.stderr)
         return 128 + exc.signum
     except KeyboardInterrupt:
-        print("solplan: interrupted", file=sys.stderr)
+        print(f"{planner}plan: interrupted", file=sys.stderr)
         return 130
     except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
-        print(f"solplan: {exc}", file=sys.stderr)
+        print(f"{planner}plan: {exc}", file=sys.stderr)
         return 1
     finally:
         for signum, handler in previous_handlers.items():

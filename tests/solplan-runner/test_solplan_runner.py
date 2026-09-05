@@ -122,6 +122,31 @@ class SolplanRunnerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "EXECUTION SHAPE"):
             MODULE.validate_plan(false_shape)
 
+    def test_validate_plan_rejects_empty_required_sections(self):
+        bodies = {
+            "SUMMARY": "One bounded plan.",
+            "STEPS": "1. Read the target.",
+            "CONTRACT": "The check passes.",
+            "EXECUTION SHAPE": "ROOT-DIRECT",
+            "RISKS / ASSUMPTIONS": "None.",
+            "OUT OF SCOPE": "Implementation.",
+        }
+        for section in MODULE.SECTIONS:
+            with self.subTest(section=section):
+                empty = VALID_PLAN.replace(bodies[section], "")
+                with self.assertRaisesRegex(ValueError, f"{section} section is empty"):
+                    MODULE.validate_plan(empty)
+        # Explicit "None." is valid text, not an empty body.
+        MODULE.validate_plan(VALID_PLAN)
+
+    def test_validate_plan_rejects_conflicting_execution_shape(self):
+        conflicting = VALID_PLAN.replace("ROOT-DIRECT", "ROOT-DIRECT or FANOUT")
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            MODULE.validate_plan(conflicting)
+        # A single choice still passes, including the dash-normalized form.
+        self.assertIn("Root‑direct", MODULE.validate_plan(
+            VALID_PLAN.replace("ROOT-DIRECT", "Root‑direct")))
+
     def test_error_lifecycle_events_are_content_free(self):
         self.assertEqual(MODULE.event_progress({"type": "turn.failed"}),
                          "planning turn failed")
@@ -552,6 +577,20 @@ class SolplanRunnerTest(unittest.TestCase):
                 args = sys.argv[1:]
                 out = pathlib.Path(args[args.index("--output-last-message") + 1])
                 os.symlink({str(target)!r}, out)
+            """)
+            stdout, stderr, status = self.run_cli(root, fake)
+            self.assertEqual(status, 1)
+            self.assertEqual(stdout, "")
+            self.assertIn("not a regular file", stderr)
+
+    def test_final_plan_fifo_does_not_block_and_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake = self.make_fake(root, "fifo-plan-codex", f"""
+                import os, pathlib, sys
+                args = sys.argv[1:]
+                out = pathlib.Path(args[args.index("--output-last-message") + 1])
+                os.mkfifo(out)
             """)
             stdout, stderr, status = self.run_cli(root, fake)
             self.assertEqual(status, 1)

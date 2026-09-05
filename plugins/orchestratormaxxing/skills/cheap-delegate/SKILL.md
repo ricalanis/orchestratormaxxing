@@ -4,7 +4,7 @@ description: Route one bounded task to the cheapest adequate lane, verify it by 
 ---
 
 Route one bounded execution task; root Codex stays contract author, verifier, and
-final sign-off. Never plans or decomposes — `$orchestratormaxxing:solplan` designs,
+final sign-off. Never plans or decomposes — `$orchestratormaxxing:astraplan` designs,
 fanout takes independent chunks.
 
 1. Read `knowledge/delegation-playbook.md` (`## Codex lanes`), then run

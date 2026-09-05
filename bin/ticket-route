@@ -23,6 +23,31 @@ GATE_EXCLUDED_PATHS = (
 )
 
 
+def _canonical_repo_path(path):
+    """Canonicalize a repo-relative path, or return None if it is not one.
+
+    Accepts only repo-relative paths: strips a leading './' and interior '.'
+    segments, and rejects absolute paths, '..' escapes, and empty results.
+    Deliberately does NOT resolve symlinks — this is lexical only, so it makes
+    no claim of filesystem symlink independence.
+    """
+    if not isinstance(path, str):
+        return None
+    p = path.strip()
+    if not p or p.startswith("/"):
+        return None
+    parts = []
+    for part in p.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            return None
+        parts.append(part)
+    if not parts:
+        return None
+    return "/".join(parts)
+
+
 def reject(reasons):
     return {
         "valid": False,
@@ -48,7 +73,8 @@ def validate(ticket):
         if not isinstance(values, list):
             reasons.append(f"{field} must be a list")
         else:
-            reasons.extend(f"unknown {field[:-1]}: {x}" for x in values if x not in allowed)
+            reasons.extend(f"unknown {field[:-1]}: {x}" for x in values
+                           if not isinstance(x, str) or x not in allowed)
     diff = ticket.get("diff")
     if diff is not None:
         if not isinstance(diff, dict):
@@ -60,8 +86,16 @@ def validate(ticket):
             fl = diff.get("files")
             if not isinstance(fl, list) or not all(isinstance(x, str) and x.strip() for x in fl):
                 reasons.append("diff.files must be a list of non-empty path strings")
+            else:
+                # Canonicalize repo-relative paths so a './install.sh' alias cannot
+                # clear protected review. Noncanonical paths reject the contract.
+                canonical = [_canonical_repo_path(x) for x in fl]
+                if any(c is None for c in canonical):
+                    reasons.append("diff.files must be canonical repo-relative paths")
+                else:
+                    diff["files"] = canonical
     scale = ticket.get("scale", "standard")
-    if scale not in SUPPORTED_SCALES:
+    if not isinstance(scale, str) or scale not in SUPPORTED_SCALES:
         reasons.append(f"unknown scale: {scale}")
     elif scale == "trivial":
         chunks = ticket.get("chunks", [])
@@ -86,17 +120,47 @@ def fanout_blockers(ticket):
         if chunk.get("depends_on"):
             blockers.append(f"chunk {chunk['id']}: has dependencies")
         files = chunk.get("files")
-        if not isinstance(files, list) or any(not isinstance(x, str) or not x for x in files):
+        if not isinstance(files, list) or not files or any(not isinstance(x, str) or not x for x in files):
             blockers.append(f"chunk {chunk['id']}: files missing or invalid")
             files = []
+        else:
+            # Canonicalize repo-relative ownership paths. Aliases (./x), ancestor
+            # ownership (src owning src/file.py), absolute and escaping paths are
+            # all rejected so a chunk can never receive fanout on a path it does
+            # not own. Nonempty file ownership is required.
+            canonical = [_canonical_repo_path(x) for x in files]
+            if any(c is None for c in canonical):
+                blockers.append(f"chunk {chunk['id']}: files must be canonical repo-relative paths")
+                files = []
+            else:
+                # A path that differs from its canonical form is an alias (e.g.
+                # './x' or 'a/./b') — reject it so fanout never rides a noncanonical
+                # ownership declaration.
+                if any(c != x.strip() for c, x in zip(canonical, files)):
+                    blockers.append(f"chunk {chunk['id']}: files must be canonical repo-relative paths")
+                    files = []
+                else:
+                    files = canonical
         if seen.intersection(files):
             blockers.append(f"chunk {chunk['id']}: shares files with another chunk")
+        # Ancestor ownership: a chunk owning a directory (or a path that prefixes
+        # another chunk's file) would receive fanout on paths it does not own.
+        for f in files:
+            if any(f == s or f.startswith(s + "/") or s.startswith(f + "/") for s in seen):
+                blockers.append(f"chunk {chunk['id']}: ancestor ownership overlaps another chunk")
+                break
         seen.update(files)
         # Story-file rule: a dispatched chunk carries its own context — the worker
         # must never re-derive inputs the orchestrator already has.
         brief = chunk.get("brief")
         if not isinstance(brief, str) or not brief.strip():
             blockers.append(f"chunk {chunk['id']}: missing self-contained brief")
+        # A dispatched chunk must carry its own acceptance contract — fanout is
+        # only safe when each worker knows exactly what "correct" means.
+        criteria = chunk.get("acceptance_criteria")
+        if not isinstance(criteria, list) or not criteria or \
+                not all(isinstance(x, str) and x.strip() for x in criteria):
+            blockers.append(f"chunk {chunk['id']}: missing acceptance criteria")
     return blockers
 
 
