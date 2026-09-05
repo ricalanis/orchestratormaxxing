@@ -425,7 +425,7 @@ _o_clear_output() {
   return 0
 }
 
-_o_send_worker() {
+_o_send_worker() (
   local sess="${1:-}" prompt_text="" as_json=0
   [[ -n "$sess" ]] || { echo 'o send: SESSION is required' >&2; return 2; }
   shift
@@ -451,6 +451,15 @@ _o_send_worker() {
   # if the artifact cannot be cleared, do not dispatch on top of it.
   local send_run_abs
   send_run_abs="$(_o_worker_option "$sess" @orchestratormaxxing_run_dir)"
+  [[ -n "$send_run_abs" && -d "$send_run_abs" ]] || return 4
+  local output_lock="$send_run_abs/.output-operation"
+  if ! (umask 077; mkdir -- "$output_lock") 2>/dev/null; then
+    [[ "$as_json" == 1 ]] && _o_json_status lock_unavailable "$sess" 'another output operation is active or its lock remains; retry after it finishes or use a fresh run-dir'
+    return 4
+  fi
+  trap 'rmdir -- "$output_lock" 2>/dev/null || true' EXIT
+  # Recheck after acquiring the lock: another sender may have advanced the turn.
+  _o_wait_ready "$sess" || { [[ "$as_json" == 1 ]] && _o_json_status not_ready "$sess" 'worker is busy or unreadable'; return 4; }
   if ! _o_clear_output "$send_run_abs"; then
     [[ "$as_json" == 1 ]] && _o_json_status invalidate_failed "$sess" 'could not clear previous output.md before dispatch'
     return 4
@@ -480,7 +489,7 @@ _o_send_worker() {
   else
     printf '%s\n' "$sess"
   fi
-}
+)
 
 # Machine-only turn runner for delegated workers (runs INSIDE the worker pane).
 # The OpenTUI cannot be born reliably in a clientless pane (measured 2026-09-01:
@@ -700,7 +709,7 @@ print(o["opencode_session_id"]); print(o["message_id"])' "$run_abs/binding.json"
   fi
 }
 
-_o_handoff_worker() {
+_o_handoff_worker() (
   local sess="${1:-}" timeout="${O_HANDOFF_TIMEOUT_SECONDS:-600}" as_json=0
   [[ -n "$sess" ]] || { echo 'o handoff: SESSION is required' >&2; return 2; }
   shift
@@ -722,6 +731,17 @@ _o_handoff_worker() {
     [[ "$as_json" == 1 ]] && _o_json_status unbound "$sess" 'worker has no durable turn binding'
     return 4
   }
+  [[ -d "$run_abs" ]] || return 4
+  local output_lock="$run_abs/.output-operation"
+  if ! (umask 077; mkdir -- "$output_lock") 2>/dev/null; then
+    [[ "$as_json" == 1 ]] && _o_json_status lock_unavailable "$sess" 'another output operation is active or its lock remains; retry after it finishes or use a fresh run-dir'
+    return 4
+  fi
+  trap 'rmdir -- "$output_lock" 2>/dev/null || true' EXIT
+  # Handoff publication and send invalidation share one portable atomic lock.
+  # Capture the turn again inside it so an old reader cannot publish after send.
+  turn="$(_o_worker_option "$sess" @orchestratormaxxing_turn)"
+  [[ "$turn" =~ ^[1-9][0-9]*$ ]] || return 4
   file="$run_abs/handoff.json"
   ticks=$((timeout * 5))
   while :; do
@@ -809,7 +829,7 @@ except Exception as exc:
     if as_json: print(json.dumps(row,separators=(",",":")))
     else: print("o handoff: malformed_handoff",file=sys.stderr)
     raise SystemExit(65)' "$file" "$sess" "$turn" "$as_json" "$run_abs"
-}
+)
 
 _o_output_worker() {
   local sess="${1:-}" lines=80 as_json=0

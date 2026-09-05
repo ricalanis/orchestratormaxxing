@@ -331,6 +331,21 @@ PY
 [[ "$(cat "$RUN_DIR/output.md")" == "FINAL-TURN-2" ]] \
   || fail 'turn-2 handoff did not republish output.md'
 
+# Another lifecycle operation holds the artifact lock. Both clients must fail
+# without removing its lock or changing the completed result.
+mkdir "$RUN_DIR/.output-operation"
+set +e
+locked_send="$($O send opencode-contract-first --prompt repair --json)"; locked_send_rc=$?
+locked_handoff="$($O handoff opencode-contract-first --timeout 0 --json)"; locked_handoff_rc=$?
+set -e
+[[ "$locked_send_rc" -eq 4 && "$locked_send" == *'"status":"lock_unavailable"'* ]] \
+  || fail 'send bypassed an active output operation'
+[[ "$locked_handoff_rc" -eq 4 && "$locked_handoff" == *'"status":"lock_unavailable"'* ]] \
+  || fail 'handoff bypassed an active output operation'
+[[ -d "$RUN_DIR/.output-operation" && "$(cat "$RUN_DIR/output.md")" == "FINAL-TURN-2" ]] \
+  || fail 'contending operation changed another operation lock or output'
+rmdir "$RUN_DIR/.output-operation"
+
 # Terminal states stay distinct. None may degrade to a generic empty pane or
 # accidentally return the previous repair's text.
 for spec in \
