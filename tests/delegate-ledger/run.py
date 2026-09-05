@@ -795,6 +795,132 @@ def c20():
             "an unparseable newest_ts must not confer authority"
 
 
+def c21():
+    """Different models retain their verdicts; retries remain idempotent."""
+    with tempfile.TemporaryDirectory() as store:
+        base = ["record", "--run-id", "models", "--class", "review", "--lane", "oll"]
+        for model, verdict in (("model-a", "pass"), ("model-b", "fail"),
+                               (None, "infra"), ("None", "pass"), ("model-ñ", "pass")):
+            args = base + ["--verdict", verdict]
+            if model is not None:
+                args += ["--model", model]
+            run(args, store)
+            run(args, store)
+        rs = rows(store)
+        assert len(rs) == 5, f"distinct models must retain five rows, got {len(rs)}"
+        assert {r["model"]: r["verdict"] for r in rs} == {
+            "model-a": "pass", "model-b": "fail", None: "infra",
+            "None": "pass", "model-ñ": "pass"}
+        assert len({r["id"] for r in rs}) == 5
+
+
+def c22():
+    """Historical IDs remain readable; equal labels do not erase new evidence."""
+    with tempfile.TemporaryDirectory() as store:
+        base = ["record", "--run-id", "legacy", "--class", "review", "--lane", "oll",
+                "--verdict", "pass"]
+        run(base + ["--model", "model-a"], store)
+        legacy = rows(store)[0]
+        legacy["id"] = "dl-" + hashlib.sha1(b"legacy\x001\x00oll").hexdigest()[:8]
+        path = os.path.join(store, "delegation-ledger.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(legacy) + "\n")
+        with open(path, "rb") as fh:
+            before = fh.read()
+        run(base + ["--model", "model-a"], store)
+        with open(path, "rb") as fh:
+            assert fh.read() == before, "legacy retry must not rewrite or append"
+        run(base + ["--model", "model-b"], store)
+        assert len(rows(store)) == 2, "a new model on a historical run must append"
+
+        # Simulate a short-hash collision using a different identity's derived label.
+        other = rows(store)[1]
+        legacy["id"] = other["id"]
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(legacy) + "\n")
+        run(base + ["--model", "model-b"], store)
+        assert len(rows(store)) == 2, "a matching label must not suppress a distinct identity"
+
+        # Older rows may omit model entirely; missing and explicit null agree.
+        legacy.pop("model")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(legacy) + "\n")
+        run(base, store)
+        assert rows(store) == [legacy], "an absent legacy model must match an unmodelled retry"
+
+
+def c23():
+    """Receipt imports and direct records use the same per-model identity."""
+    with tempfile.TemporaryDirectory() as store:
+        rdir = os.path.join(store, "receipts")
+        run(["record", "--run-id", "import-models", "--class", "review", "--lane", "oll",
+             "--model", "model-a", "--verdict", "pass"], store)
+        for name, model, verdict in (("a", "model-a", "pass"),
+                                     ("b", "model-b", "fail"),
+                                     ("c", None, "infra"), ("d", "None", "pass")):
+            directory = os.path.join(rdir, name)
+            os.makedirs(directory)
+            with open(os.path.join(directory, "receipt.json"), "w", encoding="utf-8") as fh:
+                json.dump({"run_id": "import-models", "task_class": "review",
+                           "lane": "oll", "model": model, "contract_verdict": verdict}, fh)
+        run(["import", "--dir", rdir], store)
+        imported = rows(store)
+        assert len(imported) == 4, f"import must preserve each model, got {len(imported)}"
+        assert {r["model"]: r["verdict"] for r in imported} == {
+            "model-a": "pass", "model-b": "fail", None: "infra", "None": "pass"}
+        assert len({r["id"] for r in imported}) == 4
+        run(["import", "--dir", rdir], store)
+        for row in imported:
+            args = ["record", "--run-id", "import-models", "--class", "review",
+                    "--lane", "oll", "--verdict", row["verdict"]]
+            if row["model"] is not None:
+                args += ["--model", row["model"]]
+            run(args, store)
+        assert rows(store) == imported, "reimport and direct retry must both be no-ops"
+
+
+def c24():
+    """Import keeps accepting JSON-valued models and unambiguous field boundaries."""
+    with tempfile.TemporaryDirectory() as store:
+        rdir = os.path.join(store, "receipts")
+        fixtures = [("json-models", {"name": "model-a", "options": [1, 2]}),
+                    ("json-models", {"options": [1, 2], "name": "model-a"}),
+                    ("json-models", ["model-a"]),
+                    ("embedded\u0000field", "model-a"),
+                    ("embedded", "field\u0000model-a")]
+        for index, (run_id, model) in enumerate(fixtures):
+            directory = os.path.join(rdir, str(index))
+            os.makedirs(directory)
+            with open(os.path.join(directory, "receipt.json"), "w", encoding="utf-8") as fh:
+                json.dump({"run_id": run_id, "task_class": "review", "lane": "oll",
+                           "model": model, "contract_verdict": "pass"}, fh)
+        run(["import", "--dir", rdir], store)
+        imported = rows(store)
+        assert len(imported) == 4, "JSON models and field boundaries must have stable identities"
+        run(["import", "--dir", rdir], store)
+        assert rows(store) == imported
+
+
+def c25():
+    """The lock protects deduplication for matching and distinct model identities."""
+    with tempfile.TemporaryDirectory() as store:
+        env = dict(os.environ, DELEGATE_LEDGER_DIR=store, DELEGATE_LEDGER_NOW=iso(NOW))
+        env.pop("ORCHESTRATORMAXXING_HARNESS_CHILD", None)
+        children = []
+        for model in ["model-a", "model-b"] * 4:
+            children.append(subprocess.Popen(
+                [sys.executable, TOOL, "record", "--run-id", "concurrent-models",
+                 "--class", "review", "--lane", "oll", "--model", model,
+                 "--verdict", "pass"], env=env, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True))
+        for child in children:
+            stdout, stderr = child.communicate(timeout=20)
+            assert child.returncode == 0, (stdout, stderr)
+        rs = rows(store)
+        assert len(rs) == 2, f"concurrent retries must produce two complete rows, got {len(rs)}"
+        assert {r["model"] for r in rs} == {"model-a", "model-b"}
+
+
 def main():
     if not os.path.exists(TOOL):
         print(f"FAIL: {TOOL} does not exist")
@@ -819,7 +945,12 @@ def main():
                      ("C17 hand-authored receipts flagged at the ledger", c17),
                      ("C18 ranking tiebreakers among competing lanes", c18),
                      ("C19 list surface", c19),
-                     ("C20 normalization variants + import skips", c20)):
+                     ("C20 normalization variants + import skips", c20),
+                     ("C21 per-model records and retries", c21),
+                     ("C22 legacy identity and label collisions", c22),
+                     ("C23 per-model import and cross-writer retries", c23),
+                     ("C24 JSON model compatibility", c24),
+                     ("C25 concurrent per-model deduplication", c25)):
         check(name, fn)
     print(f"# {CHECKS - len(FAILS)}/{CHECKS} checks passed")
     if FAILS:
