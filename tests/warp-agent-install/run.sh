@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Exercise non-login/container environments too; installer derives the account.
+unset USER
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TMP="$(mktemp -d)"
@@ -256,13 +258,15 @@ for rc in (home / ".bashrc", home / ".zshrc"):
     assert text.count("# >>> orchestratormaxxing:c-command >>>") == 1
     assert text.count("warp-recovery.sh") == 2
 
-names = ["warp-agent-event", "warp-agent-recovery", "codex-stop-hook", "tmux-send", "o"]
+names = ["warp-agent-event", "warp-agent-recovery", "codex-stop-hook", "tmux-send", "o", "intent-queue"]
 if (pathlib.Path(sys.argv[2]) / "install-fleet.sh").is_file():   # fleet bridges ship only from the private half
     names += ["gpu-agent", "harness-remote"]
 for name in names:
     deployed = home / ".local/bin" / name
     assert deployed.is_file()
     assert deployed.stat().st_mode & 0o111
+    if name == "intent-queue":
+        assert deployed.read_bytes() == (pathlib.Path(sys.argv[2]) / "bin" / name).read_bytes()
 
 for name in ("warp-recovery.sh", "claude-c.sh", "codex-g.sh", "opencode-o.sh"):
     deployed = home / ".config/orchestratormaxxing" / name

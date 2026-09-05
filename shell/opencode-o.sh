@@ -412,7 +412,20 @@ _o_submit_run_turn() {
     "ORCHESTRATORMAXXING_HARNESS_CHILD=1 ORCHESTRATORMAXXING_O_DELEGATED=1 ORCHESTRATORMAXXING_O_SHELL=$(printf '%q' "${ORCHESTRATORMAXXING_O_SHELL:-$HOME/.config/orchestratormaxxing/opencode-o.sh}") O_TURN_TIMEOUT_SECONDS=$(printf '%q' "${O_TURN_TIMEOUT_SECONDS:-600}") $cmd" 2>/dev/null
 }
 
-_o_send_worker() {
+_o_clear_output() {
+  # Invalidate a previous turn's output.md before a new dispatch or on an owned
+  # stale/pending/malformed handoff, so it can never certify a new turn's pass
+  # receipt. Removes the link itself (never follows it) and fails closed if the
+  # artifact cannot be removed — a caller must not proceed on a stale artifact.
+  local run_abs="$1"
+  [[ -n "$run_abs" && -d "$run_abs" ]] || return 1
+  if [[ -e "$run_abs/output.md" || -L "$run_abs/output.md" ]]; then
+    rm -f -- "$run_abs/output.md" || return 1
+  fi
+  return 0
+}
+
+_o_send_worker() (
   local sess="${1:-}" prompt_text="" as_json=0
   [[ -n "$sess" ]] || { echo 'o send: SESSION is required' >&2; return 2; }
   shift
@@ -433,6 +446,24 @@ _o_send_worker() {
     return "$rc"
   }
   _o_wait_ready "$sess" || { [[ "$as_json" == 1 ]] && _o_json_status not_ready "$sess" 'worker is busy or unreadable'; return 4; }
+  # A new turn invalidates the previous turn's output.md before dispatch, so a
+  # stale artifact can never certify the new turn's pass receipt. Fail closed:
+  # if the artifact cannot be cleared, do not dispatch on top of it.
+  local send_run_abs
+  send_run_abs="$(_o_worker_option "$sess" @orchestratormaxxing_run_dir)"
+  [[ -n "$send_run_abs" && -d "$send_run_abs" ]] || return 4
+  local output_lock="$send_run_abs/.output-operation"
+  if ! (umask 077; mkdir -- "$output_lock") 2>/dev/null; then
+    [[ "$as_json" == 1 ]] && _o_json_status lock_unavailable "$sess" 'another output operation is active or its lock remains; retry after it finishes or use a fresh run-dir'
+    return 4
+  fi
+  trap 'rmdir -- "$output_lock" 2>/dev/null || true' EXIT
+  # Recheck after acquiring the lock: another sender may have advanced the turn.
+  _o_wait_ready "$sess" || { [[ "$as_json" == 1 ]] && _o_json_status not_ready "$sess" 'worker is busy or unreadable'; return 4; }
+  if ! _o_clear_output "$send_run_abs"; then
+    [[ "$as_json" == 1 ]] && _o_json_status invalidate_failed "$sess" 'could not clear previous output.md before dispatch'
+    return 4
+  fi
   old_turn="$(_o_worker_option "$sess" @orchestratormaxxing_turn)"
   [[ "$old_turn" =~ ^[0-9]+$ ]] || old_turn=0
   new_turn=$((old_turn + 1))
@@ -458,7 +489,7 @@ _o_send_worker() {
   else
     printf '%s\n' "$sess"
   fi
-}
+)
 
 # Machine-only turn runner for delegated workers (runs INSIDE the worker pane).
 # The OpenTUI cannot be born reliably in a clientless pane (measured 2026-09-01:
@@ -678,7 +709,7 @@ print(o["opencode_session_id"]); print(o["message_id"])' "$run_abs/binding.json"
   fi
 }
 
-_o_handoff_worker() {
+_o_handoff_worker() (
   local sess="${1:-}" timeout="${O_HANDOFF_TIMEOUT_SECONDS:-600}" as_json=0
   [[ -n "$sess" ]] || { echo 'o handoff: SESSION is required' >&2; return 2; }
   shift
@@ -700,6 +731,17 @@ _o_handoff_worker() {
     [[ "$as_json" == 1 ]] && _o_json_status unbound "$sess" 'worker has no durable turn binding'
     return 4
   }
+  [[ -d "$run_abs" ]] || return 4
+  local output_lock="$run_abs/.output-operation"
+  if ! (umask 077; mkdir -- "$output_lock") 2>/dev/null; then
+    [[ "$as_json" == 1 ]] && _o_json_status lock_unavailable "$sess" 'another output operation is active or its lock remains; retry after it finishes or use a fresh run-dir'
+    return 4
+  fi
+  trap 'rmdir -- "$output_lock" 2>/dev/null || true' EXIT
+  # Handoff publication and send invalidation share one portable atomic lock.
+  # Capture the turn again inside it so an old reader cannot publish after send.
+  turn="$(_o_worker_option "$sess" @orchestratormaxxing_turn)"
+  [[ "$turn" =~ ^[1-9][0-9]*$ ]] || return 4
   file="$run_abs/handoff.json"
   ticks=$((timeout * 5))
   while :; do
@@ -710,6 +752,10 @@ raise SystemExit(0 if o.get("worker_session")==sys.argv[2] and o.get("turn")==in
       break
     fi
     [[ "$waited" -lt "$ticks" ]] || {
+      # Owned stale/malformed/pending handoff: the turn never produced a valid
+      # terminal event, so a previous turn's output.md must not remain eligible
+      # for a passing receipt. Clear it; the handoff already fails closed.
+      _o_clear_output "$run_abs" || true
       pending="$(_o_worker_option "$sess" @orchestratormaxxing_pending)"
       [[ "$as_json" == 1 ]] && _o_json_status readiness_failure "$sess" "turn $turn pending=${pending:-unknown}"
       return 4
@@ -717,8 +763,27 @@ raise SystemExit(0 if o.get("worker_session")==sys.argv[2] and o.get("turn")==in
     sleep 0.2
     waited=$((waited + 1))
   done
-  python3 -c 'import json,sys
-path,worker,turn,as_json=sys.argv[1],sys.argv[2],int(sys.argv[3]),sys.argv[4]=="1"
+  python3 -c 'import json,os,sys,tempfile
+path,worker,turn,as_json,run_abs=sys.argv[1],sys.argv[2],int(sys.argv[3]),sys.argv[4]=="1",sys.argv[5]
+def publish(text):
+    # Atomic durable output: write a temp sibling, fsync, chmod 0600, then
+    # os.replace so a reader never sees a partial output.md. No symlink-following
+    # writes: os.replace over a symlink replaces the link itself, never its target.
+    fd,tmp=tempfile.mkstemp(prefix=".output.md.",dir=run_abs)
+    try:
+        with os.fdopen(fd,"w",encoding="utf-8") as f:
+            f.write(text); f.flush(); os.fsync(f.fileno())
+        os.chmod(tmp,0o600)
+        os.replace(tmp,os.path.join(run_abs,"output.md"))
+    finally:
+        if os.path.exists(tmp): os.unlink(tmp)
+def clear_stale():
+    # A failed/invalid/stale turn must not leave a previous turn output.md
+    # eligible for a passing receipt on the new turn.
+    try:
+        os.unlink(os.path.join(run_abs,"output.md"))
+    except OSError:
+        pass
 try:
     o=json.load(open(path))
     required={"schema_version","worker_session","turn","opencode_session_id",
@@ -740,6 +805,10 @@ try:
         status="provider_empty"; rc=65
     elif n>65536:
         status="oversize"; rc=65
+    if rc==0:
+        publish(text)
+    else:
+        clear_stale()
     row={"status":status,"session":worker,"turn":turn,
          "opencode_session":o["opencode_session_id"],
          "message_id":o["message_id"],"finish":finish,
@@ -754,12 +823,13 @@ try:
 except SystemExit:
     raise
 except Exception as exc:
+    clear_stale()
     row={"status":"malformed_handoff","session":worker,"turn":turn,
          "detail":str(exc)[:80]}
     if as_json: print(json.dumps(row,separators=(",",":")))
     else: print("o handoff: malformed_handoff",file=sys.stderr)
-    raise SystemExit(65)' "$file" "$sess" "$turn" "$as_json"
-}
+    raise SystemExit(65)' "$file" "$sess" "$turn" "$as_json" "$run_abs"
+)
 
 _o_output_worker() {
   local sess="${1:-}" lines=80 as_json=0
@@ -1037,6 +1107,20 @@ while True:
   fi
   if ! turn1_mode="$(_o_validate_turn1_brief "$brief")"; then
     [[ "$as_json" == 1 ]] && _o_json_status invalid_turn1_task '' "$turn1_mode"
+    return 2
+  fi
+  # A run directory belongs to one worker session, including before its first
+  # output. Refuse legacy runtime traces and atomically claim fresh admission;
+  # otherwise a concurrent/late handoff could publish into a new worker's run.
+  local prior_artifact
+  for prior_artifact in output.md binding.json handoff.json turn-1.prompt; do
+    if [[ -e "$run_abs/$prior_artifact" || -L "$run_abs/$prior_artifact" ]]; then
+      [[ "$as_json" == 1 ]] && _o_json_status invalid_contract '' 'run-dir already contains worker evidence; use a fresh run-dir'
+      return 2
+    fi
+  done
+  if ! (umask 077; mkdir -- "$run_abs/.delegation-started") 2>/dev/null; then
+    [[ "$as_json" == 1 ]] && _o_json_status invalid_contract '' 'run-dir is already claimed or unavailable; use a fresh run-dir'
     return 2
   fi
   contract_sha="$(_o_sha256 "$contract")" || return 2

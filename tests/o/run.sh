@@ -13,12 +13,13 @@ TMUX_BIN="$(command -v tmux)"
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/o-runtime.XXXXXX")"
 STUBS="$SCRATCH/bin"
 RUN_DIR="$ROOT/.results/delegation/o-runtime-$$"
+SECOND_RUN_DIR="$ROOT/.results/delegation/o-runtime-second-$$"
 PROFILE_RUN_DIR="$ROOT/.results/delegation/o-runtime-profile-$$"
 DEFERRED_RUN_DIR="$ROOT/.results/delegation/o-runtime-deferred-$$"
 ENGLISH_RUN_DIR="$ROOT/.results/delegation/o-runtime-english-deferred-$$"
 MALFORMED_RUN_DIR="$ROOT/.results/delegation/o-runtime-malformed-$$"
 MARKED_RUN_DIR="$ROOT/.results/delegation/o-runtime-marked-$$"
-mkdir -p "$STUBS" "$RUN_DIR" "$PROFILE_RUN_DIR" "$DEFERRED_RUN_DIR" \
+mkdir -p "$STUBS" "$RUN_DIR" "$SECOND_RUN_DIR" "$PROFILE_RUN_DIR" "$DEFERRED_RUN_DIR" \
   "$ENGLISH_RUN_DIR" "$MALFORMED_RUN_DIR" "$MARKED_RUN_DIR"
 export TMUX_TMPDIR="$SCRATCH/tmux"
 mkdir -p "$TMUX_TMPDIR"
@@ -28,7 +29,7 @@ cleanup() {
   while IFS= read -r session; do
     [[ -n "$session" ]] && tmux kill-session -t "=$session" 2>/dev/null || true
   done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
-  rm -rf "$SCRATCH" "$RUN_DIR" "$PROFILE_RUN_DIR" "$DEFERRED_RUN_DIR" \
+  rm -rf "$SCRATCH" "$RUN_DIR" "$SECOND_RUN_DIR" "$PROFILE_RUN_DIR" "$DEFERRED_RUN_DIR" \
     "$ENGLISH_RUN_DIR" "$MALFORMED_RUN_DIR" "$MARKED_RUN_DIR"
 }
 trap cleanup EXIT
@@ -237,7 +238,18 @@ sleep 1
 marked_handoff="$($O handoff opencode-marked-turn1 --timeout 5 --json)"
 [[ "$marked_handoff" == *'"status":"completed_retrievable"'* ]] \
   || fail 'valid marked turn-1 task did not complete'
+[[ "$(cat "$MARKED_RUN_DIR/output.md")" == "FINAL-TURN-1" ]] \
+  || fail 'completed handoff did not atomically publish exact UTF-8 output.md'
 $O close opencode-marked-turn1 --json >/dev/null
+# Completed run directories retain their evidence; a new worker needs a fresh one.
+set +e
+reused="$($O delegate reused-result --agent glm-coder --run-dir "$MARKED_RUN_DIR" --json 2>/dev/null)"
+reused_rc=$?
+set -e
+[[ "$reused_rc" -eq 2 && "$reused" == *'"status":"invalid_contract"'* ]] \
+  || fail 'new delegation accepted a previous output artifact'
+[[ "$(cat "$MARKED_RUN_DIR/output.md")" == "FINAL-TURN-1" ]] \
+  || fail 'refusing reused evidence changed the previous output'
 
 delegated="$($O delegate contract-first --agent glm-coder --run-dir "$RUN_DIR" --json)"
 python3 - "$delegated" <<'PY'
@@ -300,6 +312,8 @@ assert row["status"] == "completed_retrievable", row
 assert row["turn"] == 1 and row["text"] == "FINAL-TURN-1", row
 assert row["opencode_session"].startswith("ses_fake"), row
 PY
+[[ "$(cat "$RUN_DIR/output.md")" == "FINAL-TURN-1" ]] \
+  || fail 'turn-1 handoff did not publish output.md'
 
 # Follow-up stays in the same session and uses the literal-safe tmux-send path.
 before="$(tmux list-sessions -F '#{session_name}' | wc -l)"
@@ -315,6 +329,23 @@ import json, sys
 row = json.loads(sys.argv[1])
 assert row["turn"] == 2 and row["text"] == "FINAL-TURN-2", row
 PY
+[[ "$(cat "$RUN_DIR/output.md")" == "FINAL-TURN-2" ]] \
+  || fail 'turn-2 handoff did not republish output.md'
+
+# Another lifecycle operation holds the artifact lock. Both clients must fail
+# without removing its lock or changing the completed result.
+mkdir "$RUN_DIR/.output-operation"
+set +e
+locked_send="$($O send opencode-contract-first --prompt repair --json)"; locked_send_rc=$?
+locked_handoff="$($O handoff opencode-contract-first --timeout 0 --json)"; locked_handoff_rc=$?
+set -e
+[[ "$locked_send_rc" -eq 4 && "$locked_send" == *'"status":"lock_unavailable"'* ]] \
+  || fail 'send bypassed an active output operation'
+[[ "$locked_handoff_rc" -eq 4 && "$locked_handoff" == *'"status":"lock_unavailable"'* ]] \
+  || fail 'handoff bypassed an active output operation'
+[[ -d "$RUN_DIR/.output-operation" && "$(cat "$RUN_DIR/output.md")" == "FINAL-TURN-2" ]] \
+  || fail 'contending operation changed another operation lock or output'
+rmdir "$RUN_DIR/.output-operation"
 
 # Terminal states stay distinct. None may degrade to a generic empty pane or
 # accidentally return the previous repair's text.
@@ -325,6 +356,10 @@ for spec in \
   'OVERSIZE_FINAL:oversize'; do
   prompt="${spec%%:*}"; want="${spec#*:}"
   "$O" send opencode-contract-first --prompt "$prompt" --json >/dev/null
+  # A new dispatch must invalidate the previous turn's output.md before it can
+  # certify the new turn's pass receipt (turn-2 published FINAL-TURN-2 above).
+  [[ -e "$RUN_DIR/output.md" ]] \
+    && fail "$want send dispatched while previous output.md remained eligible"
   set +e
   typed="$($O handoff opencode-contract-first --timeout 5 --json)"
   typed_rc=$?
@@ -336,6 +371,8 @@ row = json.loads(sys.argv[1])
 assert row["status"] == sys.argv[2], row
 assert row.get("text", "") != "FINAL-TURN-2", row
 PY
+  [[ -e "$RUN_DIR/output.md" ]] \
+    && fail "$want handoff left a stale output.md eligible for a passing receipt"
 done
 
 # Bounded read distinguishes captured, truly empty, missing, and unreadable.
@@ -416,6 +453,9 @@ tmux has-session -t '=opencode-contract-first' 2>/dev/null || fail 'dry-run reap
 # and a second send both fail with distinct typed states; neither may submit an
 # overlapping task or fall back to pane lore.
 O_TURN_TIMEOUT_SECONDS=300 $O send opencode-contract-first --prompt NO_EVENT --json >/dev/null
+# An owned pending/stale handoff must invalidate a previous turn's output.md so
+# it cannot certify a pass receipt for the never-completed turn.
+printf 'stale previous turn' > "$RUN_DIR/output.md"
 set +e
 pending="$($O handoff opencode-contract-first --timeout 0 --json)"
 pending_rc=$?
@@ -424,6 +464,8 @@ overlap_rc=$?
 set -e
 [[ "$pending_rc" -eq 4 && "$pending" == *'"status":"readiness_failure"'* ]] \
   || fail 'pending turn was not a typed readiness failure'
+[[ ! -e "$RUN_DIR/output.md" ]] \
+  || fail 'pending handoff left a stale output.md eligible for a passing receipt'
 [[ "$overlap_rc" -eq 4 && "$overlap" == *'"status":"not_ready"'* ]] \
   || fail 'overlapping send was not refused as not_ready'
 
@@ -455,7 +497,17 @@ set -e
 
 # Real reap: a delegated worker idle past the threshold is collected, and the
 # untagged session beside it survives.
-second="$($O delegate contract-second --agent glm-coder --run-dir "$RUN_DIR" --json)"
+# Even a run with no output is already owned once a worker was admitted.
+set +e
+reused_empty="$($O delegate reused-empty --agent glm-coder --run-dir "$RUN_DIR" --json 2>/dev/null)"
+reused_empty_rc=$?
+set -e
+[[ "$reused_empty_rc" -eq 2 && "$reused_empty" == *'"status":"invalid_contract"'* ]] \
+  || fail 'new delegation reused an already bound run directory without output'
+cp "$RUN_DIR/brief.md" "$SECOND_RUN_DIR/brief.md"
+cp "$RUN_DIR/contract.md" "$SECOND_RUN_DIR/contract.md"
+chmod 444 "$SECOND_RUN_DIR/brief.md" "$SECOND_RUN_DIR/contract.md"
+second="$($O delegate contract-second --agent glm-coder --run-dir "$SECOND_RUN_DIR" --json)"
 [[ "$second" == *'"status":"sent"'* ]] || fail 'second delegation did not dispatch'
 # Poll instead of a fixed sleep: under load the turn can finish late enough
 # that (now - window_activity) has not yet crossed the 1s idle threshold.

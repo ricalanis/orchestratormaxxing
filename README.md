@@ -65,6 +65,29 @@ join a fleet or personalize, copy `deploy/fleet.env.example` to
 seeds (OKR catalog, dashboard env) live under `~/.hermes/` and the service
 environment — see `SETUP.md`. No key ever lands in the repo.
 
+## Delegation lifecycle reliability
+
+A successful `o handoff` saves its exact response as a private, atomic artifact;
+a passing delegation receipt requires a regular output file. Each new worker
+session claims a fresh run directory. Handoff and send serialize access to the
+output; an abandoned operation lock fails closed, so close that worker and start
+a fresh run. `mut` gives contract
+children a chance to handle termination before bounded escalation, including on
+macOS. Parallel writers use separate worktrees and root verifies their combined
+result after integration.
+
+`harness-verify` can recover from an older PATH-selected Python when Python 3.11+
+is available, reports unavailable TOML inspection honestly, and names installed
+bridges whose bytes differ from the checkout. Installation ships `intent-queue`,
+works without a login `USER` variable, and deploy coverage checks actual copy
+and executable-permission commands.
+
+These mechanisms support the sun's unattended Linux workers and the earth's
+interactive macOS sessions. Durable evidence survives a disconnected client;
+bounded cancellation reclaims worker processes; drift reports expose stale copies
+across hosts. Moons use the same contracts inside their containers. Standalone
+earth operation requires no sun connection, cloud identity, or new service.
+
 ## What gets installed
 
 | Host surface | What is installed |

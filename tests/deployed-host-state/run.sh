@@ -421,7 +421,7 @@ with tempfile.TemporaryDirectory() as t:
     lb = pathlib.Path(home, ".local", "bin")
     lb.mkdir(parents=True)
     for shipped in ("oll", "harness-verify", "loop-tick"):
-        (lb / shipped).write_text("#!/bin/sh\nexit 0\n")
+        (lb / shipped).write_bytes((root / "bin" / shipped).read_bytes())
     expect("C32 shipped bridges quiet", check(str(root), home), empty=True)
 
 # C33 — unreadable git history reports NO SIGNAL, not a clean machine. A failed
@@ -590,6 +590,72 @@ with tempfile.TemporaryDirectory() as t:
     if "toptool" not in retired_moved:
         failures.append(f"C39 rename: the stranded old name is invisible "
                         f"({sorted(retired_moved)})")
+
+def _freshness(issues):
+    return [i for i in issues if "differ from the repo" in i[2]
+            or "deploy-freshness" in i[2]]
+
+# A NAMED bridge, not "whichever sorts first" -- a lexicographic pick silently
+# changes meaning when bin/ gains a file, which is how a case stops testing what
+# its name says. Falls back only if the repo ever stops shipping it.
+_probe = "mut" if (root / "bin" / "mut").is_file() else sorted(
+    n for n in os.listdir(str(root / "bin"))
+    if os.path.isfile(str(root / "bin" / n)))[0]
+
+# C40 — deployed copy is byte-identical: must be silent. Without this, a guard that
+# fired unconditionally would pass C41 and still be useless.
+with tempfile.TemporaryDirectory() as t:
+    home = build(t)
+    bd = pathlib.Path(home) / ".local" / "bin"; bd.mkdir(parents=True)
+    (bd / _probe).write_bytes((root / "bin" / _probe).read_bytes())
+    got = _freshness(check(str(root), home=home))
+    if got:
+        failures.append(f"C40 identical copy reported drift: {got}")
+
+# C41 — deployed copy differs: must warn and NAME the tool, so the reader knows
+# which one to chase rather than being told something somewhere is stale.
+with tempfile.TemporaryDirectory() as t:
+    home = build(t)
+    bd = pathlib.Path(home) / ".local" / "bin"; bd.mkdir(parents=True)
+    (bd / _probe).write_bytes((root / "bin" / _probe).read_bytes() + b"\n# drifted\n")
+    got = _freshness(check(str(root), home=home))
+    if not any(i[0] == "warn" and _probe in i[2] for i in got):
+        failures.append(f"C41 stale copy not reported by name: {got}")
+
+# C42 — NOT deployed is not drift. A machine that never installed a given bridge
+# is clean, not stale; conflating the two would make the warn permanent noise.
+with tempfile.TemporaryDirectory() as t:
+    home = build(t)
+    (pathlib.Path(home) / ".local" / "bin").mkdir(parents=True)
+    got = _freshness(check(str(root), home=home))
+    if got:
+        failures.append(f"C42 absent bridge reported as drift: {got}")
+
+# C43 — generated or renamed destinations have no same-name bin/ source.
+# tmux is copied from tmux-guard, so this check must not compare it to bin/tmux.
+if (root / "bin" / "tmux").exists():
+    print("  SKIP C43 — repo now ships bin/tmux, so it is no longer a generated-only name")
+else:
+    with tempfile.TemporaryDirectory() as t:
+        home = build(t)
+        bd = pathlib.Path(home) / ".local" / "bin"; bd.mkdir(parents=True)
+        (bd / "tmux").write_text("#!/bin/sh\n# generated wrapper, no bin/tmux exists\n")
+        got = _freshness(check(str(root), home=home))
+        if any("tmux" in i[2] for i in got):
+            failures.append(f"C43 generated bridge misread as drift: {got}")
+
+# C44 — the counterpart that makes C32's fixture change deliberate rather than
+# convenient. C32 asserts a byte-identical deployed bridge is silent; this asserts the
+# stub it USED to contain is reported. Both directions pinned, so nobody can later
+# "fix" a failing C32 by loosening it back to a stub without this going red.
+with tempfile.TemporaryDirectory() as t:
+    home = build(t)
+    bd = pathlib.Path(home) / ".local" / "bin"; bd.mkdir(parents=True)
+    (bd / "oll").write_text("#!/bin/sh\nexit 0\n")
+    got = _freshness(check(str(root), home=home))
+    if not any(i[0] == "warn" and "oll" in i[2] for i in got):
+        failures.append(f"C44 stub deployed bridge not reported: {got}")
+
 
 if failures:
     for f in failures:

@@ -145,5 +145,30 @@ else
   bad E5 "$n self-inflicted warning(s) on the real host, e.g. $(printf '%s' "$selfwarn" | head -1 | head -c 90)"
 fi
 
+# Exercise the actual deploy-coverage block with synthetic installer text.
+if python3 - "$ROOT" <<'PYTEST'
+import os, sys, textwrap
+from pathlib import Path
+src = (Path(sys.argv[1]) / "bin/harness-verify").read_text()
+a = src.index("    # --- Lifecycle/Governance: deploy coverage")
+b = src.index("    if os.path.isdir(cmd_dir):", a)
+code = compile(textwrap.dedent(src[a:b]), "deploy-coverage", "exec")
+def check(text):
+    errors = []
+    ns = {"os": os, "re": __import__("re"), "shlex": __import__("shlex"),
+          "tools": ["bin/example"], "install_txt": text,
+          "err": lambda w, m: errors.append((w, m))}
+    exec(code, ns)
+    return errors
+assert check('# example is installed\n'), "comment hides missing installation"
+assert check('cat <<EOF\ncp "$REPO_DIR/bin/example" "$BIN_DST/example"\nchmod +x "$BIN_DST/example"\nEOF\n'), "heredoc masquerades as installation"
+assert check('cp "$REPO_DIR/bin/example" "$BIN_DST/example"\n# chmod +x "$BIN_DST/example"\n'), "comment hides missing chmod"
+assert not check('cp "$REPO_DIR/bin/example" "$BIN_DST/renamed"\nchmod +x "$BIN_DST/renamed"\n'), "renamed copy rejected"
+assert not check('cp "$REPO_DIR/bin/example" "$BIN_DST/"\nchmod +x "$BIN_DST/example"\n'), "directory destination rejected"
+assert check('cp "$REPO_DIR/bin/example" "$SOMEWHERE_ELSE/example"\n'), "foreign destination accepted"
+PYTEST
+then ok E6 "deploy coverage distinguishes executable copies from documentation"
+else bad E6 "deploy coverage accepts documentation as installation"; fi
+
 printf '\nharness-verify-selfconsistency: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

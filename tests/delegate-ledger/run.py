@@ -434,9 +434,10 @@ def c12():
         # The stdout line is what a session reads to confirm the receipt landed, and
         # which artifacts were MISSING from the run dir. Untested, every print in the
         # writer could be deleted unnoticed (the lesson C11 already paid for).
+        # A fail verdict keeps absent output legal so the surface can be exercised.
         d3 = make_run_dir(tmp, "run-surface", output=None)
         out = run(["receipt", "--run-dir", d3, "--run-id", "run-surface", "--class", "review",
-                   "--lane", "oll", "--verdict", "pass"], store).stdout
+                   "--lane", "oll", "--verdict", "fail"], store).stdout
         assert os.path.join(d3, "receipt.json") in out, "the writer must name the file it wrote"
         assert "output.md" in out, "an absent artifact must be named, not silently nulled"
         assert "contract.md" not in out, "a present artifact must not be reported absent"
@@ -921,6 +922,110 @@ def c25():
         assert {r["model"] for r in rs} == {"model-a", "model-b"}
 
 
+# ── C26 — a PASS receipt requires a real output.md ────────────────────────────
+# A passing receipt requires a regular output artifact. A rejected replacement
+# preserves the prior receipt; failed attempts may have no output.
+
+def c26():
+    with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as tmp:
+        # pass with NO output.md -> refusal, no receipt written
+        d = make_run_dir(tmp, "run-pass-noout", output=None)
+        p = run(["receipt", "--run-dir", d, "--run-id", "r", "--class", "c",
+                 "--lane", "o", "--verdict", "pass"], store, expect=3)
+        assert not os.path.exists(os.path.join(d, "receipt.json")), \
+            "a pass without output.md must write no receipt"
+        assert "output.md" in p.stderr, "the refusal must name the missing artifact"
+
+        # pass with a SYMLINKED output.md -> refusal (never follow the link)
+        d2 = make_run_dir(tmp, "run-pass-link", output=None)
+        target = os.path.join(tmp, "elsewhere.md")
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write("not the real output\n")
+        os.symlink(target, os.path.join(d2, "output.md"))
+        p2 = run(["receipt", "--run-dir", d2, "--run-id", "r2", "--class", "c",
+                  "--lane", "o", "--verdict", "pass"], store, expect=3)
+        assert not os.path.exists(os.path.join(d2, "receipt.json")), \
+            "a pass over a symlinked output.md must write no receipt"
+        assert "symlink" in p2.stderr, "the refusal must name the symlink"
+
+        # pass with a NONREGULAR output.md (a directory) -> refusal
+        d3 = make_run_dir(tmp, "run-pass-dir", output=None)
+        os.makedirs(os.path.join(d3, "output.md"))
+        p3 = run(["receipt", "--run-dir", d3, "--run-id", "r3", "--class", "c",
+                  "--lane", "o", "--verdict", "pass"], store, expect=3)
+        assert not os.path.exists(os.path.join(d3, "receipt.json")), \
+            "a pass over a nonregular output.md must write no receipt"
+
+        # a regular output.md -> pass writes the receipt
+        d4 = make_run_dir(tmp, "run-pass-ok", output="worker output\n")
+        run(["receipt", "--run-dir", d4, "--run-id", "r4", "--class", "c",
+             "--lane", "o", "--verdict", "pass"], store)
+        assert os.path.exists(os.path.join(d4, "receipt.json")), \
+            "a pass with a regular output.md must write the receipt"
+        receipt = read_receipt(d4)
+        for field, name in (("output_sha256", "output.md"), ("brief_sha256", "brief.md"),
+                            ("contract_sha256", "contract.md")):
+            with open(os.path.join(d4, name), "rb") as fh:
+                assert receipt[field] == hashlib.sha256(fh.read()).hexdigest(), field
+
+    # fail/infra remain allowed absent output — the run failed before producing it.
+    with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as tmp:
+        for verdict in ("fail", "infra"):
+            d = make_run_dir(tmp, f"run-{verdict}-noout", output=None)
+            run(["receipt", "--run-dir", d, "--run-id", f"r-{verdict}", "--class", "c",
+                 "--lane", "oll", "--verdict", verdict], store)
+            r = read_receipt(d)
+            assert r["output_sha256"] is None, \
+                f"a {verdict} receipt must allow absent output"
+
+    # a refused pass must leave an EXISTING receipt untouched. --force bypasses
+    # the clobber guard so the refusal comes from the pass-output gate itself.
+    with tempfile.TemporaryDirectory() as store, tempfile.TemporaryDirectory() as tmp:
+        d = make_run_dir(tmp, "run-clobber-pass", output=None)
+        run(["receipt", "--run-dir", d, "--run-id", "r", "--class", "c",
+             "--lane", "oll", "--verdict", "fail"], store)
+        first = read_receipt(d)
+        p = run(["receipt", "--run-dir", d, "--run-id", "r", "--class", "c",
+                 "--lane", "oll", "--verdict", "pass", "--force"], store, expect=3)
+        assert read_receipt(d) == first, \
+            "a refused pass must leave the existing receipt unchanged"
+
+    # Swap the checked path before it is opened, as a concurrent writer could.
+    # Exercise the real receipt writer; do not follow a late symlink or block on a FIFO.
+    import contextlib, io, runpy
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    ns = runpy.run_path(TOOL)
+    for kind in ("symlink", "fifo"):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = make_run_dir(tmp, "race", output="original output")
+            out = os.path.join(d, "output.md")
+            target = os.path.join(tmp, "target")
+            with open(target, "w") as fh:
+                fh.write("outside output")
+            real_isfile = os.path.isfile
+            swapped = [False]
+            def swap(path):
+                if path == out and not swapped[0]:
+                    swapped[0] = True
+                    os.unlink(out)
+                    if kind == "symlink":
+                        os.symlink(target, out)
+                    else:
+                        os.mkfifo(out)
+                    return True
+                return real_isfile(path)
+            args = SimpleNamespace(note=None, run_dir=d, force=True, verdict="pass",
+                                   run_id="race", task_class="fixture", lane="o", model="fixture",
+                                   attempt=1, host="fixture", exit_status=0, repair_rounds=0,
+                                   duration_s=0, survivors=None, cost_usd=None, override=False)
+            diagnostic = io.StringIO()
+            with patch("os.path.isfile", side_effect=swap), contextlib.redirect_stderr(diagnostic):
+                assert ns["cmd_receipt"](args, "", []) == 3, kind
+            assert "output.md" in diagnostic.getvalue(), kind
+            assert not os.path.exists(os.path.join(d, "receipt.json")), kind
+
+
 def main():
     if not os.path.exists(TOOL):
         print(f"FAIL: {TOOL} does not exist")
@@ -950,7 +1055,8 @@ def main():
                      ("C22 legacy identity and label collisions", c22),
                      ("C23 per-model import and cross-writer retries", c23),
                      ("C24 JSON model compatibility", c24),
-                     ("C25 concurrent per-model deduplication", c25)):
+                     ("C25 concurrent per-model deduplication", c25),
+                     ("C26 pass receipt requires real output.md", c26)):
         check(name, fn)
     print(f"# {CHECKS - len(FAILS)}/{CHECKS} checks passed")
     if FAILS:
