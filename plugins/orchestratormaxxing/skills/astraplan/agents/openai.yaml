@@ -1,0 +1,4 @@
+interface:
+  display_name: "Astraplan"
+  short_description: "Astra planning and bounded coordination across hosts"
+  default_prompt: "Use $orchestratormaxxing:astraplan to plan this work before execution or fanout."

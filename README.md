@@ -178,7 +178,7 @@ The doctrine isn't folklore — each rule traces to a verified paper (full notes
 
 ## Fleet mode (private half)
 
-These tools ship only from the private installer and are not part of this public projection: `folder-sync`, `gpu-agent`, `gpu-desktop`, `harness-remote`, `project-new`, `semantica`, `firecrawl`, `opendesign`, `drive`, `design-eval`, `worker-path-bench`, `transcription-fix`, and the proposal toolchain. The maintainer's graduation workflow (`/graduate`) is also private; `bin/core-export` itself ships so you can run your own projection.
+These tools ship only from the private installer and are not part of this public projection: `folder-sync`, `gpu-agent`, `gpu-desktop`, `harness-remote`, `project-new`, `semantica`, `firecrawl`, `opendesign`, `drive`, `design-eval`, `worker-path-bench`, `transcription-fix`, and the proposal toolchain. The historical `/graduate` surfaces also ship, but require the maintainer's private manifest, which is absent here. Use `omaxxing-public-improve` for ordinary public contribution PRs; `bin/core-export` remains available for operator-configured projections.
 
 ## Graduation
 
@@ -216,7 +216,7 @@ Tools are dependency-free (Python stdlib or plain bash), read-only where they au
 | `/self-improve [focus]` | One governed round of harness self-improvement (see below). |
 | `ollama-worker` (subagent) | A cheap dispatcher (Haiku) that hands a single well-scoped task to an Ollama Cloud model via `oll` and returns the output verbatim. |
 
-Codex exposes `$orchestratormaxxing:fanout`, `$orchestratormaxxing:ideas`, `$orchestratormaxxing:self-improve`, `$orchestratormaxxing:wrap-up`, `$orchestratormaxxing:solplan`, and `$orchestratormaxxing:memory`. Planning is host-native: Claude's `/fableplan` delegates to Fable, while Codex prioritizes `$orchestratormaxxing:solplan` with GPT-5.6 Sol Ultra and bounded read-only delegation for nontrivial unplanned work. After root review, `$orchestratormaxxing:fanout` is used only for genuinely independent implementation chunks.
+Codex exposes Astra planning, native cheap-delegate execution, fanout, ideas, self-improve, wrap-up, memory, and public improvement/projection-security skills. `astraplan` uses GPT-6 Astra Ultra with bounded read-only delegation across supported hosts. Explicit Sol/Fable/Kimi planning remains available. The calling host reviews the plan, delegates bounded contracts, and accepts the combined result; fanout requires genuinely independent chunks.
 
 ### Worker models — heavy frontier only
 
@@ -258,3 +258,24 @@ knowledge/         # research notes, protocol specs, self-improve log, transcrip
 ---
 
 *The name is the method: take Claude Code, and max it out.*
+
+## Plan, execute and verify a public improvement
+
+Use `astraplan` for GPT-6 Astra Ultra design, review the plan in the calling host, then
+use native `cheap-delegate` for bounded execution. `fanout` applies only to independent
+chunks with separate contracts and worktrees. Explicit Sol/Fable/Kimi planning remains
+available; the host's interactive model is unchanged. Codex uses the plugin entry point;
+Claude and OpenCode expose `/astraplan`; Hermes uses the installed skill. The paired
+Sol engine is required by the portable Astra runner, and installation includes both.
+
+`omaxxing-public-improve` inventories the requested period and project-wide capabilities,
+then prepares a coherent contribution from current public main. A private source and
+remote sun are optional inputs. `public-improve-security` reviews the feature projection:
+behavior, dependencies, entry points, host coverage, intentional omissions and security.
+It requires five distinct passes before publication and provides a structural coverage
+checker; that checker cannot certify evidence or authorize a push. Root retains sign-off.
+
+The sun benefits from the same portable planning and review workflow during persistent
+sessions; earth can work without a sun or private services. Host tests use synthetic
+local providers. Server task-plan/kanban planner selectors and live-provider availability
+are separate capabilities, not implied by portable skill support.

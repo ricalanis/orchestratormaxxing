@@ -149,6 +149,9 @@ cp "$REPO_DIR/.claude/commands/ideas.md"       "$CLAUDE_DIR/commands/ideas.md"
 cp "$REPO_DIR/.claude/commands/self-improve.md" "$CLAUDE_DIR/commands/self-improve.md"
 cp "$REPO_DIR/.claude/commands/wrap-up.md"     "$CLAUDE_DIR/commands/wrap-up.md"
 cp "$REPO_DIR/.claude/commands/fableplan.md"   "$CLAUDE_DIR/commands/fableplan.md"
+cp "$REPO_DIR/.claude/commands/astraplan.md" "$CLAUDE_DIR/commands/astraplan.md"
+cp "$REPO_DIR/.claude/commands/omaxxing-public-improve.md" "$CLAUDE_DIR/commands/omaxxing-public-improve.md"
+cp "$REPO_DIR/.claude/commands/public-improve-security.md" "$CLAUDE_DIR/commands/public-improve-security.md"
 cp "$REPO_DIR/.claude/commands/gauntlet.md"    "$CLAUDE_DIR/commands/gauntlet.md"
 cp "$REPO_DIR/.claude/commands/graduate.md"    "$CLAUDE_DIR/commands/graduate.md"
 cp "$REPO_DIR/.claude/commands/cheap-delegate.md" "$CLAUDE_DIR/commands/cheap-delegate.md"
@@ -583,7 +586,7 @@ else
   echo "  (Zed not installed — 'curl -f https://zed.dev/install.sh | sh' on Linux, 'brew install --cask zed' on macOS)"
 fi
 
-say "Orchestrator pointer → Claude, Codex, OpenCode, and Zed global instructions"
+say "Orchestrator pointer → Claude, Codex, OpenCode, optional Hermes, and Zed global instructions"
 BEGIN="<!-- orchestratormaxxing:orchestrator:begin -->"
 END="<!-- orchestratormaxxing:orchestrator:end -->"
 # Same marked doctrine block into every harness-aware agent's global context file:
@@ -617,6 +620,10 @@ install.sh refreshes this file on every run.
 MD
 fi
 POINTER_TARGETS+=("$WARP_RULES_MD")
+# Match sync-agent-skills: unrelated Hermes directories stay untouched.
+if [ -f "$HOME/.hermes/kanban.db" ]; then
+  POINTER_TARGETS+=("$HOME/.hermes/AGENTS.md")
+fi
 for GLOBAL_MD in "${POINTER_TARGETS[@]}"; do
 touch "$GLOBAL_MD"
 # strip any previous block (idempotent), then append fresh
@@ -631,13 +638,15 @@ if i != -1 and j != -1:
 open(path, "w").write(t)
 PY
 fi
-HOST_ROUTING=""
+HOST_ROUTING='Use the installed `astraplan` skill for nontrivial planning, then root review and native `cheap-delegate` for bounded execution. Explicit Sol/Fable/Kimi choices remain available; interactive host models stay unchanged.'
 if [ "$GLOBAL_MD" = "$CODEX_DIR/AGENTS.md" ]; then
-  HOST_ROUTING='- **Codex plan-first routing:** use the namespaced `$orchestratormaxxing:*` skills; nontrivial unplanned work → `$orchestratormaxxing:solplan` → root review → `$orchestratormaxxing:fanout` only for independent chunks.'
+  HOST_ROUTING='- **Codex plan-first routing:** use the namespaced `$orchestratormaxxing:*` skills; nontrivial unplanned work → `$orchestratormaxxing:astraplan` → root review → `$orchestratormaxxing:fanout` only for independent chunks.'
 elif [ "$GLOBAL_MD" = "$OPENCODE_CFG_DIR/AGENTS.md" ]; then
-  HOST_ROUTING='- **OpenCode routing:** the orchestratormaxxing workflow skills are installed natively. Use `/kimiplan` for read-only planning, then `fanout` only for independent chunks; `o delegate/send/handoff/close` remains the stateful worker lifecycle.'
+  HOST_ROUTING='- **OpenCode routing:** the orchestratormaxxing workflow skills are installed natively. Use `/astraplan` for read-only planning, then native `cheap-delegate` for bounded execution and `fanout` only for independent chunks; explicit `/kimiplan` remains available; `o delegate/send/handoff/close` remains the stateful worker lifecycle.'
+elif [ "$GLOBAL_MD" = "$HOME/.config/zed/AGENTS.md" ] || [ "$GLOBAL_MD" = "$WARP_RULES_MD" ]; then
+  HOST_ROUTING="For nontrivial planning, read $REPO_DIR/plugins/orchestratormaxxing/skills/astraplan/SKILL.md and use its documented CLI runner with the paired solplan engine in that repository. After root review, read $REPO_DIR/plugins/orchestratormaxxing/skills/cheap-delegate/SKILL.md for bounded execution. This is a repository CLI entry point, not a Zed/Warp native skill installation or execution adapter; interactive models stay unchanged."
 elif [ "$GLOBAL_MD" = "$HOME/.hermes/AGENTS.md" ]; then
-  HOST_ROUTING='- **Hermes routing:** the orchestratormaxxing workflow skills are installed natively; Hermes keeps its richer native `plan-to-repo`. Use `solplan` for read-only planning and the same `oll`/`o` deterministic worker lifecycle.'
+  HOST_ROUTING='- **Hermes routing:** the orchestratormaxxing workflow skills are installed natively; Use `astraplan` for read-only planning, native `cheap-delegate` for bounded execution, and the same `oll`/`o` deterministic worker lifecycle. A separately installed `plan-to-repo` is optional.'
 fi
 cat >> "$GLOBAL_MD" <<MD
 
@@ -1221,5 +1230,5 @@ echo "  command -v oll oll-council oll-sync mem-audit xsearch"
 echo "  (cd /tmp && oll 'say hi' --model glm-5.3)"
 echo "  (cd /tmp && xsearch 'test query' --days 1)"
 echo "  Claude: new session → /gauntlet (divide broad requests into increments) · /fanout · /ideas"
-echo '  Codex:  new thread  → $orchestratormaxxing:gauntlet to divide broad requests · $orchestratormaxxing:solplan first for nontrivial work · $orchestratormaxxing:fanout after planning · $orchestratormaxxing:memory; shell: g / g ls'
+echo '  Codex:  new thread  → $orchestratormaxxing:gauntlet to divide broad requests · $orchestratormaxxing:astraplan first for nontrivial work · $orchestratormaxxing:fanout after planning · $orchestratormaxxing:memory; shell: g / g ls'
 echo '  Fleet:  c-ubuntu · g-ubuntu · o-ubuntu · harness-sync status · gpu-agent c|g|o|ls|send'

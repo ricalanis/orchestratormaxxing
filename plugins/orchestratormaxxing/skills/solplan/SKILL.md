@@ -1,6 +1,6 @@
 ---
 name: solplan
-description: Plan nontrivial unplanned Codex work with an ephemeral read-only GPT-5.6 Sol Ultra planner using bounded read-only delegation, then have root Codex review and execute. Prioritize this before $orchestratormaxxing:fanout for architectural, multi-file, or otherwise design-bearing work; fanout may follow only for genuinely independent implementation chunks. Skip small mechanical or already-approved work.
+description: Explicit Sol planning alternative to default astraplan. Plan nontrivial unplanned Codex work with an ephemeral read-only GPT-5.6 Sol Ultra planner using bounded read-only delegation, then have root Codex review and execute. Prioritize this before $orchestratormaxxing:fanout for architectural, multi-file, or otherwise design-bearing work; fanout may follow only for genuinely independent implementation chunks. Skip small mechanical or already-approved work.
 ---
 
 Keep the root Codex thread as executor and final decision-maker. Delegate only design.

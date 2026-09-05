@@ -27,18 +27,21 @@ expected = {
     "orchestration-practices",
     "cheap-delegate", "fanout", "gauntlet", "i-have-adhd",
     "ideas", "memory", "self-improve", "solplan", "wrap-up",
+    "astraplan", "omaxxing-public-improve", "public-improve-security",
 }
 assert {item["name"] for item in data["skills"]} == expected
 assert all(re.fullmatch(r"[0-9a-f]{40}", item["commit"]) for item in data["skills"])
 workflow = {
     "cheap-delegate", "fanout", "gauntlet", "i-have-adhd",
     "ideas", "memory", "self-improve", "solplan", "wrap-up",
+    "astraplan", "omaxxing-public-improve", "public-improve-security",
 }
 for item in data["skills"]:
     if item["name"] not in workflow:
         assert "targets" not in item, item
     else:
-        assert item["targets"] == ["OpenCode", "Hermes"], item
+        expected_targets = ["Claude", "OpenCode", "Hermes"] if item["name"] in {"astraplan", "solplan", "cheap-delegate", "fanout", "omaxxing-public-improve", "public-improve-security"} else ["OpenCode", "Hermes"]
+        assert item["targets"] == expected_targets, item
 # The private fleet stack (never graduated) carries exactly the client-anchored and
 # Hermes-bound skills; the two manifests are disjoint.
 import os
