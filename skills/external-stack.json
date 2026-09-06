@@ -353,6 +353,35 @@
       ],
       "license": "MIT",
       "tree_sha256": "d0ea111bc12344ca93d1d1d5e162465bb94b31e8c26b9c6321f753e28b1dea0a"
+    },
+    {
+      "name": "review-triage",
+      "kind": "orchestratormaxxing-workflow",
+      "repo": "local://orchestratormaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "skills/review-triage",
+      "include": [
+        "SKILL.md"
+      ],
+      "license": "MIT",
+      "tree_sha256": "52ee2526febc0ae8ecc6349970d1a30b53f4857327f22e224eef653c13e92302"
+    },
+    {
+      "name": "sun-earth-ssh",
+      "kind": "orchestratormaxxing-workflow",
+      "repo": "local://orchestratormaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "plugins/orchestratormaxxing/skills/sun-earth-ssh",
+      "include": [
+        "SKILL.md"
+      ],
+      "license": "MIT",
+      "targets": [
+        "Claude",
+        "OpenCode",
+        "Hermes"
+      ],
+      "tree_sha256": "cad6503589477c49841f6ad008ba674f7003e9cf522a76ee5da2d3cba4b94671"
     }
   ]
 }

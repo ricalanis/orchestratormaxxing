@@ -1,6 +1,6 @@
 {
   "name": "orchestratormaxxing",
-  "version": "0.1.0+codex.20260905202805",
+  "version": "0.1.0+codex.20260906003000",
   "description": "Codex workflows and lifecycle gates for the orchestratormaxxing orchestration harness.",
   "author": {
     "name": "Ricardo Alanis"
