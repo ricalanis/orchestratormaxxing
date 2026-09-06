@@ -224,6 +224,11 @@ assert s.score_contract({"type":"json_fields","expected":{"a":1}}, '{"a":1,"b":2
 assert s.score_contract({"type":"json_fields","expected":{"a":1}}, '{"a":2}') is False
 assert s.score_contract({"type":"json_fields","expected":{"a":1}}, 'not-json') is False
 assert s.score_contract({"type":"unknown","expected":1}, 1) is False
+assert s.score_contract({"type":"json_fields","expected":{"a":None}}, {}) is False
+assert s.score_contract({"type":"json_fields","expected":{"a":None}}, {"a":None}) is True
+assert s.score_contract({"type":"exact","expected":True}, 1) is False
+assert s.score_contract({"type":"json_fields","expected":{"a":[True]}}, {"a":[1]}) is False
+assert s.score_contract({"type":"exact","expected":{"a":[1,2.0]}}, {"a":[1.0,2]}) is True
 assert s.percentile([], 0.5) == 0.0
 assert s.percentile([7], 0.95) == 7.0
 assert s.percentile([1, 3], 0.5) == 2

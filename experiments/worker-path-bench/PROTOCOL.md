@@ -39,9 +39,10 @@ that deliberately detaches into a new session is outside process-group containme
 
 ## Scoring
 
-- `exact`: normalized `output` must equal `expected`.
+- `exact`: normalized `output` must equal `expected`; JSON booleans are distinct
+  from numbers, while numeric values compare by value.
 - `json_fields`: `output` must parse as a JSON object containing every expected
-  key/value pair; extra fields are permitted.
+  key/value pair (a missing key never equals an expected null); extra fields are permitted.
 - Summary metrics per adapter: total, passed, contract failures, infrastructure
   failures, schema-valid envelopes, latency p50/p95, plus long-context diagnostics:
   proxy input tokens, actual prompt tokens when present, compaction count derived

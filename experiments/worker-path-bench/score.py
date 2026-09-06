@@ -23,18 +23,29 @@ def parse_envelope(text):
     return value, True
 
 
+def json_equal(left, right):
+    """JSON booleans are distinct from numbers; numeric values compare equally."""
+    if isinstance(left, bool) != isinstance(right, bool):
+        return False
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(json_equal(left[k], right[k]) for k in left)
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(json_equal(a, b) for a, b in zip(left, right))
+    return left == right
+
+
 def score_contract(contract, output):
     kind = contract.get("type")
     expected = contract.get("expected")
     if kind == "exact":
-        return output == expected
+        return json_equal(output, expected)
     if kind == "json_fields":
         if isinstance(output, str):
             try:
                 output = json.loads(output)
             except json.JSONDecodeError:
                 return False
-        return isinstance(output, dict) and isinstance(expected, dict) and all(output.get(k) == v for k, v in expected.items())
+        return isinstance(output, dict) and isinstance(expected, dict) and all(k in output and json_equal(output[k], v) for k, v in expected.items())
     return False
 
 
