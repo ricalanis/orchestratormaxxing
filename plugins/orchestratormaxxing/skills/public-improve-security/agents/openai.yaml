@@ -1,0 +1,4 @@
+interface:
+  display_name: "Public Projection Security"
+  short_description: "Check capability projection and security before publishing"
+  default_prompt: "Use $public-improve-security to verify this feature's public projection, dependency and host coverage, and five security passes using native cheap-delegate; retain final sign-off in the calling host."

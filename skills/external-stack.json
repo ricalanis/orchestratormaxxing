@@ -150,11 +150,12 @@
         "SKILL.md"
       ],
       "targets": [
+        "Claude",
         "OpenCode",
         "Hermes"
       ],
       "license": "MIT",
-      "tree_sha256": "aefe37e31b3776ed4868317ee8fc6952ace1f42fca9608905b61757069690428"
+      "tree_sha256": "990b3ae45db7560bcdb38b25d1a35503386150dd5b2ec1ed7121c054053aeaef"
     },
     {
       "name": "fanout",
@@ -167,11 +168,12 @@
         "agents"
       ],
       "targets": [
+        "Claude",
         "OpenCode",
         "Hermes"
       ],
       "license": "MIT",
-      "tree_sha256": "97bf79928bbc0c9671981775875efb8e1af454ef76ba78c7535481c4424451d5"
+      "tree_sha256": "4e7c216cc82181492cdb40d9210eea936cb75b4f9a8a7c1eef229e38a8703691"
     },
     {
       "name": "gauntlet",
@@ -188,7 +190,7 @@
         "Hermes"
       ],
       "license": "MIT",
-      "tree_sha256": "2ee511ca8a3562a103aa3ee7574be6eebbc5581f8408a846444b385923ffd0e9"
+      "tree_sha256": "f3e97937fa6b9b0df02828f843f97712dce03f5db4427890a19d09549a726dda"
     },
     {
       "name": "i-have-adhd",
@@ -270,11 +272,12 @@
         "scripts/run_solplan.py"
       ],
       "targets": [
+        "Claude",
         "OpenCode",
         "Hermes"
       ],
       "license": "MIT",
-      "tree_sha256": "dca08a95a4da8851333a988697d326b0802300fd62de3b0261422cac95fe814a"
+      "tree_sha256": "70976457adaaefffa8e00d4e492fceaeafc81088f684b4ebc4dd0fee8cdc93ee"
     },
     {
       "name": "wrap-up",
@@ -292,6 +295,64 @@
       ],
       "license": "MIT",
       "tree_sha256": "261252aeeb12e35bc981fe1dd58abbd022195e01e6441ae8646033ba86056802"
+    },
+    {
+      "name": "astraplan",
+      "kind": "orchestratormaxxing-workflow",
+      "repo": "local://orchestratormaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "plugins/orchestratormaxxing/skills/astraplan",
+      "include": [
+        "SKILL.md",
+        "agents",
+        "scripts"
+      ],
+      "targets": [
+        "Claude",
+        "OpenCode",
+        "Hermes"
+      ],
+      "license": "MIT",
+      "tree_sha256": "873a80411a5677998049b5813b99e6250c12a935973d629642b30fbe48d01f69"
+    },
+    {
+      "name": "omaxxing-public-improve",
+      "kind": "orchestratormaxxing-workflow",
+      "repo": "local://orchestratormaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "plugins/orchestratormaxxing/skills/omaxxing-public-improve",
+      "include": [
+        "SKILL.md",
+        "agents",
+        "references"
+      ],
+      "targets": [
+        "Claude",
+        "OpenCode",
+        "Hermes"
+      ],
+      "license": "MIT",
+      "tree_sha256": "b87122e9eb682607c03d88c44ed286cddc058aa5acc7c58efcb377460c4a832f"
+    },
+    {
+      "name": "public-improve-security",
+      "kind": "orchestratormaxxing-workflow",
+      "repo": "local://orchestratormaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "plugins/orchestratormaxxing/skills/public-improve-security",
+      "include": [
+        "SKILL.md",
+        "agents",
+        "scripts",
+        "references"
+      ],
+      "targets": [
+        "Claude",
+        "OpenCode",
+        "Hermes"
+      ],
+      "license": "MIT",
+      "tree_sha256": "d0ea111bc12344ca93d1d1d5e162465bb94b31e8c26b9c6321f753e28b1dea0a"
     }
   ]
 }

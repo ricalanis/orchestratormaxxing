@@ -6,6 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   verify:
     if: github.repository == 'ricalanis/orchestratormaxxing'
@@ -18,13 +21,14 @@ jobs:
     env:
       ORCHESTRATORMAXXING_SKIP_EXTERNAL_SKILLS: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           fetch-depth: 0   # deployed-host-state scans git history for retired tools; a shallow clone reads as 'cannot measure'
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
       - name: Install tmux
@@ -43,7 +47,7 @@ jobs:
           # capture the exit code without letting the shell's -e kill the step:
           # 1 = errors (fail below) · 2 = inconclusive (report, don't fail)
           rc=0
-          bin/harness-verify --json > hv.json || rc=$?
+          bin/harness-verify --json > hv.json 2> hv.err || rc=$?
           echo "rc=$rc" >> "$GITHUB_ENV"
           echo "rc=$rc"
       - name: Print summary
@@ -57,17 +61,19 @@ jobs:
           print("inconclusive:", data.get("inconclusive", 0))
           print("skipped:", data.get("skipped", 0))
           EOF
-      - name: Upload hv.json
-        uses: actions/upload-artifact@v4
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: hv-json
-          path: hv.json
-      - name: Fail on errors only
-        if: env.rc == '1'
+          name: hv-diagnostics-${{ matrix.os }}
+          path: |
+            hv.json
+            hv.err
+          if-no-files-found: ignore
+      - name: Enforce result policy
         run: |
-          echo "harness-verify reported errors; failing."
-          exit 1
+          python3 .github/scripts/verify-result.py hv.json "${rc:?verifier status missing}"
       - name: Report inconclusive
         if: env.rc == '2'
         run: |
-          echo "harness-verify reported inconclusive results; not failing. See hv.json artifact."
+          echo "harness-verify reported inconclusive results; not failing. See hv-diagnostics-${{ matrix.os }} artifact."

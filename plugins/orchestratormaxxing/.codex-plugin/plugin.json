@@ -1,6 +1,6 @@
 {
   "name": "orchestratormaxxing",
-  "version": "0.1.0+codex.20260825032004",
+  "version": "0.1.0+codex.20260905202805",
   "description": "Codex workflows and lifecycle gates for the orchestratormaxxing orchestration harness.",
   "author": {
     "name": "Ricardo Alanis"
@@ -8,8 +8,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Orchestratormaxxing",
-    "shortDescription": "Sol-first planning and governed Codex delegation.",
-    "longDescription": "Plans nontrivial Codex work with GPT-5.6 Sol Ultra before optional fan-out, while preserving diverse-ideas, session persistence, and verifier-gated self-improvement workflows over the deterministic core.",
+    "shortDescription": "Astra planning, bounded execution and public projection review.",
+    "longDescription": "Plan with Astra, execute through native cheap-delegate, and verify capability projection and security before public contributions. Explicit planner alternatives and interactive host models stay unchanged.",
     "developerName": "Ricardo Alanis",
     "category": "Developer Tools",
     "capabilities": [
@@ -18,9 +18,10 @@
     ],
     "defaultPrompt": [
       "For a broad or multi-deliverable request, use $orchestratormaxxing:gauntlet first to divide it into incremental parts; each part then follows normal routing.",
-      "Use $orchestratormaxxing:solplan first for nontrivial unplanned work.",
+      "Use $orchestratormaxxing:astraplan first for nontrivial unplanned work.",
       "After root review, use $orchestratormaxxing:fanout only for independent implementation chunks.",
-      "Use $orchestratormaxxing:ideas for diverse approaches."
+      "Use $orchestratormaxxing:ideas for diverse approaches.",
+      "Use omaxxing-public-improve and public-improve-security for validated public capability contributions."
     ]
   }
 }

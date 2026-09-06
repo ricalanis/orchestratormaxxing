@@ -1,0 +1,4 @@
+interface:
+  display_name: "Public Harness Improve"
+  short_description: "Plan and validate broad public capability improvements"
+  default_prompt: "Use $omaxxing-public-improve to review project-wide opportunities, plan with Astra, delegate bounded execution, validate capability projection and security, and prepare the requested public contribution PR."

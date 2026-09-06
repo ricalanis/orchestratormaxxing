@@ -2677,11 +2677,11 @@ def audit(root):
             err("plugins/orchestratormaxxing",
                 "install.sh must register, install, and verify the plugin is installed+enabled")
         prompts = (manifest.get("interface") or {}).get("defaultPrompt") or []
-        sol_i = next((i for i, p in enumerate(prompts) if "$orchestratormaxxing:solplan" in p), None)
+        astra_i = next((i for i, p in enumerate(prompts) if "$orchestratormaxxing:astraplan" in p), None)
         fan_i = next((i for i, p in enumerate(prompts) if "$orchestratormaxxing:fanout" in p), None)
-        if sol_i is None or fan_i is None or sol_i >= fan_i:
+        if astra_i is None or fan_i is None or astra_i >= fan_i:
             err("plugins/orchestratormaxxing/.codex-plugin/plugin.json",
-                "default prompts must prioritize solplan before fanout")
+                "default prompts must prioritize astraplan before fanout")
         if "EXPECTED_PLUGIN_VERSION" not in install_txt or 'p.get("version") == expected' not in install_txt:
             err("install.sh", "Codex plugin install must verify the exact manifest version")
 
@@ -2723,7 +2723,7 @@ def audit(root):
     if os.path.isdir(plugin_skills):
         skills = [d for d in sorted(os.listdir(plugin_skills))
                   if os.path.isdir(os.path.join(plugin_skills, d))]
-        required = {"fanout", "ideas", "self-improve", "wrap-up", "solplan", "memory", "graduate"}
+        required = {"fanout", "ideas", "self-improve", "wrap-up", "solplan", "astraplan", "memory", "graduate", "omaxxing-public-improve", "public-improve-security"}
         if fleet_present:
             required.add("product-manager")   # Hermes roadmap/kanban role: fleet-only
         missing = required - set(skills)
@@ -2770,7 +2770,8 @@ def audit(root):
                 err(rel, f"gauntlet intake positioning missing (needs {token!r})")
         routing_contract = {
             "solplan": ("Prioritize this before $orchestratormaxxing:fanout", "EXECUTION SHAPE"),
-            "fanout": ("Use only after planning is complete", "invoke `$orchestratormaxxing:solplan`"),
+            "astraplan": ("Prioritize this before $orchestratormaxxing:fanout", "EXECUTION SHAPE"),
+            "fanout": ("Use only after planning is complete", "invoke `$orchestratormaxxing:astraplan`"),
         }
         for name, tokens in routing_contract.items():
             path = os.path.join(plugin_skills, name, "SKILL.md")
@@ -3115,13 +3116,13 @@ def audit(root):
             if h not in low:
                 warn("CLAUDE.md", f"missing load-bearing doctrine section: '{h}'")
         if "codex plan-first routing" not in low:
-            err("CLAUDE.md", "Codex adapter must prioritize solplan before fanout")
+            err("CLAUDE.md", "Codex adapter must prioritize astraplan before fanout")
     else:
         err("CLAUDE.md", "missing")
 
-    if not os.path.isfile(codex_design) or "routes nontrivial unplanned work through `$orchestratormaxxing:solplan` first" not in open(codex_design).read():
+    if not os.path.isfile(codex_design) or "routes nontrivial unplanned work through `$orchestratormaxxing:astraplan` first" not in open(codex_design).read():
         err("knowledge/codex-harness-design.md",
-            "Codex design must document solplan-before-fanout routing")
+            "Codex design must document astraplan-before-fanout routing")
 
     # --- Governance: doc-inventory policy (lq-1f8b2552) ---
     # CLAUDE.md's tools section and README's table are explicitly CURATED, not
@@ -3387,6 +3388,9 @@ def audit(root):
         # doctrine, lane primitives resolve. Proven red 4 ways (tag-strip,
         # dangling ref, superseded marker, doctrine-token strip) 2026-08-12.
         ("cheap-delegate", "tests/cheap-delegate/run.sh", "knowledge/delegation-playbook.md", 30),
+        ("astraplan", "tests/astraplan/run.sh", "plugins/orchestratormaxxing/skills/astraplan/SKILL.md", 45),
+        ("public-improve", "tests/public-improve/run.sh", "plugins/orchestratormaxxing/skills/public-improve-security/SKILL.md", 30),
+        ("ci-verify", "tests/ci-verify/run.sh", ".github/workflows/verify.yml", 30),
         ("occ", "tests/occ/run.sh", "bin/occ", 30),
         ("o", "tests/o/run.sh", "bin/o", 60),
         # In-place mutation is crash-safe + serialized: interrupted runs auto-recover,
