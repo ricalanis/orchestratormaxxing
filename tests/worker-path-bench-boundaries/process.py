@@ -55,3 +55,25 @@ with tempfile.TemporaryDirectory() as temporary:
    try:os.killpg(int(pidfile.read_text()),signal.SIGKILL)
    except ProcessLookupError:pass
 print('PASS: cancellation cleans the adapter group')
+
+# Cancellation arriving inside the cleanup grace period must not skip SIGKILL.
+with tempfile.TemporaryDirectory() as temporary:
+ d=Path(temporary); script=d/'cleanup.py'; pidfile=d/'pid'; marker=d/'term'; cases=d/'cases'
+ script.write_text("import os,sys,signal,time,json\np=os.fork()\nif p==0:\n signal.signal(signal.SIGTERM,lambda s,f:open(sys.argv[2],'w').write('term'))\n open(sys.argv[1],'w').write(str(os.getpid()))\n os.close(0);os.close(1);os.close(2)\n time.sleep(20);os._exit(0)\nwhile not os.path.exists(sys.argv[1]):time.sleep(0.001)\nprint(json.dumps({'output':'PONG'}),flush=True)\n")
+ cases.write_text(json.dumps({'id':'cleanup','prompt':'x','timeout_seconds':2,'contract':{'type':'exact','expected':'PONG'}})+'\n')
+ runner=subprocess.Popen([sys.executable,str(tool),'--cases',str(cases),'--adapter','cleanup='+shlex.join([sys.executable,str(script),str(pidfile),str(marker)]),'--output',str(d/'out'),'--summary',str(d/'summary')],start_new_session=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+ child=None
+ try:
+  deadline=time.monotonic()+3
+  while not marker.exists() and time.monotonic()<deadline:time.sleep(0.001)
+  assert marker.exists(),'cleanup never began'
+  child=int(pidfile.read_text());runner.terminate();stdout,stderr=runner.communicate(timeout=3)
+  assert runner.returncode==130,(runner.returncode,stderr)
+  check=subprocess.run(['ps','-o','stat=','-p',str(child)],capture_output=True,text=True)
+  assert not check.stdout.strip() or check.stdout.strip().startswith('Z'),'child survived cancellation during cleanup'
+ finally:
+  if runner.poll() is None:os.killpg(runner.pid,signal.SIGKILL);runner.communicate()
+  if child:
+   try:os.kill(child,signal.SIGKILL)
+   except ProcessLookupError:pass
+print('PASS: cancellation during cleanup preserves descendant termination')

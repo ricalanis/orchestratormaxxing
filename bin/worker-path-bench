@@ -36,10 +36,17 @@ def _kill_group(proc, sig):
 def _terminate_process_tree(proc):
     # The leader can exit before a descendant closes its pipes. Always signal the
     # process group, including after wait() has reaped the leader.
-    _kill_group(proc, signal.SIGTERM)
-    time.sleep(0.05)
-    _kill_group(proc, signal.SIGKILL)
-    proc.wait(timeout=1)
+    # Defer cancellation while completing cleanup. A signal during the grace
+    # period must not skip SIGKILL for a resistant descendant.
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+    try:
+        _kill_group(proc, signal.SIGTERM)
+        time.sleep(0.05)
+        _kill_group(proc, signal.SIGKILL)
+        proc.wait(timeout=1)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
 
 
 def _validate_timeout(value):
