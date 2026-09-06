@@ -89,6 +89,9 @@ def compute_summary(results):
     # counts so partial totals cannot be mistaken for complete observations.
     for adapter, stats in adapters.items():
         rows = [row for row in results if row["adapter"] == adapter]
+        protected = [row for row in rows if row.get("protected_fact")]
+        stats["protected_fact_cases"] = len(protected)
+        stats["protected_fact_losses"] = has_context[adapter]["protected_fact_losses"] if protected else None
         for field in ("input_tokens_proxy", "input_tokens_actual", "cache_read_tokens"):
             observed = [row[field] for row in rows if row.get(field) is not None]
             stats[field + "_observed_cases"] = len(observed)

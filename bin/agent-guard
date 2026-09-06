@@ -37,13 +37,14 @@ What is measured, not hoped:
     is the same kill switch upstream and Hermes honour.
   * `status` reports three host states — `wired` / `missing` / `absent` — and
     only a *present* host can red the gate.
-  * `wire claude`, `warp`, `zed`, `trust-codex` are idempotent targeted edits:
-    every write is guarded by reconstructing the original from the result
-    (Warp/Codex: line origins; Zed: parse + structural equality + every comment
-    character kept) and refused with exit 2 when that fails. Warp is deliberately
+  * Configuration updates preserve unrelated settings semantically. Claude and
+    strict-JSON Zed files may be reserialized with two-space indentation. Warp
+    and Codex use guarded line edits; Zed JSONC verifies structural equality and
+    comment preservation, refusing unsafe edits with exit 2. Warp is deliberately
     not validated with tomllib (its writer emits trailing-comma inline tables
-    tomllib rejects); the inserted lines are TOML basic strings so `'` in a
-    pattern survives.
+    tomllib rejects); inserted patterns are TOML basic strings. Repeated updates
+    are idempotent.
+
 
 Exit codes: 0 ok/allow · 1 check drift / selftest failure · 2 blocked (pre/check)
 or refused (bad input, unsafe edit).

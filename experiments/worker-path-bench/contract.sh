@@ -241,5 +241,17 @@ assert s.compute_summary(rows) == {"adapters":{"x":{
     "input_tokens_actual_observed_cases":0,"input_tokens_actual_total":None,
     "cache_read_tokens_observed_cases":0,"cache_read_tokens_total":None,
     "compaction_observed_cases":0,"compaction_count":None,
+    "protected_fact_cases":0,"protected_fact_losses":None,
 }}}
 PY
+
+python3 - "$repo/experiments/worker-path-bench/score.py" <<'PYCASE'
+import runpy, sys
+m = runpy.run_path(sys.argv[1])
+row = {"adapter":"zero", "contract_pass":True,"infrastructure_failure":False,
+       "schema_valid":True,"latency_ms":1,"protected_fact":True,"protected_fact_pass":True,
+       "input_tokens_proxy":0,"input_tokens_actual":0,"compaction_count":0,"cache_read_tokens":0}
+summary = m["compute_summary"]([row])["adapters"]["zero"]
+assert summary["protected_fact_cases"] == 1
+assert summary["protected_fact_losses"] == 0
+PYCASE
