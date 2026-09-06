@@ -1,0 +1,26 @@
+{
+  "dangerous-patterns.txt": {
+    "repo": "https://github.com/davidondrej/skills",
+    "commit": "76724e4c517f786d631f8e6b8d75078c800357d7",
+    "path": "hooks/dangerous-patterns.txt",
+    "license": "MIT",
+    "license_file": "LICENSE.davidondrej-skills",
+    "modified": "header comments only"
+  },
+  "guard-cases.txt": {
+    "repo": "https://github.com/davidondrej/skills",
+    "commit": "76724e4c517f786d631f8e6b8d75078c800357d7",
+    "path": "hooks/test-guard.sh",
+    "license": "MIT",
+    "license_file": "LICENSE.davidondrej-skills",
+    "modified": "block/allow cases extracted into a tab-separated corpus; five orchestratormaxxing per-line cases appended under a marked section (2026-09-05 review)"
+  },
+  "security_patterns.py": {
+    "repo": "https://github.com/anthropics/claude-plugins-official",
+    "commit": "222b19d2d1c635c440cc490364f5a88169ee31a7",
+    "path": "plugins/security-guidance/hooks/patterns.py",
+    "license": "Apache-2.0",
+    "license_file": "LICENSE.claude-plugins-official",
+    "modified": "none"
+  }
+}

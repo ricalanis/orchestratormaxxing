@@ -111,6 +111,12 @@ cp "$REPO_DIR/bin/harness-agent-run" "$BIN_DST/harness-agent-run"
 cp "$REPO_DIR/bin/opencode-browser-mcp" "$BIN_DST/opencode-browser-mcp"
 cp "$REPO_DIR/bin/browser-mcp-contract" "$BIN_DST/browser-mcp-contract"
 cp "$REPO_DIR/bin/gauntlet-judge" "$BIN_DST/gauntlet-judge"
+cp "$REPO_DIR/bin/agent-guard" "$BIN_DST/agent-guard"
+cp "$REPO_DIR/bin/worker-path-bench" "$BIN_DST/worker-path-bench"
+# The benchmark must run from an installed HOME without its checkout.
+BENCH_DST="$HOME/.local/share/orchestratormaxxing/worker-path-bench"
+mkdir -p "$BENCH_DST"
+cp "$REPO_DIR/experiments/worker-path-bench/score.py" "$BENCH_DST/score.py"
 
 cp "$REPO_DIR/bin/xsearch"     "$BIN_DST/xsearch"
 mkdir -p "$SHARE_DIR"
@@ -118,7 +124,7 @@ chmod +x "$BIN_DST/o"
 rm -rf -- "$SHARE_DIR/orchestration_practices"
 cp -R "$REPO_DIR/orchestration_practices" "$SHARE_DIR/orchestration_practices"
 cp "$REPO_DIR/prompts/context/compact.md" "$SHARE_DIR/context-compact.md"
-chmod +x "$BIN_DST/oll" "$BIN_DST/oll-council" "$BIN_DST/oll-sync" "$BIN_DST/occ" "$BIN_DST/agent-tab-status" "$BIN_DST/warp-agent-event" "$BIN_DST/warp-agent-recovery" "$BIN_DST/codex-stop-hook" "$BIN_DST/agent-done-notify" "$BIN_DST/ticket-route" "$BIN_DST/provider-ask" "$BIN_DST/multi-council" "$BIN_DST/cross-review" "$BIN_DST/mem-audit" "$BIN_DST/memoryctl" "$BIN_DST/harness-sync" "$BIN_DST/core-export" "$BIN_DST/mut" "$BIN_DST/harness-verify" "$BIN_DST/harness-scan" "$BIN_DST/loop-queue" "$BIN_DST/intent-queue" "$BIN_DST/loop-tick" "$BIN_DST/token-ledger" "$BIN_DST/model-catalog" "$BIN_DST/model-bench" "$BIN_DST/model-eval" "$BIN_DST/win-log" "$BIN_DST/delegate-ledger" "$BIN_DST/warp-ollama" "$BIN_DST/warp-model-pin" "$BIN_DST/zed-setup" "$BIN_DST/session-log" "$BIN_DST/sync-agent-skills" "$BIN_DST/orchestration-practice" "$BIN_DST/cogload" "$BIN_DST/tmux" "$BIN_DST/tmux-send" "$BIN_DST/harness-agent-run" "$BIN_DST/opencode-browser-mcp" "$BIN_DST/browser-mcp-contract" "$BIN_DST/gauntlet-judge" "$BIN_DST/xsearch" "$BIN_DST/memory-bridge-hermes.sh" "$BIN_DST/hermes-watch" "$BIN_DST/kpi-brief" "$BIN_DST/capacity" "$BIN_DST/task-plan"
+chmod +x "$BIN_DST/oll" "$BIN_DST/oll-council" "$BIN_DST/oll-sync" "$BIN_DST/occ" "$BIN_DST/agent-tab-status" "$BIN_DST/warp-agent-event" "$BIN_DST/warp-agent-recovery" "$BIN_DST/codex-stop-hook" "$BIN_DST/agent-done-notify" "$BIN_DST/ticket-route" "$BIN_DST/provider-ask" "$BIN_DST/multi-council" "$BIN_DST/cross-review" "$BIN_DST/mem-audit" "$BIN_DST/memoryctl" "$BIN_DST/harness-sync" "$BIN_DST/core-export" "$BIN_DST/mut" "$BIN_DST/harness-verify" "$BIN_DST/harness-scan" "$BIN_DST/loop-queue" "$BIN_DST/intent-queue" "$BIN_DST/loop-tick" "$BIN_DST/token-ledger" "$BIN_DST/model-catalog" "$BIN_DST/model-bench" "$BIN_DST/model-eval" "$BIN_DST/win-log" "$BIN_DST/delegate-ledger" "$BIN_DST/warp-ollama" "$BIN_DST/warp-model-pin" "$BIN_DST/zed-setup" "$BIN_DST/session-log" "$BIN_DST/sync-agent-skills" "$BIN_DST/orchestration-practice" "$BIN_DST/cogload" "$BIN_DST/tmux" "$BIN_DST/tmux-send" "$BIN_DST/harness-agent-run" "$BIN_DST/opencode-browser-mcp" "$BIN_DST/browser-mcp-contract" "$BIN_DST/gauntlet-judge" "$BIN_DST/xsearch" "$BIN_DST/memory-bridge-hermes.sh" "$BIN_DST/hermes-watch" "$BIN_DST/kpi-brief" "$BIN_DST/capacity" "$BIN_DST/task-plan" "$BIN_DST/agent-guard" "$BIN_DST/worker-path-bench"
 
 # bin/chrome-debug-wayland-shim → shadows google-chrome(-stable) on PATH (Linux only).
 # Any launch carrying --remote-debugging-port under a Wayland session gets
@@ -669,6 +675,78 @@ MD
 echo "  wrote doctrine block into $GLOBAL_MD"
 done
 
+say "Agent guard → $CFG_DIR/agent-guard (vendored dangerous-command + security-guidance data; Warp denylist; Hermes plugin)"
+# bin/agent-guard reads its two data files from $ORCHESTRATORMAXXING_GUARD_DIR → this directory →
+# the repo's deploy/agent-guard. Copy, not symlink (same re-sync barrier as the bridges);
+# the vendored upstream files + licenses + PROVENANCE ship together so `agent-guard status`
+# and `selftest` work from a global install with no repo checkout.
+GUARD_SRC="$REPO_DIR/deploy/agent-guard"
+GUARD_DST="$CFG_DIR/agent-guard"
+if [ -d "$GUARD_SRC" ]; then
+  mkdir -p "$GUARD_DST"
+  _guard_copied=0; _guard_missing=0
+  for _guard_file in dangerous-patterns.txt guard-cases.txt security_patterns.py PROVENANCE.json LICENSE.davidondrej-skills LICENSE.claude-plugins-official; do
+    if [ -f "$GUARD_SRC/$_guard_file" ]; then
+      cp "$GUARD_SRC/$_guard_file" "$GUARD_DST/$_guard_file"
+      _guard_copied=$((_guard_copied + 1))
+    else
+      _guard_missing=$((_guard_missing + 1))
+      echo "  NOTE: deploy/agent-guard/$_guard_file missing in the repo — not deployed"
+    fi
+  done
+  echo "  wrote $_guard_copied guard file(s) → $GUARD_DST ($_guard_missing missing)"
+fi
+
+# Warp: the same patterns into every execution profile's command_denylist. Warp's denylist
+# means CONFIRM before running, not a hard block. The tool inserts lines only (guarded: removing
+# them reproduces the original byte-for-byte) and refuses (exit 2, file untouched) a profile with
+# no command_denylist key; a refusal is a note here, never an install failure. Warp rewrites
+# settings.toml from the account at startup (measured in bin/warp-model-pin) — re-run to re-pin.
+case "$(uname -s)" in
+  Darwin) WARP_SETTINGS_TOML="$HOME/.warp/settings.toml" ;;
+  *)      WARP_SETTINGS_TOML="$HOME/.config/warp-terminal/settings.toml" ;;
+esac
+if [ -f "$WARP_SETTINGS_TOML" ]; then
+  "$BIN_DST/agent-guard" warp --apply || echo "  NOTE: agent-guard warp --apply refused — run 'agent-guard warp --check' (Warp denylist = confirm-before-run, not a block)"
+else
+  echo "  (no Warp settings at $WARP_SETTINGS_TOML — Warp command_denylist not applied)"
+fi
+
+# Zed: the same patterns into agent.tool_permissions.tools.terminal.always_deny
+# (pre-guard only — Zed has no post-write hook). Silent no-op without a settings.json;
+# refuses (exit 2, file untouched) on JSONC it cannot splice safely — the known
+# refusal class is an inline // comment INSIDE an existing always_deny array.
+if [ -f "$HOME/.config/zed/settings.json" ]; then
+  "$BIN_DST/agent-guard" zed --apply || echo "  NOTE: agent-guard zed --apply refused — run 'agent-guard zed --check'; if it names a comment inside always_deny, remove that comment and re-run ./install.sh"
+else
+  echo "  (no Zed settings at ~/.config/zed/settings.json — Zed always_deny not applied)"
+fi
+
+# Hermes: the command-guard pre_tool_call plugin (ours, copied) + the bundled security-guidance
+# plugin (Hermes's own port of the same Anthropic rule set — enabled, never copied). Gated on
+# the production Hermes marker like the skill stack. `hermes plugins enable` is a config write,
+# not an agent; "already enabled" is tolerated and reported, never fatal.
+HERMES_BIN="$(command -v hermes 2>/dev/null || true)"
+if [ -z "$HERMES_BIN" ] && [ -x "$HOME/.local/bin/hermes" ]; then HERMES_BIN="$HOME/.local/bin/hermes"; fi
+if [ -f "$HOME/.hermes/kanban.db" ] && [ -n "$HERMES_BIN" ]; then
+  HERMES_GUARD_DST="$HOME/.hermes/plugins/command-guard"
+  mkdir -p "$HERMES_GUARD_DST"
+  cp "$GUARD_SRC/hermes/command-guard/plugin.yaml" "$GUARD_SRC/hermes/command-guard/__init__.py" "$HERMES_GUARD_DST/"
+  echo "  wrote $HERMES_GUARD_DST/{plugin.yaml,__init__.py}"
+  for _hermes_plugin in command-guard security-guidance; do
+    if _hermes_out="$("$HERMES_BIN" plugins enable "$_hermes_plugin" --no-allow-tool-override 2>&1)"; then
+      echo "  hermes: enabled plugin $_hermes_plugin"
+    else
+      echo "  hermes: plugin $_hermes_plugin not (re)enabled — $(printf '%s' "$_hermes_out" | tail -n 1)"
+    fi
+  done
+  echo "  Hermes: new sessions load command-guard + security-guidance; active sessions restart"
+elif [ -f "$HOME/.hermes/kanban.db" ]; then
+  echo "  NOTE: production Hermes present (kanban.db) but no 'hermes' CLI on PATH or in ~/.local/bin — command-guard plugin not deployed; fix PATH and re-run"
+else
+  echo "  (no production Hermes here — command-guard plugin not deployed)"
+fi
+
 say "Hooks → $CLAUDE_DIR/settings.json (global SessionStart: shared memory, loop-tick, session-log; Stop: memory/log audit)"
 GLOBAL_SETTINGS="$CLAUDE_DIR/settings.json"
 python3 - "$GLOBAL_SETTINGS" <<'PY'
@@ -877,6 +955,9 @@ with open(path, "w") as f:
     f.write("\n")
 print("  merged SessionStart (shared memory, loop-tick, session-log) + Stop audit/log hooks into", path)
 PY
+
+"$BIN_DST/agent-guard" wire claude --settings "$GLOBAL_SETTINGS" || echo "  NOTE: guard hook wiring refused; inspect agent-guard status --json"
+echo "  Codex hook trust is explicit: agent-guard trust-codex --check; use --apply only after reviewing the hooks."
 
 # Codex now owns these lifecycle hooks through the installed orchestratormaxxing
 # plugin. Older Mac installs copied Claude's hook set into ~/.codex/hooks.json;

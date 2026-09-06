@@ -83,6 +83,16 @@
             "timeout": 15
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/.local/bin/agent-guard\" pre",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -93,6 +103,16 @@
             "type": "command",
             "command": "[ \"${SOLPLAN_CHILD:-0}\" = 1 ] && exit 0; \"$HOME/.local/bin/agent-tab-status\" working 2>/dev/null; \"$HOME/.local/bin/warp-agent-event\" codex permission_replied 2>/dev/null; true",
             "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "apply_patch|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/.local/bin/agent-guard\" post",
+            "timeout": 10
           }
         ]
       }

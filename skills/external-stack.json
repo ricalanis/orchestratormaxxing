@@ -382,6 +382,102 @@
         "Hermes"
       ],
       "tree_sha256": "cad6503589477c49841f6ad008ba674f7003e9cf522a76ee5da2d3cba4b94671"
+    },
+    {
+      "name": "research-prompt",
+      "kind": "orchestratormaxxing-workflow",
+      "repo": "local://orchestratormaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "plugins/orchestratormaxxing/skills/research-prompt",
+      "include": [
+        "LICENSE",
+        "SKILL.md",
+        "references"
+      ],
+      "license": "MIT",
+      "tree_sha256": "1e003f5fa89b8d507dedfafdc6a6d51e4fcfeabc275c5ac6a5ea62181d303dc4",
+      "targets": [
+        "Claude",
+        "OpenCode",
+        "Hermes"
+      ],
+      "note": "Portable public workflow; Codex discovers the native plugin skill."
+    },
+    {
+      "name": "plan-to-repo",
+      "kind": "orchestratormaxxing-workflow",
+      "repo": "local://orchestratormaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "plugins/orchestratormaxxing/skills/plan-to-repo",
+      "include": [
+        "SKILL.md",
+        "references"
+      ],
+      "license": "MIT",
+      "tree_sha256": "fd990d3d5559a32fc66b96a8b5801a07d74a7048253fb5c8cbadd2d682a0d688",
+      "targets": [
+        "Claude",
+        "OpenCode",
+        "Hermes"
+      ],
+      "note": "Portable public workflow; Codex discovers the native plugin skill."
+    },
+    {
+      "name": "product-manager",
+      "kind": "orchestratormaxxing-workflow",
+      "repo": "local://orchestratormaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "plugins/orchestratormaxxing/skills/product-manager",
+      "include": [
+        "SKILL.md",
+        "references"
+      ],
+      "license": "MIT",
+      "tree_sha256": "52d03266936f8ba1bdf3ee7c2cc3ba302f25a3357c28df0436ea9d9c68fa11c6",
+      "targets": [
+        "Claude",
+        "OpenCode",
+        "Hermes"
+      ],
+      "note": "Portable public workflow; Codex discovers the native plugin skill."
+    },
+    {
+      "name": "weekly-public-contribution",
+      "kind": "orchestratormaxxing-workflow",
+      "repo": "local://orchestratormaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "plugins/orchestratormaxxing/skills/weekly-public-contribution",
+      "include": [
+        "SKILL.md",
+        "references"
+      ],
+      "license": "MIT",
+      "tree_sha256": "d8e8326ffac2866d3900706d63fa3842627af7c52d90867373704af4de42af75",
+      "targets": [
+        "Claude",
+        "OpenCode",
+        "Hermes"
+      ],
+      "note": "Portable public workflow; Codex discovers the native plugin skill."
+    },
+    {
+      "name": "agent-guard",
+      "kind": "orchestratormaxxing-workflow",
+      "repo": "local://orchestratormaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "plugins/orchestratormaxxing/skills/agent-guard",
+      "include": [
+        "LICENSE.davidondrej-skills",
+        "SKILL.md"
+      ],
+      "license": "MIT",
+      "tree_sha256": "33e0c78ef8e8694ae6a2f4c926031f65e6a907169e7c24f8d0cb0f2216da9e29",
+      "targets": [
+        "Claude",
+        "OpenCode",
+        "Hermes"
+      ],
+      "note": "Portable public workflow; Codex discovers the native plugin skill."
     }
   ]
 }
