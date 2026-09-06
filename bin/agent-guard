@@ -1,0 +1,1754 @@
+#!/usr/bin/env python3
+"""agent-guard — the cross-host pre/post security hook runner for orchestratormaxxing.
+
+One runner, six hosts. It is the only place that knows how each host's hook
+protocol looks (the `provider-ask` shape), so an adapter is a thin shim that
+feeds it stdin JSON and reads one exit code or one JSON line back.
+
+Two vendored data sets drive it, both living together in the guard directory
+(`$ORCHESTRATORMAXXING_GUARD_DIR` → `~/.config/orchestratormaxxing/agent-guard` →
+`<repo>/deploy/agent-guard`, resolved relative to this script so an in-repo run
+works before install):
+
+  * `dangerous-patterns.txt` — POSIX-ERE denylist + `guard-cases.txt` corpus
+    from davidondrej/skills@76724e4 (MIT). `[:space:]` becomes `\\s`; a rule
+    that does not compile is skipped and *reported by `status`* — it never
+    crashes `pre`. Matching is **per line, like `grep -E`** (measured 2026-09-05:
+    a whole-string match with `[^;&|]*` crossing newlines was quadratic — 110 KB
+    of benign lines took 18 s, past every host's hook timeout, i.e. a bypass —
+    and it blocked heredocs containing an indented `pass`). NUL bytes are
+    stripped first; a line over 32 KiB is matched on its first and last 32 KiB.
+    Invalid UTF-8 in the file is decoded with replacement and reported, never
+    fatal. `pre`/`check` are structurally fail-open: any internal error allows
+    with one stderr line and leaves `status` to report the broken file.
+  * `security_patterns.py` — the 25 write-content rules from
+    anthropics/claude-plugins-official@222b19d (Apache-2.0), imported with
+    importlib and scanned exactly like upstream's `_scan_content`.
+
+What is measured, not hoped:
+
+  * `pre`/`check` block with exit 2 and one stderr line naming the matched
+    pattern; allow is exit 0 and silent. A missing patterns file **fails open**
+    (a hook must never brick a terminal) — and `status --gate` goes red for it,
+    so silence is never mistaken for coverage. `pre` spawns nothing.
+  * `post` scans Claude Write/Edit/MultiEdit/NotebookEdit payloads and Codex
+    `apply_patch` text (only the `+` lines, per file path), appends upstream's
+    guidance block as `additionalContext`, exit 0 always. `SECURITY_GUIDANCE_DISABLE=1`
+    is the same kill switch upstream and Hermes honour.
+  * `status` reports three host states — `wired` / `missing` / `absent` — and
+    only a *present* host can red the gate.
+  * Configuration updates preserve unrelated settings semantically. Claude and
+    strict-JSON Zed files may be reserialized with two-space indentation. Warp
+    and Codex use guarded line edits; Zed JSONC verifies structural equality and
+    comment preservation, refusing unsafe edits with exit 2. Warp is deliberately
+    not validated with tomllib (its writer emits trailing-comma inline tables
+    tomllib rejects); inserted patterns are TOML basic strings. Repeated updates
+    are idempotent.
+
+
+Exit codes: 0 ok/allow · 1 check drift / selftest failure · 2 blocked (pre/check)
+or refused (bad input, unsafe edit).
+"""
+import argparse
+import importlib.util
+import json
+import os
+import re
+import shutil
+import stat
+import sys
+import tempfile
+
+# ---------------------------------------------------------------------------
+# constants
+
+PATTERNS_FILE = "dangerous-patterns.txt"
+CASES_FILE = "guard-cases.txt"
+RULES_FILE = "security_patterns.py"
+MAX_SCAN_BYTES = 256 * 1024
+MAX_LINE_BYTES = 32 * 1024  # per-line window; longer lines are matched on both ends (measured: 32 KiB of repeated `git push` ≈ 0.75 s, the quadratic tail every host timeout tolerates)
+TRUTHY = {"1", "true", "yes", "on"}
+CLAUDE_EDIT_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+CODEX_PLUGIN_ID = "orchestratormaxxing@personal"
+PRE_NEEDLE = 'agent-guard" pre'
+POST_NEEDLE = 'agent-guard" post'
+PRE_COMMAND = '"$HOME/.local/bin/agent-guard" pre'
+POST_COMMAND = '"$HOME/.local/bin/agent-guard" post'
+POST_MATCHER = "Edit|Write|MultiEdit|NotebookEdit"
+ZED_DENY_PATH = ("agent", "tool_permissions", "tools", "terminal", "always_deny")
+EXIT_OK, EXIT_DRIFT, EXIT_BLOCK = 0, 1, 2
+EXIT_REFUSE = 2
+
+
+def refuse(message):
+    print("agent-guard: " + message, file=sys.stderr)
+    return EXIT_REFUSE
+
+
+def out(text):
+    sys.stdout.buffer.write(text.encode("utf-8"))
+    sys.stdout.buffer.flush()
+
+
+def script_repo():
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.dirname(here)
+
+
+def guard_dir():
+    env = os.environ.get("ORCHESTRATORMAXXING_GUARD_DIR", "").strip()
+    if env:
+        return os.path.expanduser(env)
+    home = os.path.expanduser("~/.config/orchestratormaxxing/agent-guard")
+    repo = os.path.join(script_repo(), "deploy", "agent-guard")
+    for cand in (home, repo):
+        if os.path.isfile(os.path.join(cand, PATTERNS_FILE)):
+            return cand
+    return home
+
+
+# ---------------------------------------------------------------------------
+# dangerous-command patterns
+
+def ere_to_python(pattern):
+    return pattern.replace("[:space:]", r"\s")
+
+
+def ere_to_rust(pattern):
+    return pattern.replace("[:space:]", r"\s")
+
+
+def read_pattern_lines(path):
+    """Raw ERE lines (comments and blanks dropped), in file order."""
+    lines = []
+    with open(path, encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.rstrip("\n").rstrip("\r")
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            lines.append(line)
+    return lines
+
+
+def load_patterns(directory):
+    """(present, compiled [(raw, regex)], errors [{line, pattern, error}])."""
+    path = os.path.join(directory, PATTERNS_FILE)
+    if not os.path.isfile(path):
+        return False, [], []
+    compiled, errors = [], []
+    try:
+        with open(path, "rb") as fh:
+            raw_bytes = fh.read()
+    except OSError as exc:
+        return False, [], [{"line": 0, "pattern": "", "error": str(exc)}]
+    try:
+        text = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        # Never fatal: the rules that survive still guard; status reds the file.
+        text = raw_bytes.decode("utf-8", errors="replace")
+        errors.append({"line": 0, "pattern": "", "error": "invalid UTF-8 (%s); decoded with replacement" % exc})
+    raw_lines = text.splitlines()
+    for number, raw in enumerate(raw_lines, 1):
+        line = raw.rstrip("\r")
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        try:
+            compiled.append((line, re.compile(ere_to_python(line))))
+        except (re.error, RecursionError, OverflowError) as exc:
+            errors.append({"line": number, "pattern": line, "error": str(exc)})
+    return True, compiled, errors
+
+
+def command_lines(command):
+    """The strings a rule is matched against: one per line, NUL stripped, long
+    lines windowed to both ends. Per-line is what grep -E does and what bounds
+    the `[^;&|]*` backtracking to a line instead of the whole command."""
+    text = command.replace("\x00", "")
+    for line in text.split("\n"):
+        if len(line) <= MAX_LINE_BYTES:
+            yield line
+        else:
+            yield line[:MAX_LINE_BYTES]
+            yield line[-MAX_LINE_BYTES:]
+
+
+def first_match(compiled, command):
+    for line in command_lines(command):
+        for raw, regex in compiled:
+            if regex.search(line):
+                return raw
+    return None
+
+
+def block_reason(pattern, patterns_path):
+    return ("agent-guard: blocked by the dangerous-command guard (%s). Matched pattern: %s. "
+            "Do not retry it or work around the guard; explain the block to the user."
+            % (patterns_path, pattern))
+
+
+def read_stdin_json():
+    try:
+        data = sys.stdin.read()
+    except (OSError, ValueError):
+        return None
+    if not data.strip():
+        return None
+    try:
+        parsed = json.loads(data)
+    except (ValueError, RecursionError):
+        return None
+    return parsed
+
+
+def extract_command(payload):
+    if not isinstance(payload, dict):
+        return None
+    for holder in ("tool_input", "toolInput"):
+        inner = payload.get(holder)
+        if isinstance(inner, dict) and isinstance(inner.get("command"), str):
+            return inner["command"]
+    if isinstance(payload.get("command"), str):
+        return payload["command"]
+    return None
+
+
+def decide(command):
+    """(decision, pattern, reason) for one command string."""
+    directory = guard_dir()
+    present, compiled, _errors = load_patterns(directory)
+    if not present or command is None:
+        return "allow", None, ""
+    hit = first_match(compiled, command)
+    if hit is None:
+        return "allow", None, ""
+    return "deny", hit, block_reason(hit, os.path.join(directory, PATTERNS_FILE))
+
+
+def emit_decision(decision, pattern, reason, fmt):
+    if fmt == "json":
+        out(json.dumps({"decision": decision, "pattern": pattern, "reason": reason},
+                       ensure_ascii=False) + "\n")
+        return EXIT_OK
+    if decision == "deny":
+        print(reason, file=sys.stderr)
+        return EXIT_BLOCK
+    return EXIT_OK
+
+
+def safe_decide(command):
+    """`pre`/`check` can never refuse: an internal error allows (one stderr line)
+    and `status` is where the broken file shows. Measured 2026-09-05: before this
+    wrapper one Latin-1 byte in the patterns file turned every Bash call into a block."""
+    try:
+        return decide(command)
+    except Exception as exc:  # noqa: BLE001 — fail open by contract
+        print("agent-guard: guard error (%s: %s) — allowing; run `agent-guard status`"
+              % (type(exc).__name__, exc), file=sys.stderr)
+        return "allow", None, ""
+
+
+def cmd_pre(args):
+    payload = read_stdin_json()
+    command = extract_command(payload)
+    decision, pattern, reason = safe_decide(command)
+    return emit_decision(decision, pattern, reason, args.format)
+
+
+def cmd_check(args):
+    command = " ".join(args.command)
+    if not command:
+        return refuse("check needs a command")
+    decision, pattern, reason = safe_decide(command)
+    return emit_decision(decision, pattern, reason, args.format)
+
+
+# ---------------------------------------------------------------------------
+# write-content security rules (post)
+
+def load_security_rules(directory):
+    """(present, compiled rules, error) from security_patterns.py."""
+    path = os.path.join(directory, RULES_FILE)
+    if not os.path.isfile(path):
+        return False, [], None
+    try:
+        spec = importlib.util.spec_from_file_location("agent_guard_security_patterns", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        rules = list(getattr(module, "SECURITY_PATTERNS"))
+    except Exception as exc:  # a broken data file must never traceback a hook
+        return True, [], "%s: %s" % (type(exc).__name__, exc)
+    compiled = []
+    for rule in rules:
+        try:
+            regex = re.compile(rule["regex"]) if rule.get("regex") else None
+        except (re.error, KeyError, TypeError):
+            continue
+        compiled.append({
+            "ruleName": rule.get("ruleName", "?"),
+            "reminder": rule.get("reminder", ""),
+            "path_filter": rule.get("path_filter"),
+            "path_check": rule.get("path_check"),
+            "substrings": tuple(rule.get("substrings", ())),
+            "regex": regex,
+        })
+    return True, compiled, None
+
+
+def rule_matches(entry, path, content):
+    try:
+        if entry["path_check"] is not None:
+            return bool(entry["path_check"](path))
+        if entry["path_filter"] is not None and not entry["path_filter"](path):
+            return False
+    except Exception:
+        return False
+    if any(sub in content for sub in entry["substrings"]):
+        return True
+    return entry["regex"] is not None and bool(entry["regex"].search(content))
+
+
+def scan_content(rules, path, content):
+    if not content or len(content.encode("utf-8", errors="ignore")) > MAX_SCAN_BYTES:
+        return []
+    path = path or ""
+    return [(e["ruleName"], e["reminder"]) for e in rules if rule_matches(e, path, content)]
+
+
+def format_guidance(findings):
+    names = ", ".join(name for name, _ in findings)
+    plural = "s" if len(findings) != 1 else ""
+    lines = ["⚠️ Security guidance — %d pattern%s matched (%s)" % (len(findings), plural, names), ""]
+    for _, reminder in findings:
+        lines += [reminder, ""]
+    lines.append("Pattern matches can be false positives. If the construct is safe in this "
+                 "context, briefly document why in a code comment and continue. Otherwise, "
+                 "fix the code before moving on.")
+    return "\n".join(lines)
+
+
+PATCH_HEADER = re.compile(r"^\*\*\* (Add File|Update File|Delete File): (.+)$")
+
+
+def parse_apply_patch(text):
+    """[(path, added_text)] — only the `+` lines of each Add/Update section."""
+    sections, current, buf = [], None, []
+
+    def flush():
+        if current is not None and buf:
+            sections.append((current, "\n".join(buf) + "\n"))
+
+    for line in text.splitlines():
+        header = PATCH_HEADER.match(line)
+        if header:
+            flush()
+            current, buf = (header.group(2).strip() if header.group(1) != "Delete File" else None), []
+            continue
+        if line.startswith("*** End Patch"):
+            flush()
+            current, buf = None, []
+            continue
+        if current is None:
+            continue
+        if line.startswith("*** Move to:"):
+            continue
+        if line.startswith("+"):
+            buf.append(line[1:])
+    flush()
+    return sections
+
+
+def writes_from_payload(payload):
+    """[(path, content)] units to scan, for every hook shape the hosts emit."""
+    if not isinstance(payload, dict):
+        return []
+    tool = payload.get("tool_name") or payload.get("toolName") or ""
+    inner = payload.get("tool_input")
+    if not isinstance(inner, dict):
+        inner = payload.get("toolInput")
+    if not isinstance(inner, dict):
+        return []
+    has_path = isinstance(inner.get("file_path"), str) or isinstance(inner.get("notebook_path"), str)
+    if tool == "apply_patch" or (tool in CLAUDE_EDIT_TOOLS and not has_path
+                                 and isinstance(inner.get("command"), str)):
+        command = inner.get("command")
+        return parse_apply_patch(command) if isinstance(command, str) else []
+    if tool not in CLAUDE_EDIT_TOOLS:
+        return []
+    path = ""
+    for key in ("file_path", "notebook_path"):
+        if isinstance(inner.get(key), str):
+            path = inner[key]
+            break
+    units = []
+    for key in ("content", "new_string", "new_source"):
+        value = inner.get(key)
+        if isinstance(value, str) and value:
+            units.append((path, value))
+    edits = inner.get("edits")
+    if isinstance(edits, list):
+        for edit in edits:
+            if isinstance(edit, dict) and isinstance(edit.get("new_string"), str) and edit["new_string"]:
+                units.append((path, edit["new_string"]))
+    return units
+
+
+def post_findings(payload):
+    if os.environ.get("SECURITY_GUIDANCE_DISABLE", "").strip().lower() in TRUTHY:
+        return []
+    units = writes_from_payload(payload)
+    if not units:
+        return []
+    _present, rules, _error = load_security_rules(guard_dir())
+    if not rules:
+        return []
+    findings, seen = [], set()
+    for path, content in units:
+        for name, reminder in scan_content(rules, path, content):
+            if name in seen:
+                continue
+            seen.add(name)
+            findings.append((name, reminder))
+    return findings
+
+
+def cmd_post(args):
+    findings = post_findings(read_stdin_json())
+    context = format_guidance(findings) if findings else ""
+    if args.format == "json":
+        out(json.dumps({"findings": [{"rule": n, "reminder": r} for n, r in findings],
+                        "context": context}, ensure_ascii=False) + "\n")
+        return EXIT_OK
+    if findings:
+        out(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse",
+                                               "additionalContext": context}},
+                       ensure_ascii=False) + "\n")
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# selftest
+
+def decode_case(cmd):
+    return cmd.replace("\\n", "\n").replace("\\\\", "\\")
+
+
+def cmd_selftest(_args):
+    directory = guard_dir()
+    cases = os.path.join(directory, CASES_FILE)
+    if not os.path.isfile(cases):
+        return refuse("no %s in %s" % (CASES_FILE, directory))
+    present, compiled, _errors = load_patterns(directory)
+    passed, failed = 0, 0
+    with open(cases, encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.rstrip("\n")
+            if not line.strip() or line.startswith("#") or "\t" not in line:
+                continue
+            expected, cmd = line.split("\t", 1)
+            command = decode_case(cmd)
+            hit = first_match(compiled, command) if present else None
+            got = "block" if hit else "allow"
+            if got == expected:
+                passed += 1
+            else:
+                failed += 1
+                print("FAIL expected=%s : %s" % (expected, command.replace("\n", "\\n")))
+    print("passed: %d, failed: %d" % (passed, failed))
+    return EXIT_OK if failed == 0 else EXIT_DRIFT
+
+
+# ---------------------------------------------------------------------------
+# shared file helpers
+
+def atomic_write_text(path, text):
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    mode = None
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        pass
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".agent-guard.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if mode is not None:
+            os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def read_text(path):
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def hook_groups_have(groups, needle):
+    if not isinstance(groups, list):
+        return False
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        for hook in group.get("hooks") or []:
+            if isinstance(hook, dict) and needle in str(hook.get("command", "")):
+                return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# wire claude
+
+def claude_wired(data):
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    if not isinstance(hooks, dict):
+        return False
+    return hook_groups_have(hooks.get("PreToolUse"), PRE_NEEDLE) and \
+        hook_groups_have(hooks.get("PostToolUse"), POST_NEEDLE)
+
+
+def merge_claude(data):
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+        data["hooks"] = hooks
+    for event, needle, matcher, command in (
+            ("PreToolUse", PRE_NEEDLE, "Bash", PRE_COMMAND),
+            ("PostToolUse", POST_NEEDLE, POST_MATCHER, POST_COMMAND)):
+        groups = hooks.get(event)
+        if not isinstance(groups, list):
+            groups = []
+        kept = []
+        for group in groups:
+            if not isinstance(group, dict):
+                kept.append(group)
+                continue
+            inner = [h for h in (group.get("hooks") or [])
+                     if not (isinstance(h, dict) and needle in str(h.get("command", "")))]
+            if inner or not group.get("hooks"):
+                copy = dict(group)
+                copy["hooks"] = inner
+                kept.append(copy)
+        kept.append({"matcher": matcher,
+                     "hooks": [{"type": "command", "command": command, "timeout": 10}]})
+        hooks[event] = kept
+    return data
+
+
+def cmd_wire(args):
+    if args.host != "claude":
+        return refuse("wire: unknown host %r (only claude is wired here)" % args.host)
+    path = os.path.expanduser(args.settings or "~/.claude/settings.json")
+    data = {}
+    if os.path.exists(path):
+        try:
+            data = json.loads(read_text(path))
+        except (OSError, ValueError, RecursionError) as exc:
+            if args.check:
+                return EXIT_DRIFT
+            return refuse("cannot parse %s: %s" % (path, exc))
+        if not isinstance(data, dict):
+            if args.check:
+                return EXIT_DRIFT
+            return refuse("%s is not a JSON object" % path)
+    if args.check:
+        return EXIT_OK if claude_wired(data) else EXIT_DRIFT
+    before = json.dumps(data, sort_keys=True)
+    merged = merge_claude(json.loads(json.dumps(data)))
+    if json.dumps(merged, sort_keys=True) == before and os.path.exists(path):
+        print("agent-guard: claude hooks already wired in %s" % path)
+        return EXIT_OK
+    try:
+        atomic_write_text(path, json.dumps(merged, indent=2) + "\n")
+    except OSError as exc:
+        return refuse("cannot write %s: %s" % (path, exc))
+    print("agent-guard: wired PreToolUse(Bash) + PostToolUse(%s) into %s" % (POST_MATCHER, path))
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# Warp — command_denylist per execution profile
+
+WARP_PROFILE = re.compile(r"^\[agents\.execution_profiles\.([^\]]+)\]\s*$")
+WARP_DENYLIST = re.compile(r"^(\s*command_denylist\s*=\s*)\[(.*)$")
+
+
+def warp_settings_path(explicit):
+    if explicit:
+        return os.path.expanduser(explicit)
+    forced = os.environ.get("WARP_MODEL_PIN_LAYOUT", "").strip().lower()
+    import platform
+    name = forced or ("darwin" if platform.system() == "Darwin" else "linux")
+    if name == "darwin":
+        return os.path.expanduser("~/.warp/settings.toml")
+    return os.path.expanduser("~/.config/warp-terminal/settings.toml")
+
+
+def toml_basic_encode(value):
+    outp = ['"']
+    for ch in value:
+        if ch == "\\":
+            outp.append("\\\\")
+        elif ch == '"':
+            outp.append('\\"')
+        elif ch == "\n":
+            outp.append("\\n")
+        elif ch == "\t":
+            outp.append("\\t")
+        elif ch == "\r":
+            outp.append("\\r")
+        elif ord(ch) < 0x20 or ch == "\x7f":
+            outp.append("\\u%04X" % ord(ch))
+        else:
+            outp.append(ch)
+    outp.append('"')
+    return "".join(outp)
+
+
+_TOML_SHORT = {"b": "\b", "t": "\t", "n": "\n", "f": "\f", "r": "\r", '"': '"', "\\": "\\"}
+
+
+def toml_basic_decode(body):
+    res, i = [], 0
+    while i < len(body):
+        ch = body[i]
+        if ch != "\\":
+            res.append(ch)
+            i += 1
+            continue
+        i += 1
+        if i >= len(body):
+            raise ValueError("dangling escape")
+        esc = body[i]
+        if esc in _TOML_SHORT:
+            res.append(_TOML_SHORT[esc])
+            i += 1
+        elif esc in ("u", "U"):
+            width = 4 if esc == "u" else 8
+            hexpart = body[i + 1:i + 1 + width]
+            if len(hexpart) != width:
+                raise ValueError("short unicode escape")
+            res.append(chr(int(hexpart, 16)))
+            i += 1 + width
+        else:
+            raise ValueError("unknown escape \\%s" % esc)
+    return "".join(res)
+
+
+def toml_array_element(line):
+    """Decode one `'...'` / `"..."` element line (trailing comma/comment allowed) or None."""
+    s = line.strip()
+    if not s:
+        return None
+    if s[0] == "'":
+        end = s.find("'", 1)
+        if end < 0:
+            raise ValueError("unterminated literal string: %r" % line)
+        return s[1:end]
+    if s[0] == '"':
+        i, buf = 1, []
+        while i < len(s):
+            if s[i] == "\\":
+                buf.append(s[i:i + 2])
+                i += 2
+                continue
+            if s[i] == '"':
+                return toml_basic_decode("".join(buf))
+            buf.append(s[i])
+            i += 1
+        raise ValueError("unterminated basic string: %r" % line)
+    if s.startswith("#"):
+        return None
+    raise ValueError("unsupported array element: %r" % line)
+
+
+def warp_profiles(text):
+    """{name: {"deny": (start, end) | None, "inline": bool, "entries": [..]}} per profile.
+
+    `start` is the index of the `command_denylist = [` line, `end` the index of its
+    closing `]` line (== start for an inline `[]`).
+    """
+    lines = text.splitlines(keepends=True)
+    profiles, current, i = {}, None, 0
+    while i < len(lines):
+        stripped = lines[i].rstrip("\r\n")
+        m = WARP_PROFILE.match(stripped)
+        if m:
+            current = m.group(1)
+            profiles.setdefault(current, {"deny": None, "inline": False, "entries": []})
+            i += 1
+            continue
+        if stripped.startswith("[") and current is not None:
+            current = None
+        if current is not None:
+            dm = WARP_DENYLIST.match(stripped)
+            if dm:
+                rest = dm.group(2).strip()
+                if rest.startswith("]"):
+                    profiles[current]["deny"] = (i, i)
+                    profiles[current]["inline"] = True
+                elif rest and not rest.startswith("#"):
+                    raise ValueError("profile %s: inline non-empty command_denylist is not a shape "
+                                     "this tool edits" % current)
+                else:
+                    j = i + 1
+                    entries = []
+                    while j < len(lines) and lines[j].strip() != "]":
+                        if lines[j].lstrip().startswith("["):
+                            raise ValueError("profile %s: command_denylist array never closes" % current)
+                        el = toml_array_element(lines[j])
+                        if el is not None:
+                            entries.append(el)
+                        j += 1
+                    if j >= len(lines):
+                        raise ValueError("profile %s: command_denylist array never closes" % current)
+                    profiles[current]["deny"] = (i, j)
+                    profiles[current]["entries"] = entries
+        i += 1
+    return profiles
+
+
+def warp_plan(text, patterns):
+    """(profiles, missing {name: [patterns]}, refusal or None)."""
+    try:
+        profiles = warp_profiles(text)
+    except ValueError as exc:
+        return {}, {}, str(exc)
+    if not profiles:
+        return {}, {}, "no [agents.execution_profiles.<name>] section found"
+    missing = {}
+    for name, info in profiles.items():
+        if info["deny"] is None:
+            return profiles, {}, "profile %s has no command_denylist key — not inventing one" % name
+        have = set(info["entries"])
+        lacking = [p for p in patterns if p not in have]
+        if lacking:
+            missing[name] = lacking
+    return profiles, missing, None
+
+
+def warp_rewrite(text, profiles, missing):
+    """Insert the missing basic-string lines; return (new_text, origins) where origins
+    lets the caller reconstruct the original byte-for-byte."""
+    lines = text.splitlines(keepends=True)
+    new, origins = [], []
+    inserts = {}
+    for name, lacking in missing.items():
+        start, end = profiles[name]["deny"]
+        inserts[end] = (profiles[name]["inline"], start, lacking)
+    for idx, line in enumerate(lines):
+        if idx in inserts:
+            inline, start, lacking = inserts[idx]
+            body = ["  " + toml_basic_encode(p) + ",\n" for p in lacking]
+            if inline:
+                stripped = line.rstrip("\r\n")
+                nl = line[len(stripped):]
+                dm = WARP_DENYLIST.match(stripped)
+                head = dm.group(1) + "["
+                tail = dm.group(2)  # starts with ']'
+                new.append(head + "\n")
+                origins.append(("split", idx, head))
+                for b in body:
+                    new.append(b)
+                    origins.append(("ins", None, None))
+                new.append(tail + nl)
+                origins.append(("split", idx, tail + nl))
+            else:
+                for b in body:
+                    new.append(b)
+                    origins.append(("ins", None, None))
+                new.append(line)
+                origins.append(("orig", idx, None))
+        else:
+            new.append(line)
+            origins.append(("orig", idx, None))
+    return "".join(new), origins
+
+
+def reconstruct(origins, new_text, original_lines):
+    """Rebuild the original from the origin map; any mismatch means the rewrite
+    touched a line it did not own."""
+    new_lines = new_text.splitlines(keepends=True)
+    if len(new_lines) != len(origins):
+        raise ValueError("origin map and result disagree on line count")
+    rebuilt, pending = [], {}
+    for line, (kind, idx, part) in zip(new_lines, origins):
+        if kind == "ins":
+            continue
+        if kind == "orig":
+            if line != original_lines[idx]:
+                raise ValueError("an owned rewrite changed line %d" % (idx + 1))
+            rebuilt.append(line)
+            continue
+        # split: the pieces must concatenate back to the original line
+        pieces = pending.setdefault(idx, [])
+        pieces.append(part)
+        if "".join(pieces) == original_lines[idx]:
+            rebuilt.append(original_lines[idx])
+            del pending[idx]
+    if pending:
+        raise ValueError("a split line did not reassemble")
+    return "".join(rebuilt)
+
+
+def cmd_warp(args):
+    path = warp_settings_path(args.settings)
+    if not os.path.exists(path):
+        print("agent-guard: no Warp settings at %s" % path, file=sys.stderr)
+        return EXIT_REFUSE if args.apply else EXIT_DRIFT
+    present, compiled, _errors = load_patterns(guard_dir())
+    if not present:
+        return refuse("no %s in %s" % (PATTERNS_FILE, guard_dir()))
+    patterns = [ere_to_rust(raw) for raw, _ in compiled]
+    try:
+        text = read_text(path)
+    except OSError as exc:
+        return refuse("cannot read %s: %s" % (path, exc))
+    profiles, missing, problem = warp_plan(text, patterns)
+    if problem:
+        return refuse("refusing on %s: %s" % (path, problem))
+    if not args.apply:
+        for name in profiles:
+            lacking = missing.get(name, [])
+            print("  %s: %s" % (name, "guarded" if not lacking else "%d pattern(s) missing" % len(lacking)))
+        if missing:
+            print("agent-guard: warp denylist drifted (%s)" % ", ".join(sorted(missing)))
+            return EXIT_DRIFT
+        print("agent-guard: warp denylist carries every pattern in every profile")
+        return EXIT_OK
+    if not missing:
+        print("agent-guard: warp denylist already carries every pattern (%s)" % path)
+        return EXIT_OK
+    new_text, origins = warp_rewrite(text, profiles, missing)
+    try:
+        if reconstruct(origins, new_text, text.splitlines(keepends=True)) != text:
+            raise ValueError("removing the inserted lines does not reproduce the original")
+        # the result must still plan clean: every profile now carries every pattern
+        _p2, missing2, problem2 = warp_plan(new_text, patterns)
+        if problem2 or missing2:
+            raise ValueError(problem2 or "inserted lines do not read back")
+    except ValueError as exc:
+        return refuse("refusing to write %s: %s" % (path, exc))
+    try:
+        atomic_write_text(path, new_text)
+    except OSError as exc:
+        return refuse("cannot write %s: %s" % (path, exc))
+    total = sum(len(v) for v in missing.values())
+    print("agent-guard: added %d denylist line(s) across %s in %s" % (total, ", ".join(sorted(missing)), path))
+    print("note: Warp's command_denylist means *confirm before running*, not a hard block; "
+          "Warp also re-syncs settings.toml from the account at startup, so re-run after an update.")
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# Zed — agent.tool_permissions.tools.terminal.always_deny
+
+def strip_comments(source):
+    """Offset-preserving JSONC comment mask (same construction as bin/zed-setup)."""
+    outp, i, in_string, escaped = [], 0, False, False
+    n = len(source)
+    while i < n:
+        ch = source[i]
+        nxt = source[i + 1] if i + 1 < n else ""
+        if in_string:
+            outp.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            outp.append(ch)
+            i += 1
+            continue
+        if ch == "/" and nxt == "/":
+            outp.extend("  ")
+            i += 2
+            while i < n and source[i] not in "\r\n":
+                outp.append(" ")
+                i += 1
+            continue
+        if ch == "/" and nxt == "*":
+            outp.extend("  ")
+            i += 2
+            while i < n:
+                if i + 1 < n and source[i:i + 2] == "*/":
+                    outp.extend("  ")
+                    i += 2
+                    break
+                outp.append(source[i] if source[i] in "\r\n" else " ")
+                i += 1
+            continue
+        outp.append(ch)
+        i += 1
+    masked = "".join(outp)
+    if len(masked) != len(source):
+        raise ValueError("comment mask changed the document length")
+    return masked
+
+
+def drop_trailing_commas(clean):
+    res, i, in_string, escaped = [], 0, False, False
+    n = len(clean)
+    while i < n:
+        ch = clean[i]
+        if in_string:
+            res.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == ",":
+            look = i + 1
+            while look < n and clean[look].isspace():
+                look += 1
+            if look < n and clean[look] in "}]":
+                i += 1
+                continue
+        res.append(ch)
+        i += 1
+    return "".join(res)
+
+
+def jsonc_to_json(source):
+    return drop_trailing_commas(strip_comments(source))
+
+
+def comment_text(text):
+    return "".join(a for a, b in zip(text, strip_comments(text)) if a != b)
+
+
+class SpanScanner(object):
+    """Locate every value in a JSONC mask by JSON path, *including containers*.
+
+    Extends bin/zed-setup's scanner: besides string spans it records, for each
+    object/array, `(open, close, last_item_end, item_count)` so a missing key
+    path can be inserted before the closing bracket of its deepest existing
+    ancestor, comma-aware. Spans are offsets into the offset-preserving mask,
+    hence valid in the original text.
+    """
+
+    WS = " \t\r\n"
+
+    def __init__(self, text):
+        self.text = text
+        self.pos = 0
+        self.containers = {}
+        self.kinds = {}
+
+    def scan(self):
+        self._space()
+        self._value(())
+        self._space()
+        if self.pos != len(self.text):
+            raise ValueError("trailing content at offset %d" % self.pos)
+        return self
+
+    def _space(self):
+        while self.pos < len(self.text) and self.text[self.pos] in self.WS:
+            self.pos += 1
+
+    def _peek(self):
+        if self.pos >= len(self.text):
+            raise ValueError("unexpected end of document")
+        return self.text[self.pos]
+
+    def _string(self):
+        if self._peek() != '"':
+            raise ValueError("expected a string at offset %d" % self.pos)
+        self.pos += 1
+        start = self.pos
+        while True:
+            if self.pos >= len(self.text):
+                raise ValueError("unterminated string")
+            ch = self.text[self.pos]
+            if ch == "\\":
+                self.pos += 2
+                continue
+            if ch == '"':
+                end = self.pos
+                self.pos += 1
+                return start, end
+            self.pos += 1
+
+    def _value(self, path):
+        self._space()
+        ch = self._peek()
+        if ch == "{":
+            self._container(path, "}", "object")
+        elif ch == "[":
+            self._container(path, "]", "array")
+        elif ch == '"':
+            self._string()
+            self.kinds[path] = "string"
+        else:
+            start = self.pos
+            while self.pos < len(self.text) and self.text[self.pos] not in ",}]" + self.WS:
+                self.pos += 1
+            if self.pos == start:
+                raise ValueError("unparseable value at offset %d" % self.pos)
+            self.kinds[path] = "scalar"
+
+    def _container(self, path, closer, kind):
+        open_pos = self.pos
+        self.pos += 1
+        count, last_end, index = 0, open_pos + 1, 0
+        while True:
+            self._space()
+            ch = self._peek()
+            if ch == closer:
+                self.containers[path] = (open_pos, self.pos, last_end, count)
+                self.kinds[path] = kind
+                self.pos += 1
+                return
+            if ch == ",":
+                self.pos += 1
+                continue
+            if kind == "object":
+                start, end = self._string()
+                key = json.loads(self.text[start - 1:end + 1])
+                self._space()
+                if self._peek() != ":":
+                    raise ValueError("expected ':' after key at offset %d" % self.pos)
+                self.pos += 1
+                self._value(path + (key,))
+            else:
+                self._value(path + (index,))
+                index += 1
+            count += 1
+            last_end = self.pos
+
+
+def zed_entries(data):
+    node = data
+    for key in ZED_DENY_PATH:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(key)
+    return node if isinstance(node, list) else None
+
+
+def zed_have(entries):
+    have = set()
+    for e in entries or []:
+        if isinstance(e, dict) and isinstance(e.get("pattern"), str):
+            have.add(e["pattern"])
+        elif isinstance(e, str):
+            have.add(e)
+    return have
+
+
+def zed_missing(data, patterns):
+    have = zed_have(zed_entries(data))
+    return [p for p in patterns if p not in have]
+
+
+def zed_merge(data, patterns):
+    """Structural merge; returns the entries appended (in order)."""
+    node = data
+    for key in ZED_DENY_PATH[:-1]:
+        child = node.get(key)
+        if not isinstance(child, dict):
+            child = {}
+            node[key] = child
+        node = child
+    entries = node.get(ZED_DENY_PATH[-1])
+    if not isinstance(entries, list):
+        entries = []
+        node[ZED_DENY_PATH[-1]] = entries
+    added = [{"pattern": p, "case_sensitive": True} for p in patterns if p not in zed_have(entries)]
+    entries.extend(added)
+    return added
+
+
+def _line_indent(text, pos):
+    line_start = text.rfind("\n", 0, pos) + 1
+    seg = text[line_start:pos]
+    return seg[:len(seg) - len(seg.lstrip(" \t"))]
+
+
+def _reindent(block, indent):
+    return "\n".join((indent + ln) if ln else ln for ln in block.splitlines())
+
+
+def zed_jsonc_insert(source, patterns):
+    """Insert the missing always_deny entries into a commented document by span."""
+    masked = strip_comments(source)
+    scanner = SpanScanner(masked).scan()
+    if scanner.kinds.get(()) != "object":
+        raise ValueError("top-level settings value is not an object")
+    before = json.loads(jsonc_to_json(source))
+    added = zed_merge(json.loads(json.dumps(before)), patterns)
+    if not added:
+        return source
+    # deepest existing ancestor along the path
+    depth = 0
+    while depth < len(ZED_DENY_PATH):
+        prefix = ZED_DENY_PATH[:depth + 1]
+        kind = scanner.kinds.get(prefix)
+        if kind is None:
+            break
+        expected_kind = "array" if depth == len(ZED_DENY_PATH) - 1 else "object"
+        if kind != expected_kind:
+            raise ValueError("%s exists but is a %s" % (".".join(prefix), kind))
+        depth += 1
+    anchor = ZED_DENY_PATH[:depth]
+    open_pos, close_pos, last_end, count = scanner.containers[anchor]
+    indent = _line_indent(source, close_pos)
+    if source[open_pos + 1:close_pos].find("\n") < 0:
+        # container sits on one line: entries go on their own lines at the key's indent + 2
+        indent = _line_indent(source, open_pos)
+    inner = indent + "  "
+    if depth == len(ZED_DENY_PATH):
+        payload = ",\n".join(inner + json.dumps(e) for e in added)
+    else:
+        # build the missing remainder as nested JSON under the anchor object
+        rest = ZED_DENY_PATH[depth:]
+        value = added
+        for key in reversed(rest[1:]):
+            value = {key: value}
+        block = json.dumps(value, indent=2)
+        payload = inner + json.dumps(rest[0]) + ": " + _reindent(block, inner).lstrip()
+    region = masked[last_end:close_pos]
+    needs_comma = count > 0 and "," not in region
+    if region.strip() in ("", ","):
+        replacement = ("," if count > 0 else "") + "\n" + payload + "\n" + indent + source[close_pos]
+        return source[:last_end] + replacement + source[close_pos + 1:]
+    # a comment lives between the last item and the bracket: keep it, insert before the bracket
+    insertion = ("," if needs_comma else "") + "\n" + payload + "\n" + indent
+    return source[:close_pos] + insertion + source[close_pos:]
+
+
+def zed_verify(source, result, patterns):
+    before = json.loads(jsonc_to_json(source))
+    after = json.loads(jsonc_to_json(result))
+    expected = json.loads(json.dumps(before))
+    zed_merge(expected, patterns)
+    if after != expected:
+        raise ValueError("the edit changed a value outside always_deny")
+    if comment_text(source) != comment_text(result):
+        raise ValueError("the edit altered the document's comments")
+
+
+REFUSABLE = (ValueError, IndexError, RecursionError, KeyError, TypeError)
+
+
+def cmd_zed(args):
+    path = os.path.expanduser(args.settings or "~/.config/zed/settings.json")
+    if not os.path.exists(path):
+        return EXIT_OK  # Zed-less machine: nothing to guard, nothing to invent
+    present, compiled, _errors = load_patterns(guard_dir())
+    if not present:
+        return refuse("no %s in %s" % (PATTERNS_FILE, guard_dir()))
+    patterns = [ere_to_rust(raw) for raw, _ in compiled]
+    try:
+        source = read_text(path)
+    except OSError as exc:
+        return refuse("cannot read %s: %s" % (path, exc))
+    strict = None
+    try:
+        strict = json.loads(source)
+    except REFUSABLE:
+        strict = None
+    if strict is not None:
+        if not isinstance(strict, dict):
+            return refuse("cannot safely parse %s: top-level value is not an object" % path)
+        missing = zed_missing(strict, patterns)
+        if not args.apply:
+            print("agent-guard: zed always_deny %s (%s)" %
+                  ("carries every pattern" if not missing else "lacks %d pattern(s)" % len(missing), path))
+            return EXIT_OK if not missing else EXIT_DRIFT
+        if not missing:
+            print("agent-guard: zed always_deny already carries every pattern (%s)" % path)
+            return EXIT_OK
+        zed_merge(strict, patterns)
+        try:
+            atomic_write_text(path, json.dumps(strict, indent=2) + "\n")
+        except OSError as exc:
+            return refuse("cannot write %s: %s" % (path, exc))
+        print("agent-guard: added %d always_deny entr%s to %s" % (len(missing), "y" if len(missing) == 1 else "ies", path))
+        return EXIT_OK
+    # JSONC path
+    try:
+        data = json.loads(jsonc_to_json(source))
+    except REFUSABLE as exc:
+        return refuse("cannot safely parse %s: %s" % (path, exc))
+    if not isinstance(data, dict):
+        return refuse("cannot safely parse %s: top-level value is not an object" % path)
+    missing = zed_missing(data, patterns)
+    if not args.apply:
+        print("agent-guard: zed always_deny %s (%s)" %
+              ("carries every pattern" if not missing else "lacks %d pattern(s)" % len(missing), path))
+        return EXIT_OK if not missing else EXIT_DRIFT
+    if not missing:
+        print("agent-guard: zed always_deny already carries every pattern (%s)" % path)
+        return EXIT_OK
+    try:
+        result = zed_jsonc_insert(source, patterns)
+        zed_verify(source, result, patterns)
+    except REFUSABLE as exc:
+        return refuse("refusing to write %s: %s" % (path, exc))
+    try:
+        atomic_write_text(path, result)
+    except OSError as exc:
+        return refuse("cannot write %s: %s" % (path, exc))
+    print("agent-guard: added %d always_deny entr%s to %s (comments kept)" %
+          (len(missing), "y" if len(missing) == 1 else "ies", path))
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# Codex — trust the orchestratormaxxing plugin hooks
+
+HOOK_STATE_HEADER = re.compile(r'^\[hooks\.state\."((?:[^"\\]|\\.)*)"\]\s*$')
+HOOK_STATE_ROOT = re.compile(r"^\[hooks\.state\]\s*$")
+TRUSTED_HASH_LINE = re.compile(r'^(\s*trusted_hash\s*=\s*)"((?:[^"\\]|\\.)*)"(\s*(?:#.*)?)$')
+ANY_HEADER = re.compile(r"^\s*\[")
+
+
+def hook_inventory_live(repo):
+    """The app-server `hooks/list` result, obtained through its JSON-RPC interface.
+    Marks the child as a harness child so its own hooks do not re-enter the watch."""
+    import selectors
+    import signal
+    import subprocess
+    import time
+    env = dict(os.environ, ORCHESTRATORMAXXING_HARNESS_CHILD="1", SOLPLAN_CHILD="1")
+    proc = subprocess.Popen(["codex", "app-server", "--stdio"], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            start_new_session=True, env=env)
+    selector = selectors.DefaultSelector()
+    selector.register(proc.stdout, selectors.EVENT_READ)
+    pending = [b""]
+
+    def request(ident, method, params):
+        proc.stdin.write((json.dumps({"id": ident, "method": method, "params": params}) + "\n").encode())
+        proc.stdin.flush()
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline:
+            if not selector.select(1):
+                continue
+            chunk = os.read(proc.stdout.fileno(), 65536)
+            if not chunk:
+                raise RuntimeError("app-server exited before response")
+            pending[0] += chunk
+            while b"\n" in pending[0]:
+                line, pending[0] = pending[0].split(b"\n", 1)
+                try:
+                    data = json.loads(line)
+                except ValueError:
+                    continue
+                if data.get("id") == ident:
+                    if "error" in data:
+                        raise RuntimeError(str(data["error"]))
+                    return data["result"]
+        raise TimeoutError(method)
+
+    try:
+        request(1, "initialize", {"clientInfo": {"name": "agent-guard", "version": "1"},
+                                  "capabilities": {"experimentalApi": True}})
+        proc.stdin.write(b'{"method":"initialized"}\n')
+        proc.stdin.flush()
+        return request(2, "hooks/list", {"cwds": [repo]})
+    finally:
+        selector.close()
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait()
+            except Exception:
+                pass
+
+
+def inventory_hooks(inventory):
+    rows = []
+    data = inventory.get("data") if isinstance(inventory, dict) else None
+    for entry in data or []:
+        for hook in (entry.get("hooks") if isinstance(entry, dict) else None) or []:
+            if isinstance(hook, dict) and hook.get("pluginId") == CODEX_PLUGIN_ID:
+                rows.append(hook)
+    return rows
+
+
+def toml_key_encode(key):
+    return '"' + key.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def codex_rewrite(text, wanted):
+    """Targeted edit: replace/insert trusted_hash lines in existing tables, append new
+    tables after the last [hooks.state.*] table (or [hooks.state]), else at EOF."""
+    lines = text.splitlines(keepends=True)
+    new, origins = [], []
+    tables = {}       # key -> (header_idx, body_end_idx exclusive)
+    last_state_end = None
+    current, start = None, None
+    for idx, line in enumerate(lines):
+        s = line.rstrip("\r\n")
+        m = HOOK_STATE_HEADER.match(s)
+        if m:
+            if current is not None:
+                tables[current] = (start, idx)
+            current, start = toml_basic_decode(m.group(1)), idx
+            continue
+        if HOOK_STATE_ROOT.match(s):
+            if current is not None:
+                tables[current] = (start, idx)
+            current, start = None, None
+            last_state_end = idx + 1
+            continue
+        if ANY_HEADER.match(s) and current is not None:
+            tables[current] = (start, idx)
+            current, start = None, None
+    if current is not None:
+        tables[current] = (start, len(lines))
+    for key, (_h, end) in tables.items():
+        if last_state_end is None or end > last_state_end:
+            last_state_end = end
+    replace_at, insert_after_header = {}, {}
+    for key, digest in wanted.items():
+        if key not in tables:
+            continue
+        h, end = tables[key]
+        found = None
+        for idx in range(h + 1, end):
+            tm = TRUSTED_HASH_LINE.match(lines[idx].rstrip("\r\n"))
+            if tm:
+                found = idx
+                if toml_basic_decode(tm.group(2)) != digest:
+                    nl = lines[idx][len(lines[idx].rstrip("\r\n")):]
+                    replace_at[idx] = tm.group(1) + toml_basic_encode(digest) + tm.group(3) + nl
+                break
+        if found is None:
+            insert_after_header[h] = "trusted_hash = %s\n" % toml_basic_encode(digest)
+    appended = [k for k in wanted if k not in tables]
+    for idx, line in enumerate(lines):
+        if idx in replace_at:
+            new.append(replace_at[idx])
+            origins.append(("repl", idx, None))
+        else:
+            new.append(line)
+            origins.append(("orig", idx, None))
+        if idx in insert_after_header:
+            new.append(insert_after_header[idx])
+            origins.append(("ins", None, None))
+        if appended and last_state_end is not None and idx + 1 == last_state_end:
+            _append_tables(new, origins, appended, wanted, lines[idx].endswith("\n"), following=lines[idx + 1:idx + 2])
+            appended = []
+    if appended:
+        _append_tables(new, origins, appended, wanted, (not lines) or lines[-1].endswith("\n"), following=[])
+    return "".join(new), origins
+
+
+def _append_tables(new, origins, keys, wanted, prev_terminated, following):
+    if not prev_terminated:
+        new.append("\n")
+        origins.append(("ins", None, None))
+    prev_blank = (new and new[-1].strip() == "") or not new
+    for key in keys:
+        if not prev_blank:
+            new.append("\n")
+            origins.append(("ins", None, None))
+        new.append("[hooks.state.%s]\n" % toml_key_encode(key))
+        origins.append(("ins", None, None))
+        new.append("trusted_hash = %s\n" % toml_basic_encode(wanted[key]))
+        origins.append(("ins", None, None))
+        prev_blank = False
+    if following and following[0].strip() != "":
+        new.append("\n")
+        origins.append(("ins", None, None))
+
+
+def codex_reconstruct(origins, new_text, original_lines):
+    new_lines = new_text.splitlines(keepends=True)
+    if len(new_lines) != len(origins):
+        raise ValueError("origin map and result disagree on line count")
+    rebuilt = []
+    for line, (kind, idx, _part) in zip(new_lines, origins):
+        if kind == "ins":
+            if not (line.strip() == "" or line.startswith("[hooks.state.") or line.startswith("trusted_hash = ")):
+                raise ValueError("inserted a line that is not a hooks.state table or trusted_hash: %r" % line)
+            continue
+        if kind == "repl":
+            if not TRUSTED_HASH_LINE.match(original_lines[idx].rstrip("\r\n")) or not TRUSTED_HASH_LINE.match(line.rstrip("\r\n")):
+                raise ValueError("replaced a non-trusted_hash line %d" % (idx + 1))
+            rebuilt.append(original_lines[idx])
+            continue
+        if line != original_lines[idx]:
+            raise ValueError("an owned rewrite changed line %d" % (idx + 1))
+        rebuilt.append(line)
+    return "".join(rebuilt)
+
+
+def cmd_trust_codex(args):
+    config = os.path.expanduser(args.config or "~/.codex/config.toml")
+    if args.inventory:
+        try:
+            inventory = json.loads(read_text(os.path.expanduser(args.inventory)))
+        except (OSError, ValueError, RecursionError) as exc:
+            return refuse("cannot read inventory %s: %s" % (args.inventory, exc))
+    else:
+        repo = os.path.abspath(args.repo or script_repo())
+        try:
+            inventory = hook_inventory_live(repo)
+        except Exception as exc:
+            return refuse("could not obtain the Codex hook inventory (%s: %s)" % (type(exc).__name__, exc))
+    hooks = inventory_hooks(inventory)
+    if not hooks:
+        return refuse("inventory lists no %s hooks" % CODEX_PLUGIN_ID)
+    untrusted = [h for h in hooks if h.get("trustStatus") != "trusted"]
+    if not args.apply:
+        for h in hooks:
+            print("  %s: %s" % (h.get("key"), h.get("trustStatus")))
+        if untrusted:
+            print("agent-guard: %d %s hook(s) not trusted" % (len(untrusted), CODEX_PLUGIN_ID))
+            return EXIT_DRIFT
+        print("agent-guard: every %s hook is trusted" % CODEX_PLUGIN_ID)
+        return EXIT_OK
+    wanted = {}
+    for h in hooks:
+        key, digest = h.get("key"), h.get("currentHash")
+        if isinstance(key, str) and isinstance(digest, str) and key and digest:
+            wanted[key] = digest
+    if not wanted:
+        return refuse("inventory rows carry no key/currentHash")
+    text = ""
+    if os.path.exists(config):
+        try:
+            text = read_text(config)
+        except OSError as exc:
+            return refuse("cannot read %s: %s" % (config, exc))
+    try:
+        new_text, origins = codex_rewrite(text, wanted)
+    except ValueError as exc:
+        return refuse("refusing on %s: %s" % (config, exc))
+    if new_text == text:
+        print("agent-guard: %s already trusts every %s hook" % (config, CODEX_PLUGIN_ID))
+        return EXIT_OK
+    try:
+        if codex_reconstruct(origins, new_text, text.splitlines(keepends=True)) != text:
+            raise ValueError("the rewrite touched lines it does not own")
+        check, _o = codex_rewrite(new_text, wanted)
+        if check != new_text:
+            raise ValueError("the rewrite does not read back as complete")
+    except ValueError as exc:
+        return refuse("refusing to write %s: %s" % (config, exc))
+    try:
+        atomic_write_text(config, new_text)
+    except OSError as exc:
+        return refuse("cannot write %s: %s" % (config, exc))
+    print("agent-guard: trusted %d %s hook(s) in %s" % (len(wanted), CODEX_PLUGIN_ID, config))
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# status
+
+def _host(state, path, detail=""):
+    return {"state": state, "path": path, "detail": detail}
+
+
+def host_claude():
+    path = os.path.expanduser("~/.claude/settings.json")
+    if not os.path.exists(path):
+        return _host("absent", path)
+    try:
+        data = json.loads(read_text(path))
+    except (OSError, ValueError, RecursionError) as exc:
+        return _host("missing", path, "unparseable: %s" % exc)
+    return _host("wired" if claude_wired(data) else "missing", path,
+                 "" if claude_wired(data) else "no agent-guard pre/post hook groups")
+
+
+def codex_hooks_wired(data):
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    if not isinstance(hooks, dict):
+        return False
+    return hook_groups_have(hooks.get("PreToolUse"), PRE_NEEDLE) and \
+        hook_groups_have(hooks.get("PostToolUse"), POST_NEEDLE)
+
+
+def host_codex(repo):
+    cache_root = os.path.expanduser("~/.codex/plugins/cache/personal/orchestratormaxxing")
+    candidates = []
+    if os.path.isdir(cache_root):
+        versions = sorted((v for v in os.listdir(cache_root)
+                           if os.path.isfile(os.path.join(cache_root, v, "hooks", "hooks.json"))),
+                          key=lambda v: os.path.getmtime(os.path.join(cache_root, v, "hooks", "hooks.json")))
+        if versions:
+            candidates.append(os.path.join(cache_root, versions[-1], "hooks", "hooks.json"))
+    repo_file = os.path.join(repo, "plugins", "orchestratormaxxing", "hooks", "hooks.json")
+    if os.path.isfile(repo_file):
+        candidates.append(repo_file)
+    if not candidates:
+        return _host("absent", repo_file)
+    path = candidates[0]  # the installed cache is what Codex runs; the repo file otherwise
+    try:
+        data = json.loads(read_text(path))
+    except (OSError, ValueError, RecursionError) as exc:
+        return _host("missing", path, "unparseable: %s" % exc)
+    wired = codex_hooks_wired(data)
+    return _host("wired" if wired else "missing", path, "" if wired else "no agent-guard pre/post groups")
+
+
+def host_opencode():
+    root = os.path.expanduser("~/.config/opencode")
+    path = os.path.join(root, "plugins", "orchestratormaxxing-guard.js")
+    if not os.path.isdir(root):
+        return _host("absent", path)
+    return _host("wired" if os.path.isfile(path) else "missing", path)
+
+
+def hermes_enabled_plugins(config_path):
+    """`plugins.enabled` from Hermes's config.yaml with a stdlib-only reader."""
+    try:
+        text = read_text(config_path)
+    except OSError:
+        return set()
+    lines = text.splitlines()
+    enabled, in_plugins, in_enabled = set(), False, False
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        s = line.strip()
+        if indent == 0:
+            in_plugins = s.startswith("plugins:")
+            in_enabled = False
+            continue
+        if not in_plugins:
+            continue
+        if indent == 2 and s.startswith("enabled:"):
+            rest = s[len("enabled:"):].strip()
+            if rest.startswith("[") and rest.endswith("]"):
+                for item in rest[1:-1].split(","):
+                    item = item.strip().strip("'\"")
+                    if item:
+                        enabled.add(item)
+                in_enabled = False
+            else:
+                in_enabled = True
+            continue
+        if in_enabled and s.startswith("- "):
+            enabled.add(s[2:].strip().strip("'\""))
+            continue
+        if indent == 2:
+            in_enabled = False
+            continue
+    return enabled
+
+
+def hermes_cli():
+    """A usable Hermes CLI: on PATH, else ~/.local/bin/hermes whose target exists
+    and is executable (isfile follows symlinks, so a dangling link is None)."""
+    found = shutil.which("hermes")
+    if found:
+        return found
+    cand = os.path.expanduser("~/.local/bin/hermes")
+    if os.path.isfile(cand) and os.access(cand, os.X_OK):
+        return cand
+    return None
+
+
+def host_hermes():
+    home = os.path.expanduser("~/.hermes")
+    plugin = os.path.join(home, "plugins", "command-guard", "__init__.py")
+    if not os.path.exists(os.path.join(home, "kanban.db")):
+        return _host("absent", plugin)
+    # Measured 2026-09-05 on the Mac: a stale kanban.db plus a dangling
+    # ~/.local/bin/hermes symlink (no venv) is NOT a Hermes host — the same rule
+    # install.sh uses to decide whether to deploy the plugin at all.
+    if hermes_cli() is None:
+        return _host("absent", plugin, "kanban.db present but no usable hermes CLI (PATH or ~/.local/bin/hermes)")
+    enabled = hermes_enabled_plugins(os.path.join(home, "config.yaml"))
+    problems = []
+    if not os.path.isfile(plugin):
+        problems.append("plugin file missing")
+    for name in ("command-guard", "security-guidance"):
+        if name not in enabled:
+            problems.append("%s not in plugins.enabled" % name)
+    return _host("wired" if not problems else "missing", plugin, "; ".join(problems))
+
+
+def host_warp(patterns):
+    path = warp_settings_path(None)
+    if not os.path.exists(path):
+        return _host("absent", path)
+    if not patterns:
+        return _host("missing", path, "no patterns loaded")
+    try:
+        _profiles, missing, problem = warp_plan(read_text(path), patterns)
+    except OSError as exc:
+        return _host("missing", path, str(exc))
+    if problem:
+        return _host("missing", path, problem)
+    if missing:
+        return _host("missing", path, "profiles lacking patterns: %s" % ", ".join(sorted(missing)))
+    return _host("wired", path)
+
+
+def host_zed(patterns):
+    path = os.path.expanduser("~/.config/zed/settings.json")
+    if not os.path.exists(path):
+        return _host("absent", path)
+    if not patterns:
+        return _host("missing", path, "no patterns loaded")
+    try:
+        data = json.loads(jsonc_to_json(read_text(path)))
+    except (OSError, ValueError, RecursionError) as exc:
+        return _host("missing", path, "unparseable: %s" % exc)
+    if not isinstance(data, dict):
+        return _host("missing", path, "top-level value is not an object")
+    missing = zed_missing(data, patterns)
+    return _host("wired" if not missing else "missing", path,
+                 "" if not missing else "%d pattern(s) not in always_deny" % len(missing))
+
+
+def build_status(repo):
+    directory = guard_dir()
+    present, compiled, errors = load_patterns(directory)
+    rules_present, rules, rules_error = load_security_rules(directory)
+    patterns = [ere_to_rust(raw) for raw, _ in compiled]
+    hosts = {
+        "claude": host_claude(),
+        "codex": host_codex(repo),
+        "opencode": host_opencode(),
+        "hermes": host_hermes(),
+        "warp": host_warp(patterns),
+        "zed": host_zed(patterns),
+    }
+    gate = present and not errors and rules_present and not rules_error and \
+        all(h["state"] != "missing" for h in hosts.values())
+    return {
+        "guard_dir": directory,
+        "patterns": {"file": os.path.join(directory, PATTERNS_FILE), "present": present,
+                     "count": len(compiled), "errors": errors},
+        "security_rules": {"file": os.path.join(directory, RULES_FILE), "present": rules_present,
+                           "count": len(rules), "error": rules_error},
+        "hosts": hosts,
+        "gate": bool(gate),
+    }
+
+
+def cmd_status(args):
+    repo = os.path.abspath(args.repo) if args.repo else script_repo()
+    status = build_status(repo)
+    if args.json:
+        out(json.dumps(status, indent=2, ensure_ascii=False) + "\n")
+    else:
+        p, r = status["patterns"], status["security_rules"]
+        print("guard dir: %s" % status["guard_dir"])
+        print("patterns: %s (%d compiled, %d error%s)" % (
+            "present" if p["present"] else "MISSING", p["count"], len(p["errors"]),
+            "" if len(p["errors"]) == 1 else "s"))
+        for err in p["errors"]:
+            print("  line %d skipped: %s  (%s)" % (err["line"], err["pattern"], err["error"]))
+        print("security rules: %s (%d)%s" % ("present" if r["present"] else "MISSING", r["count"],
+                                             "  error: %s" % r["error"] if r["error"] else ""))
+        for name, host in status["hosts"].items():
+            print("  %-9s %-8s %s%s" % (name, host["state"], host["path"],
+                                        "  (%s)" % host["detail"] if host["detail"] else ""))
+        print("gate: %s" % ("green" if status["gate"] else "RED"))
+    if args.gate:
+        return EXIT_OK if status["gate"] else EXIT_DRIFT
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# main
+
+def build_parser():
+    ap = argparse.ArgumentParser(prog="agent-guard",
+                                 description="cross-host pre/post security hook runner")
+    sub = ap.add_subparsers(dest="verb")
+
+    p = sub.add_parser("pre", help="PreToolUse hook: stdin JSON, exit 2 on a dangerous command")
+    p.add_argument("--format", choices=("text", "json"), default="text")
+    p.set_defaults(func=cmd_pre)
+
+    p = sub.add_parser("check", help="CLI form of pre: check <command…>")
+    p.add_argument("--format", choices=("text", "json"), default="text")
+    p.add_argument("command", nargs=argparse.REMAINDER)
+    p.set_defaults(func=cmd_check)
+
+    p = sub.add_parser("post", help="PostToolUse hook: stdin JSON, security guidance on writes")
+    p.add_argument("--format", choices=("text", "json"), default="text")
+    p.set_defaults(func=cmd_post)
+
+    p = sub.add_parser("status", help="guard data + per-host wiring")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--gate", action="store_true", help="exit 0 iff data present, no compile errors, every present host wired")
+    p.add_argument("--repo", help="repo root holding plugins/orchestratormaxxing (default: this script's repo)")
+    p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("selftest", help="run guard-cases.txt through the matcher")
+    p.set_defaults(func=cmd_selftest)
+
+    p = sub.add_parser("wire", help="wire a host's hook config: wire claude")
+    p.add_argument("host")
+    p.add_argument("--settings")
+    p.add_argument("--check", action="store_true")
+    p.set_defaults(func=cmd_wire)
+
+    p = sub.add_parser("warp", help="reconcile Warp command_denylist in every execution profile")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--apply", action="store_true")
+    g.add_argument("--check", action="store_true")
+    p.add_argument("--settings")
+    p.set_defaults(func=cmd_warp)
+
+    p = sub.add_parser("zed", help="reconcile Zed agent.tool_permissions terminal always_deny")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--apply", action="store_true")
+    g.add_argument("--check", action="store_true")
+    p.add_argument("--settings")
+    p.set_defaults(func=cmd_zed)
+
+    p = sub.add_parser("trust-codex", help="trust the orchestratormaxxing plugin hooks in ~/.codex/config.toml")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--apply", action="store_true")
+    g.add_argument("--check", action="store_true")
+    p.add_argument("--inventory", help="JSON result of the app-server hooks/list call (default: obtain live)")
+    p.add_argument("--config")
+    p.add_argument("--repo")
+    p.set_defaults(func=cmd_trust_codex)
+    return ap
+
+
+def main(argv=None):
+    parser = build_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return 2 if exc.code not in (0, None) else 0
+    if not getattr(args, "verb", None):
+        parser.print_usage(sys.stderr)
+        return EXIT_REFUSE
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        return 130
+    except BrokenPipeError:
+        return EXIT_OK
+    except Exception as exc:  # never a traceback on bad input
+        return refuse("%s: %s" % (type(exc).__name__, exc))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

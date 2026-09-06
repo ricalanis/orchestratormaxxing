@@ -1,6 +1,6 @@
 {
   "name": "orchestratormaxxing",
-  "version": "0.1.0+codex.20260906003000",
+  "version": "0.1.0+codex.20260906045328",
   "description": "Codex workflows and lifecycle gates for the orchestratormaxxing orchestration harness.",
   "author": {
     "name": "Ricardo Alanis"
@@ -8,8 +8,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Orchestratormaxxing",
-    "shortDescription": "Astra planning, bounded execution and public projection review.",
-    "longDescription": "Plan with Astra, execute through native cheap-delegate, and verify capability projection and security before public contributions. Explicit planner alternatives and interactive host models stay unchanged.",
+    "shortDescription": "Planning, research, bounded workers and verified public contributions.",
+    "longDescription": "Plan with Astra, create research briefs and durable project plans, propose coherent product tasks, verify bounded workers, and prepare weekly public contributions with explicit security gates.",
     "developerName": "Ricardo Alanis",
     "category": "Developer Tools",
     "capabilities": [

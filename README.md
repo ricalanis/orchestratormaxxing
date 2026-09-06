@@ -1,6 +1,6 @@
 # orchestratormaxxing
 
-A verifier-gated orchestration harness for Claude Code, Codex, OpenCode, Zed and Warp. It is for developers who want a deterministic, self-improving setup that protects frontier-model tokens. The public project is a graduation of a private lab.
+A verifier-gated orchestration harness for Claude Code, Codex, OpenCode, Zed and Warp. It is for developers who want a deterministic, self-improving setup that protects frontier-model tokens. The public project originated in a private lab and develops through public contributions.
 
 ## Quick start — agent kickoff
 
@@ -178,11 +178,11 @@ The doctrine isn't folklore — each rule traces to a verified paper (full notes
 
 ## Fleet mode (private half)
 
-These tools ship only from the private installer and are not part of this public projection: `folder-sync`, `gpu-agent`, `gpu-desktop`, `harness-remote`, `project-new`, `semantica`, `firecrawl`, `opendesign`, `drive`, `design-eval`, `worker-path-bench`, `transcription-fix`, and the proposal toolchain. The historical `/graduate` surfaces also ship, but require the maintainer's private manifest, which is absent here. Use `omaxxing-public-improve` for ordinary public contribution PRs; `bin/core-export` remains available for operator-configured projections.
+These tools ship only from the private installer and are not part of this public projection: `folder-sync`, `gpu-agent`, `gpu-desktop`, `harness-remote`, `project-new`, `semantica`, `firecrawl`, `opendesign`, `drive`, `design-eval`, `transcription-fix`, and the proposal toolchain. The historical `/graduate` surfaces also ship, but require the maintainer's private manifest, which is absent here. Use `omaxxing-public-improve` for ordinary public contribution PRs; `bin/core-export` remains available for operator-configured projections.
 
 ## Graduation
 
-This repo is produced by `bin/core-export` from a private source of truth. Direct edits are overwritten by the next graduation. Contributions go through PRs that the maintainer absorbs with `core-export --absorb-pr <n>`. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md). Licensed MIT.
+The project began as a gated export. Public contributions now start from current public main through `omaxxing-public-improve` and `public-improve-security`; they require no private source. Historical `core-export` operations can still replace a destination tree. This update does not disable any private export automation: its operator must reconcile independent public additions before using it. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md). Licensed MIT, with vendored notices retained alongside their files.
 
 ## Tools
 
@@ -302,3 +302,41 @@ standalone machine without fleet configuration; SSH is used only for remote task
 Offline packaging checks: `bash tests/portable-skills/run.sh` and
 `bash tests/skill-manifest-hash/run.sh`. These exercise installation boundaries;
 they do not contact a provider or establish a live SSH session.
+
+## Portable practice toolkit
+
+These capabilities work from the public checkout without a private lab or fleet.
+The installer deploys the CLI tools and governed skill payloads; Codex discovers plugin
+skills natively, while Claude/OpenCode and an available Hermes installation receive
+managed copies. Zed/Warp can read the repository skills; no native skill adapter is claimed.
+
+| Capability | Start here | Result |
+|---|---|---|
+| Research briefs | [research-prompt](plugins/orchestratormaxxing/skills/research-prompt/SKILL.md) | A self-contained research question, evidence requirements and bounded gap review |
+| Durable plans | [plan-to-repo](plugins/orchestratormaxxing/skills/plan-to-repo/SKILL.md) | Stable project-local plan files with explicit revisions/status; optional indexing |
+| Product planning | [product-manager](plugins/orchestratormaxxing/skills/product-manager/SKILL.md) | Proposal-only initiative/epic/task joins, ownership and testable acceptance |
+| Weekly contributions | [weekly-public-contribution](plugins/orchestratormaxxing/skills/weekly-public-contribution/SKILL.md) | Broad baseline/delta/backlog review with private resumable evidence |
+| Command guard | [agent-guard](plugins/orchestratormaxxing/skills/agent-guard/SKILL.md) | Shared pre-command patterns, write guidance and explicit host wiring checks |
+| Worker benchmark | [protocol](experiments/worker-path-bench/PROTOCOL.md) | Offline adapter comparison with distinct wrong-answer and infrastructure outcomes |
+| Working examples | [portable orchestration](examples/portable-orchestration/README.md) | Disposable memory, evaluation and session-handoff examples |
+
+Try the benchmark with a synthetic adapter, from the checkout:
+
+```bash
+mkdir -p .results/benchmark
+bin/worker-path-bench --cases experiments/worker-path-bench/cases.jsonl \
+  --adapter 'fixture=python3 experiments/worker-path-bench/fixtures/pass_adapter.py' \
+  --output .results/benchmark/results.jsonl --summary .results/benchmark/summary.json
+```
+
+The adapter receives task inputs, not verifier answers. The runner bounds time and output;
+raw rows retain failures, and summaries can be reproduced. No provider account is needed
+for these examples, and fixture scores are not model-performance evidence.
+
+For the guard, start with `agent-guard selftest` and `agent-guard status --gate` after
+installation. The guard reduces accidental dangerous commands; it is not a sandbox.
+It fails open on unavailable/broken runtime data and scans bounded windows. Post-write
+rules give guidance after a write, not enforcement. Warp requests confirmation, while
+Zed receives denial configuration. Codex trust is explicit and hash-pinned; Hermes's
+post-write guidance comes from its separately bundled `security-guidance` plugin.
+Configuration and simulated adapter tests do not prove interception by every host version.

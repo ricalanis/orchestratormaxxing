@@ -109,7 +109,7 @@ COMPACTION_OVERRIDE_KEYS = {
 # Contract rows whose tool, test, and installer half all live only in the private fleet
 # (install-fleet.sh). In the graduated public tree they are recorded as visible skips.
 FLEET_ONLY_CONTRACTS = frozenset({
-    "worker-path-bench", "tailnet-mcp-posture", "gpu-desktop",
+    "tailnet-mcp-posture", "gpu-desktop",
     "ubuntu-launchers", "ubuntu-clipboard", "folder-sync", "project-new",
     "opendesign", "design-router", "firecrawl", "semantica",
     "install-fleet",
@@ -2700,9 +2700,16 @@ def audit(root):
                 err("plugins/orchestratormaxxing/hooks/hooks.json", f"missing {command} lifecycle wiring")
         hook_commands = [hook.get("command", "") for phase in hooks.values()
                          for group in phase for hook in group.get("hooks", [])]
-        if any("SOLPLAN_CHILD" not in command for command in hook_commands):
+        guard_commands = {'"$HOME/.local/bin/agent-guard" pre',
+                          '"$HOME/.local/bin/agent-guard" post'}
+        if any("SOLPLAN_CHILD" not in command and command not in guard_commands
+               for command in hook_commands):
             err("plugins/orchestratormaxxing/hooks/hooks.json",
-                "every lifecycle hook must skip bounded Solplan children")
+                "lifecycle hooks must skip bounded planner children; exact guard hooks remain active")
+        for command in guard_commands:
+            if command not in hook_commands:
+                err("plugins/orchestratormaxxing/hooks/hooks.json",
+                    "command guard hooks must remain active for planner children")
         loop_hooks = [hook for group in hooks.get("SessionStart", [])
                       for hook in group.get("hooks", [])
                       if "loop-tick" in hook.get("command", "")]
@@ -3251,7 +3258,11 @@ def audit(root):
     # Safe experiments and context policy stay gated by offline/proposal-only contracts.
     # These make no network calls and mutate only disposable fixture homes.
     for contract_id, rel, where, timeout_seconds in (
-        ("worker-path-bench", "experiments/worker-path-bench/contract.sh", "bin/worker-path-bench", 30),
+        ("agent-guard", "tests/agent-guard/run.sh", "bin/agent-guard", 120),
+        ("worker-path-bench", "experiments/worker-path-bench/contract.sh", "bin/worker-path-bench", 120),
+        ("portable-examples", "tests/portable-examples/run.sh", "examples/portable-orchestration", 120),
+        ("weekly-contribution-install", "tests/weekly-contribution-install/run.sh", "install.sh", 180),
+        ("worker-path-bench-boundaries", "tests/worker-path-bench-boundaries/run.sh", "bin/worker-path-bench", 120),
         ("ticket-route", "tests/ticket-route/run.sh", "bin/ticket-route", 30),
         # Provider-capacity CLI: loopback Hermes fixture + fake official Codex
         # app-server protocol. No egress, tmux, credentials, or live provider state.

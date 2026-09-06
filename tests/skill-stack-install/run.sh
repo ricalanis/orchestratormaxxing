@@ -29,6 +29,7 @@ expected = {
     "cheap-delegate", "fanout", "gauntlet", "i-have-adhd",
     "ideas", "memory", "self-improve", "solplan", "wrap-up",
     "astraplan", "omaxxing-public-improve", "public-improve-security",
+    "research-prompt", "plan-to-repo", "product-manager", "weekly-public-contribution", "agent-guard",
 }
 assert {item["name"] for item in data["skills"]} == expected
 assert all(re.fullmatch(r"[0-9a-f]{40}", item["commit"]) for item in data["skills"])
@@ -36,6 +37,7 @@ workflow = {
     "cheap-delegate", "fanout", "gauntlet", "i-have-adhd",
     "ideas", "memory", "self-improve", "solplan", "wrap-up",
     "astraplan", "omaxxing-public-improve", "public-improve-security",
+    "research-prompt", "plan-to-repo", "product-manager", "weekly-public-contribution", "agent-guard",
 }
 for item in data["skills"]:
     if item["name"] == "sun-earth-ssh":
@@ -43,25 +45,8 @@ for item in data["skills"]:
     elif item["name"] not in workflow:
         assert "targets" not in item, item
     else:
-        expected_targets = ["Claude", "OpenCode", "Hermes"] if item["name"] in {"astraplan", "solplan", "cheap-delegate", "fanout", "omaxxing-public-improve", "public-improve-security"} else ["OpenCode", "Hermes"]
+        expected_targets = ["Claude", "OpenCode", "Hermes"] if item["name"] in {"astraplan", "solplan", "cheap-delegate", "fanout", "omaxxing-public-improve", "public-improve-security", "research-prompt", "plan-to-repo", "product-manager", "weekly-public-contribution", "agent-guard"} else ["OpenCode", "Hermes"]
         assert item["targets"] == expected_targets, item
-# The private fleet stack (never graduated) carries exactly the client-anchored and
-# Hermes-bound skills; the two manifests are disjoint.
-import os
-fleet_p = os.path.join(os.path.dirname(sys.argv[1]), "fleet-stack.json")
-if os.path.exists(fleet_p):
-    fleet = json.load(open(fleet_p, encoding="utf-8"))
-    fleet_names = {item["name"] for item in fleet["skills"]}
-    assert fleet_names == {"propuesta", "opportunity-to-project", "fleet-service",
-                           "open-design", "plan-to-repo", "product-manager", "graduate"}, fleet_names
-    assert not (fleet_names & expected)
-    for item in fleet["skills"]:
-        if item["name"] == "plan-to-repo":
-            assert item["targets"] == ["OpenCode"], item
-        elif item["name"] in {"fleet-service", "open-design", "product-manager", "graduate"}:
-            assert item["targets"] == ["OpenCode", "Hermes"], item
-        else:
-            assert "targets" not in item, item
 unslop = next(item for item in data["skills"] if item["name"] == "unslop-ui")
 assert unslop["repo"] == "https://github.com/JCarterJohnson/vibecoded-design-tells.git"
 PY

@@ -42,6 +42,15 @@ jobs:
         run: |
           git config --global user.email "verify@example.com"
           git config --global user.name "verify"
+      - name: Install pinned Bun for the real guard transport contract
+        run: npm install --global bun@1.3.14
+      - name: Required portable toolkit contracts
+        run: |
+          bash tests/agent-guard/run.sh
+          bash experiments/worker-path-bench/contract.sh
+          bash tests/worker-path-bench-boundaries/run.sh
+          bash tests/portable-examples/run.sh
+          bash tests/weekly-contribution-install/run.sh
       - name: Run harness-verify
         run: |
           # capture the exit code without letting the shell's -e kill the step:
