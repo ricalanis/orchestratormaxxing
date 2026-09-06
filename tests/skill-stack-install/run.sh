@@ -24,6 +24,7 @@ data = json.load(open(sys.argv[1], encoding="utf-8"))
 expected = {
     "anti-slop-design", "humanizer", "creator", "filler", "improver",
     "reviewer", "hallmark", "unslop-ui", "avoid-ai-design",
+    "review-triage", "sun-earth-ssh",
     "orchestration-practices",
     "cheap-delegate", "fanout", "gauntlet", "i-have-adhd",
     "ideas", "memory", "self-improve", "solplan", "wrap-up",
@@ -37,7 +38,9 @@ workflow = {
     "astraplan", "omaxxing-public-improve", "public-improve-security",
 }
 for item in data["skills"]:
-    if item["name"] not in workflow:
+    if item["name"] == "sun-earth-ssh":
+        assert item["targets"] == ["Claude", "OpenCode", "Hermes"], item
+    elif item["name"] not in workflow:
         assert "targets" not in item, item
     else:
         expected_targets = ["Claude", "OpenCode", "Hermes"] if item["name"] in {"astraplan", "solplan", "cheap-delegate", "fanout", "omaxxing-public-improve", "public-improve-security"} else ["OpenCode", "Hermes"]
@@ -203,3 +206,6 @@ test -f "$HOME5/.claude/skills/anti-slop-design/SKILL.md" \
 ok "relocated command honors the explicit repo-local source"
 
 printf '1..%d\n' "$PASS"
+
+# Real portable payloads share this installer; test their standalone/server discovery.
+bash "$ROOT/tests/portable-skills/run.sh"

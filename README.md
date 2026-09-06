@@ -279,3 +279,26 @@ The sun benefits from the same portable planning and review workflow during pers
 sessions; earth can work without a sun or private services. Host tests use synthetic
 local providers. Server task-plan/kanban planner selectors and live-provider availability
 are separate capabilities, not implied by portable skill support.
+
+### Review triage and scoped SSH
+
+`review-triage` turns cross-provider reviews into a shortlist of supported defects,
+with honest reviewer coverage and approval scoped to the requested fixes. It uses
+the existing `cross-review` and `provider-ask` tools and configured provider access.
+Material must be cleared for those providers before a review is dispatched.
+
+`sun-earth-ssh` guides an authorized remote task through an existing OpenSSH alias.
+It preserves host-key verification, bounds authentication attempts and checks remote
+identity before mutations. It requires your own trusted SSH configuration; it does
+not install keys, discover peers, provision a server or handle passwords for you.
+
+The normal installer exposes review triage as a native skill in Claude, Codex,
+OpenCode and active Hermes installations. SSH is available through the Codex plugin
+as `$orchestratormaxxing:sun-earth-ssh` and as a native skill in the other three hosts.
+For example, ask to “triage the staged review findings” or “use sun-earth-ssh to
+inspect the checkout on my configured remote host.” Both skills install on a
+standalone machine without fleet configuration; SSH is used only for remote tasks.
+
+Offline packaging checks: `bash tests/portable-skills/run.sh` and
+`bash tests/skill-manifest-hash/run.sh`. These exercise installation boundaries;
+they do not contact a provider or establish a live SSH session.
