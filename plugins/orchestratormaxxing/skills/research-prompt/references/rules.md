@@ -1,4 +1,4 @@
-# research-prompt — the 14 rules
+# research-prompt — the 15 rules
 
 Apply every rule while drafting the paragraph (SKILL.md keeps only the process and the template).
 Adapted from upstream: the gap round is bounded to one pass, unresolved uncertainty is reported

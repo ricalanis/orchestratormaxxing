@@ -395,7 +395,7 @@
         "references"
       ],
       "license": "MIT",
-      "tree_sha256": "1e003f5fa89b8d507dedfafdc6a6d51e4fcfeabc275c5ac6a5ea62181d303dc4",
+      "tree_sha256": "6e28e894f3ce87cc5a5c839de05768716e72a47a7683fe2cc8b0a7d0e418ffab",
       "targets": [
         "Claude",
         "OpenCode",

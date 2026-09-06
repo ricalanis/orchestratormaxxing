@@ -13,7 +13,7 @@ Goal: turn a vague research need into ONE self-contained paragraph that a resear
 
 ## Rules
 
-Read `references/rules.md` before drafting and apply all 14 rules (one paragraph; prompt the job, not the topic; zero prior knowledge; lead with goal + decision; embed all context; 3–6 numbered sub-questions; constraints; primary-source hierarchy; contradiction handling; completion bar; gap round; strict output, loose method; fixed per-finding format; facts only; last sentence = one markdown file).
+Read `references/rules.md` before drafting and apply all 15 rules (one paragraph; prompt the job, not the topic; zero prior knowledge; lead with goal + decision; embed all context; 3–6 numbered sub-questions; constraints; primary-source hierarchy; contradiction handling; completion bar; gap round; strict output, loose method; fixed per-finding format; facts only; last sentence = one markdown file).
 
 ## Process
 
