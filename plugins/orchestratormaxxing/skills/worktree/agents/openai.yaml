@@ -1,0 +1,4 @@
+interface:
+  display_name: "Worktree"
+  short_description: "Isolate a task in its own worktree"
+  default_prompt: "Use $orchestratormaxxing:worktree before parallel or risky edits to isolate the task in a worktree; keep the shared tree only for small single-session edits."

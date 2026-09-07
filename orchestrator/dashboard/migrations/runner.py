@@ -374,6 +374,12 @@ def _m33_task_run_envelopes(conn) -> None:
     m33_task_run_envelopes(conn)
 
 
+def _m34_task_workspace_mode(conn) -> None:
+    """m34 — `tasks.workspace_mode` (shared|worktree|container), default shared."""
+    from .m34_task_workspace_mode import m34_task_workspace_mode
+    m34_task_workspace_mode(conn)
+
+
 def _m29_task_plan_requests(conn) -> None:
     """m29 — outbox honesto para lanzar sesiones de planeación."""
     from .m29_task_plan_requests import m29_task_plan_requests
@@ -418,6 +424,7 @@ MIGRATIONS: list = [
     ("m31_commercial_proposals", _m31_commercial_proposals),
     ("m32_commercial_proposal_quality", _m32_commercial_proposal_quality),
     ("m33_task_run_envelopes", _m33_task_run_envelopes),
+    ("m34_task_workspace_mode", _m34_task_workspace_mode),
 ]
 
 # orchestrator/bin/backup-kanban — resolved absolutely: a systemd --user unit's

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""agent-guard — the cross-host pre/post security hook runner for orchestratormaxxing.
+"""agent-guard — the cross-host pre/post security hook runner for cmaxxing.
 
 One runner, six hosts. It is the only place that knows how each host's hook
 protocol looks (the `provider-ask` shape), so an adapter is a thin shim that
@@ -37,14 +37,13 @@ What is measured, not hoped:
     is the same kill switch upstream and Hermes honour.
   * `status` reports three host states — `wired` / `missing` / `absent` — and
     only a *present* host can red the gate.
-  * Configuration updates preserve unrelated settings semantically. Claude and
-    strict-JSON Zed files may be reserialized with two-space indentation. Warp
-    and Codex use guarded line edits; Zed JSONC verifies structural equality and
-    comment preservation, refusing unsafe edits with exit 2. Warp is deliberately
+  * `wire claude`, `warp`, `zed`, `trust-codex` are idempotent targeted edits:
+    every write is guarded by reconstructing the original from the result
+    (Warp/Codex: line origins; Zed: parse + structural equality + every comment
+    character kept) and refused with exit 2 when that fails. Warp is deliberately
     not validated with tomllib (its writer emits trailing-comma inline tables
-    tomllib rejects); inserted patterns are TOML basic strings. Repeated updates
-    are idempotent.
-
+    tomllib rejects); the inserted lines are TOML basic strings so `'` in a
+    pattern survives.
 
 Exit codes: 0 ok/allow · 1 check drift / selftest failure · 2 blocked (pre/check)
 or refused (bad input, unsafe edit).
@@ -588,6 +587,83 @@ def warp_settings_path(explicit):
     return os.path.expanduser("~/.config/warp-terminal/settings.toml")
 
 
+WARP_DEFAULTS_FILE = "warp-default-patterns.json"
+WARP_BYPASS_TABLE = "agents.warp_agent.other"
+WARP_BYPASS_KEY = "auto_approve_bypasses_command_denylist"
+
+
+def warp_settings_paths(explicit=None):
+    if explicit:
+        return [warp_settings_path(explicit)]
+    desktop = warp_settings_path(None)
+    forced = os.environ.get("WARP_MODEL_PIN_LAYOUT", "").strip().lower()
+    import platform
+    layout = forced or ("darwin" if platform.system() == "Darwin" else "linux")
+    if layout == "darwin":
+        cli = os.path.expanduser("~/.warp_cli/settings.toml")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+        desktop = os.path.join(base, "warp-terminal", "settings.toml")
+        cli = os.path.join(base, "warp-terminal", "cli", "settings.toml")
+    return [p for p in (desktop, cli) if os.path.isfile(p)]
+
+
+def warp_defaults():
+    with open(os.path.join(guard_dir(), WARP_DEFAULTS_FILE), encoding="utf-8") as handle:
+        values = json.load(handle)
+    if (not isinstance(values, list) or not values
+            or any(not isinstance(value, str) or not value for value in values)
+            or len(set(values)) != len(values)):
+        raise ValueError("invalid Warp default denylist data")
+    return values
+
+
+def warp_bypass_plan(text):
+    """Return (guarded replacement, drift); never parse unrelated Warp TOML."""
+    lines = text.splitlines(keepends=True)
+    table = None
+    header = None
+    key_line = None
+    match = None
+    for idx, line in enumerate(lines):
+        section = re.fullmatch(r"\s*\[([^\[\]]+)\]\s*(?:#.*)?", line.strip())
+        if section:
+            table = section.group(1).strip()
+            if table == WARP_BYPASS_TABLE:
+                if header is not None:
+                    raise ValueError("duplicate Warp bypass table")
+                header = idx
+            continue
+        if table == WARP_BYPASS_TABLE and re.match(r"\s*" + WARP_BYPASS_KEY + r"\s*=", line):
+            if key_line is not None:
+                raise ValueError("duplicate Warp bypass key")
+            key_line = idx
+            match = re.fullmatch(r"(\s*" + WARP_BYPASS_KEY + r"\s*=\s*)(true|false)([^\S\r\n]*(?:#[^\r\n]*)?)(\r?\n)?", line)
+            if not match:
+                raise ValueError("invalid Warp bypass boolean")
+    if match and match.group(2) == "false":
+        return text, False
+    new = list(lines)
+    if key_line is not None:
+        new[key_line] = match.group(1) + "false" + match.group(3) + (match.group(4) or "")
+        inverse = list(new)
+        inverse[key_line] = lines[key_line]
+        if inverse != lines:
+            raise ValueError("bypass replacement changed unrelated lines")
+    elif header is not None:
+        # If a header is the final unterminated line, insert a separator first.
+        if not new[header].endswith("\n"):
+            return text + "\n" + WARP_BYPASS_KEY + " = false\n", True
+        new.insert(header + 1, WARP_BYPASS_KEY + " = false\n")
+        if new[:header + 1] + new[header + 2:] != lines:
+            raise ValueError("bypass insertion changed unrelated lines")
+    else:
+        suffix = ("" if not text or text.endswith("\n") else "\n")
+        suffix += "\n[" + WARP_BYPASS_TABLE + "]\n" + WARP_BYPASS_KEY + " = false\n"
+        return text + suffix, True
+    return "".join(new), True
+
+
 def toml_basic_encode(value):
     outp = ['"']
     for ch in value:
@@ -640,30 +716,24 @@ def toml_basic_decode(body):
 
 
 def toml_array_element(line):
-    """Decode one `'...'` / `"..."` element line (trailing comma/comment allowed) or None."""
-    s = line.strip()
-    if not s:
+    """Decode an isolated TOML array element, never the whole Warp document.
+
+    Actual multiline strings are refused by the line-oriented editor before any
+    write. Python 3.11+ supplies the independent, canonical TOML decoder.
+    """
+    if not line.strip() or line.lstrip().startswith("#"):
         return None
-    if s[0] == "'":
-        end = s.find("'", 1)
-        if end < 0:
-            raise ValueError("unterminated literal string: %r" % line)
-        return s[1:end]
-    if s[0] == '"':
-        i, buf = 1, []
-        while i < len(s):
-            if s[i] == "\\":
-                buf.append(s[i:i + 2])
-                i += 2
-                continue
-            if s[i] == '"':
-                return toml_basic_decode("".join(buf))
-            buf.append(s[i])
-            i += 1
-        raise ValueError("unterminated basic string: %r" % line)
-    if s.startswith("#"):
-        return None
-    raise ValueError("unsupported array element: %r" % line)
+    try:
+        import tomllib
+    except ImportError as exc:
+        raise ValueError("Warp reconciliation requires Python 3.11+ (tomllib)") from exc
+    try:
+        values = tomllib.loads("value = [\n" + line + "\n]")["value"]
+    except ValueError as exc:
+        raise ValueError("invalid or unsupported Warp array element") from exc
+    if len(values) != 1 or not isinstance(values[0], str):
+        raise ValueError("expected exactly one string per Warp array line")
+    return values[0]
 
 
 def warp_profiles(text):
@@ -679,7 +749,9 @@ def warp_profiles(text):
         m = WARP_PROFILE.match(stripped)
         if m:
             current = m.group(1)
-            profiles.setdefault(current, {"deny": None, "inline": False, "entries": []})
+            if current in profiles:
+                raise ValueError("duplicate Warp execution profile")
+            profiles[current] = {"deny": None, "inline": False, "entries": []}
             i += 1
             continue
         if stripped.startswith("[") and current is not None:
@@ -687,8 +759,10 @@ def warp_profiles(text):
         if current is not None:
             dm = WARP_DENYLIST.match(stripped)
             if dm:
+                if profiles[current]["deny"] is not None:
+                    raise ValueError("duplicate Warp command_denylist key")
                 rest = dm.group(2).strip()
-                if rest.startswith("]"):
+                if re.fullmatch(r"\]\s*(?:#.*)?", rest):
                     profiles[current]["deny"] = (i, i)
                     profiles[current]["inline"] = True
                 elif rest and not rest.startswith("#"):
@@ -706,6 +780,15 @@ def warp_profiles(text):
                         j += 1
                     if j >= len(lines):
                         raise ValueError("profile %s: command_denylist array never closes" % current)
+                    # Validate delimiters across entries too. Parsing each line
+                    # alone would miss a comma absent between two valid strings.
+                    try:
+                        import tomllib
+                        decoded = tomllib.loads("value = [\n" + "".join(lines[i + 1:j]) + "\n]")["value"]
+                    except (ImportError, ValueError) as exc:
+                        raise ValueError("invalid Warp denylist array") from exc
+                    if decoded != entries:
+                        raise ValueError("Warp denylist entries disagree with array decoding")
                     profiles[current]["deny"] = (i, j)
                     profiles[current]["entries"] = entries
         i += 1
@@ -724,6 +807,7 @@ def warp_plan(text, patterns):
     for name, info in profiles.items():
         if info["deny"] is None:
             return profiles, {}, "profile %s has no command_denylist key — not inventing one" % name
+        info["owned"] = list(patterns)
         have = set(info["entries"])
         lacking = [p for p in patterns if p not in have]
         if lacking:
@@ -731,7 +815,7 @@ def warp_plan(text, patterns):
     return profiles, missing, None
 
 
-def warp_rewrite(text, profiles, missing):
+def _warp_insert(text, profiles, missing):
     """Insert the missing basic-string lines; return (new_text, origins) where origins
     lets the caller reconstruct the original byte-for-byte."""
     lines = text.splitlines(keepends=True)
@@ -769,9 +853,47 @@ def warp_rewrite(text, profiles, missing):
     return "".join(new), origins
 
 
+def warp_rewrite(text, profiles, missing):
+    """Remove proven owned duplicates, then use the guarded insertion writer."""
+    lines = text.splitlines(keepends=True)
+    deleted = {}
+    owned = []
+    for info in profiles.values():
+        owned = info["owned"]
+        seen = set()
+        start, end = info["deny"]
+        for idx in range(start + 1, end):
+            value = toml_array_element(lines[idx])
+            if value in owned and value in seen:
+                deleted[idx] = lines[idx]
+            seen.add(value)
+    retained = [idx for idx in range(len(lines)) if idx not in deleted]
+    deduped = "".join(lines[idx] for idx in retained)
+    p2, m2, error = warp_plan(deduped, owned)
+    if error:
+        raise ValueError(error)
+    result, insertions = _warp_insert(deduped, p2, m2)
+    return result, {"insertions": insertions, "retained": retained,
+                    "deleted": deleted, "deduped": deduped}
+
+
 def reconstruct(origins, new_text, original_lines):
     """Rebuild the original from the origin map; any mismatch means the rewrite
     touched a line it did not own."""
+    if isinstance(origins, dict):
+        deduped = origins["deduped"]
+        if reconstruct(origins["insertions"], new_text, deduped.splitlines(keepends=True)) != deduped:
+            raise ValueError("insertion reconstruction failed")
+        kept = iter(deduped.splitlines(keepends=True))
+        rebuilt = []
+        for idx, original in enumerate(original_lines):
+            line = origins["deleted"].get(idx) if idx in origins["deleted"] else next(kept)
+            if line != original:
+                raise ValueError("duplicate cleanup changed unrelated bytes")
+            rebuilt.append(line)
+        if next(kept, None) is not None:
+            raise ValueError("duplicate cleanup introduced unrelated lines")
+        return "".join(rebuilt)
     new_lines = new_text.splitlines(keepends=True)
     if len(new_lines) != len(origins):
         raise ValueError("origin map and result disagree on line count")
@@ -785,6 +907,8 @@ def reconstruct(origins, new_text, original_lines):
             rebuilt.append(line)
             continue
         # split: the pieces must concatenate back to the original line
+        if line not in (part, part + "\n"):
+            raise ValueError("a split line changed beyond its owned boundary")
         pieces = pending.setdefault(idx, [])
         pieces.append(part)
         if "".join(pieces) == original_lines[idx]:
@@ -796,52 +920,56 @@ def reconstruct(origins, new_text, original_lines):
 
 
 def cmd_warp(args):
-    path = warp_settings_path(args.settings)
-    if not os.path.exists(path):
-        print("agent-guard: no Warp settings at %s" % path, file=sys.stderr)
+    paths = warp_settings_paths(args.settings)
+    if not paths:
+        print("agent-guard: no Warp desktop or CLI settings present", file=sys.stderr)
         return EXIT_REFUSE if args.apply else EXIT_DRIFT
-    present, compiled, _errors = load_patterns(guard_dir())
-    if not present:
-        return refuse("no %s in %s" % (PATTERNS_FILE, guard_dir()))
-    patterns = [ere_to_rust(raw) for raw, _ in compiled]
+    results = [_cmd_warp_path(args, path) for path in paths]
+    return max(results)
+
+
+def _cmd_warp_path(args, path):
+    if not os.path.isfile(path):
+        return refuse("no Warp settings at %s" % path) if args.apply else EXIT_DRIFT
+    present, compiled, errors = load_patterns(guard_dir())
+    if not present or errors:
+        return refuse("Warp guard patterns missing or invalid")
     try:
+        patterns = list(dict.fromkeys(warp_defaults() + [ere_to_rust(raw) for raw, _ in compiled]))
         text = read_text(path)
-    except OSError as exc:
-        return refuse("cannot read %s: %s" % (path, exc))
+        _policy_text, policy_drift = warp_bypass_plan(text)
+    except (OSError, ValueError) as exc:
+        return refuse("cannot reconcile %s: %s" % (path, exc))
     profiles, missing, problem = warp_plan(text, patterns)
     if problem:
         return refuse("refusing on %s: %s" % (path, problem))
     if not args.apply:
         for name in profiles:
             lacking = missing.get(name, [])
-            print("  %s: %s" % (name, "guarded" if not lacking else "%d pattern(s) missing" % len(lacking)))
-        if missing:
-            print("agent-guard: warp denylist drifted (%s)" % ", ".join(sorted(missing)))
-            return EXIT_DRIFT
-        print("agent-guard: warp denylist carries every pattern in every profile")
-        return EXIT_OK
-    if not missing:
-        print("agent-guard: warp denylist already carries every pattern (%s)" % path)
-        return EXIT_OK
-    new_text, origins = warp_rewrite(text, profiles, missing)
+            print("  %s [%s]: %s" % (path, name, "guarded" if not lacking else "%d pattern(s) missing" % len(lacking)))
+        if policy_drift:
+            print("  %s: %s must be false" % (path, WARP_BYPASS_KEY))
+        return EXIT_DRIFT if missing or policy_drift else EXIT_OK
     try:
+        new_text, origins = warp_rewrite(text, profiles, missing)
         if reconstruct(origins, new_text, text.splitlines(keepends=True)) != text:
-            raise ValueError("removing the inserted lines does not reproduce the original")
-        # the result must still plan clean: every profile now carries every pattern
-        _p2, missing2, problem2 = warp_plan(new_text, patterns)
-        if problem2 or missing2:
-            raise ValueError(problem2 or "inserted lines do not read back")
+            raise ValueError("denylist rewrite does not reconstruct original bytes")
+        new_text, _ = warp_bypass_plan(new_text)
+        _profiles2, missing2, problem2 = warp_plan(new_text, patterns)
+        _policy2, drift2 = warp_bypass_plan(new_text)
+        if problem2 or missing2 or drift2:
+            raise ValueError(problem2 or "guard settings did not converge")
     except ValueError as exc:
         return refuse("refusing to write %s: %s" % (path, exc))
-    try:
-        atomic_write_text(path, new_text)
-    except OSError as exc:
-        return refuse("cannot write %s: %s" % (path, exc))
-    total = sum(len(v) for v in missing.values())
-    print("agent-guard: added %d denylist line(s) across %s in %s" % (total, ", ".join(sorted(missing)), path))
-    print("note: Warp's command_denylist means *confirm before running*, not a hard block; "
-          "Warp also re-syncs settings.toml from the account at startup, so re-run after an update.")
+    if new_text != text:
+        try:
+            atomic_write_text(path, new_text)
+        except OSError as exc:
+            return refuse("cannot write %s: %s" % (path, exc))
+    print("agent-guard: Warp denylist and bypass policy converged (%s)" % path)
+    print("note: Warp confirms denylisted commands; restart persistence is a separate runtime check.")
     return EXIT_OK
+
 
 
 # ---------------------------------------------------------------------------
@@ -1221,7 +1349,8 @@ ANY_HEADER = re.compile(r"^\s*\[")
 
 
 def hook_inventory_live(repo):
-    """The app-server `hooks/list` result, obtained through its JSON-RPC interface.
+    """The app-server `hooks/list` result, obtained exactly as
+    .results/delegation/host-upgrade-20260905/audit.py::hook_inventory did.
     Marks the child as a harness child so its own hooks do not re-enter the watch."""
     import selectors
     import signal
@@ -1587,21 +1716,23 @@ def host_hermes():
 
 
 def host_warp(patterns):
-    path = warp_settings_path(None)
-    if not os.path.exists(path):
-        return _host("absent", path)
+    paths = warp_settings_paths()
+    if not paths:
+        return _host("absent", warp_settings_path(None))
     if not patterns:
-        return _host("missing", path, "no patterns loaded")
+        return _host("missing", ", ".join(paths), "no patterns loaded")
     try:
-        _profiles, missing, problem = warp_plan(read_text(path), patterns)
-    except OSError as exc:
-        return _host("missing", path, str(exc))
-    if problem:
-        return _host("missing", path, problem)
-    if missing:
-        return _host("missing", path, "profiles lacking patterns: %s" % ", ".join(sorted(missing)))
-    return _host("wired", path)
-
+        required = list(dict.fromkeys(warp_defaults() + patterns))
+        problems = []
+        for path in paths:
+            text = read_text(path)
+            _profiles, missing, problem = warp_plan(text, required)
+            _policy, drift = warp_bypass_plan(text)
+            if problem or missing or drift:
+                problems.append("%s: %s" % (path, problem or "denylist or bypass policy drifted"))
+    except (OSError, ValueError) as exc:
+        return _host("missing", ", ".join(paths), str(exc))
+    return _host("missing" if problems else "wired", ", ".join(paths), "; ".join(problems))
 
 def host_zed(patterns):
     path = os.path.expanduser("~/.config/zed/settings.json")

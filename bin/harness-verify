@@ -21,50 +21,7 @@ Usage:
   bin/harness-verify --repo <path>  # verify an explicit repo root
   bin/harness-verify --json         # machine-readable
 """
-import argparse, ast, json, os, re, shlex, shutil, signal, subprocess, sys, tempfile, time
-
-
-def _ensure_runtime():
-    """Recover an older PATH-selected Python only for real CLI invocations."""
-    marker = "_HARNESS_VERIFY_REEXEC"
-    if sys.version_info >= (3, 11):
-        os.environ.pop(marker, None)
-        return
-    if not os.environ.get(marker):
-        candidates = ("python3.14", "python3.13", "python3.12", "python3.11",
-                      "/opt/homebrew/bin/python3", "/usr/local/bin/python3")
-        seen = set()
-        for name in candidates:
-            candidate = shutil.which(name) if "/" not in name else (
-                name if os.access(name, os.X_OK) else None)
-            if not candidate or os.path.realpath(candidate) in seen:
-                continue
-            seen.add(os.path.realpath(candidate))
-            try:
-                probe = subprocess.run(
-                    [candidate, "-c", "import sys,tomllib; sys.exit(sys.version_info < (3, 11))"],
-                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL, timeout=3)
-                if probe.returncode:
-                    continue
-                env = dict(os.environ, **{marker: "1"})
-                os.execve(candidate, [candidate, os.path.abspath(__file__), *sys.argv[1:]], env)
-            except (OSError, subprocess.TimeoutExpired):
-                continue
-    sys.stderr.write("harness-verify: requires Python >= 3.11; no compatible interpreter found. "
-                     "Install one or place it on PATH.\n")
-    raise SystemExit(2)
-
-
-if globals().get("__name__") == "__main__" and globals().get("__file__"):
-    _ensure_runtime()
-
-
-def _tomllib():
-    # Reusable diagnostics can load without TOML support; inspection reports it.
-    import tomllib
-    return tomllib
-
+import argparse, ast, fcntl, json, os, re, shutil, signal, subprocess, sys, tempfile, time, tomllib
 
 # Load-bearing doctrine CLAUDE.md must keep (substring match, case-insensitive).
 # Mostly section headings; "different model family" is a content invariant — the
@@ -109,10 +66,10 @@ COMPACTION_OVERRIDE_KEYS = {
 # Contract rows whose tool, test, and installer half all live only in the private fleet
 # (install-fleet.sh). In the graduated public tree they are recorded as visible skips.
 FLEET_ONLY_CONTRACTS = frozenset({
-    "tailnet-mcp-posture", "gpu-desktop",
+    "worker-path-bench", "tailnet-mcp-posture", "gpu-desktop",
     "ubuntu-launchers", "ubuntu-clipboard", "folder-sync", "project-new",
     "opendesign", "design-router", "firecrawl", "semantica",
-    "install-fleet",
+    "install-fleet", "coder-ws",
 })
 
 def compaction_override_msg(host, key):
@@ -687,6 +644,220 @@ def loop_tools_behavior_ok(root):
             shutil.rmtree(tmp2, ignore_errors=True)
     except Exception as ex:
         fails.append(f"loop-queue self-test crashed: {ex}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return fails
+
+
+def loop_queue_merge_poison_ok(root):
+    """Behavioral self-test for the queue's GIT-MERGE poison guard.
+
+    knowledge/loop-queue.jsonl is committed and synced across machines, and claim/resolve/reopen
+    rewrite a row IN PLACE. A line-merge sees remove+add, so it can keep both versions: same id,
+    SAME ts, divergent status. Measured 2026-08-30 (commit 3821b0a): 5 resurrected "open" copies
+    sat beside their "resolved" siblings, `status` counted the phantoms, `--gate` stayed ACT with
+    no real work, and `resolve <id>` rewrote only one row — the loop's own forward state lying to
+    its own gate, with harness-verify green throughout.
+
+    The guard is only correct if it separates poison from LEGITIMATE duplicate ids: `add` appends
+    a new row with the same content hash when a resolved flaw RECURS, stamping a NEW ts +
+    recurred=True. So the (id, ts) PAIR is the discriminator, and this contract asserts BOTH
+    directions — a naive dedupe-by-id would pass the first three asserts and eat the recurrence
+    history in the fourth. Black box against a throwaway LOOP_QUEUE_DIR; never touches the real
+    queue. Returns a list of failure strings (empty = pass).
+    """
+    lq = os.path.join(root, "bin", "loop-queue")
+    if not os.path.isfile(lq):
+        return []
+    interp = [sys.executable] if "python" in open(lq).readline() else []
+    tmp = tempfile.mkdtemp(prefix="hv-loopq-merge-")
+    env = dict(os.environ, LOOP_QUEUE_DIR=tmp, LOOP_QUEUE_TS="2026-01-01T00:00:00Z")
+    qfile = os.path.join(tmp, "loop-queue.jsonl")
+
+    def lq_run(*a):
+        return subprocess.run([*interp, lq, *a], capture_output=True, text=True, env=env, timeout=30)
+
+    def write(rows):
+        with open(qfile, "w") as fh:
+            for r in rows:
+                fh.write(json.dumps(r) + "\n")
+
+    def row(iid, ts, status, **kw):
+        return dict({"id": iid, "ts": ts, "layer": "V", "source": "manual",
+                     "flaw": "merge-poison contract row", "status": status, "round": None}, **kw)
+
+    fails = []
+    try:
+        # POISON: one id, one ts, two rows — the resurrected "open" beside its "resolved" twin,
+        # plus a genuine RECURRENCE pair (same id, two distinct ts) that must survive untouched.
+        write([row("lq-poison01", "2026-08-27T01:07:22Z", "resolved", round="2026-08-30"),
+               row("lq-poison01", "2026-08-27T01:07:22Z", "open"),
+               row("lq-recur001", "2026-08-25T14:47:24Z", "resolved", round="2026-08-26"),
+               row("lq-recur001", "2026-08-27T13:45:46Z", "resolved", round="2026-08-28",
+                   recurred=True)])
+        # 1. the phantom open must NOT pin the gate to ACT (this is the loop-level defect)
+        if lq_run("status", "--gate").returncode != 1:
+            fails.append("gate fired ACT on a merge-resurrected phantom open (expected 1=idle)")
+        st = json.loads(lq_run("status", "--json").stdout or "{}")
+        if st.get("actionable") != 0:
+            fails.append(f"phantom open counted as actionable (got {st.get('actionable')}, want 0)")
+        if st.get("poisoned_incarnations") != 1:
+            fails.append(f"status did not report the poison (got "
+                         f"{st.get('poisoned_incarnations')}, want 1)")
+        # 2. poison is LOUD, never silent — hiding it from the count is only safe if the
+        #    operator is told (stderr warning + a nonzero audit exit).
+        if "WARNING" not in lq_run("status", "--json").stderr:
+            fails.append("status did not warn on stderr about the poisoned queue")
+        if "WARNING" not in lq_run("list", "--status", "all", "--json").stderr:
+            fails.append("list did not warn on stderr about the poisoned queue")
+        audit = lq_run("fsck", "--json")
+        if audit.returncode != 1:
+            fails.append(f"fsck audit exit {audit.returncode} on a poisoned queue (want 1)")
+        rep = json.loads(audit.stdout or "{}")
+        if rep.get("poisoned_incarnations") != 1 or rep.get("ids") != ["lq-poison01"]:
+            fails.append(f"fsck named the wrong poison: {rep.get('ids')}")
+        # 2b. ORDER INDEPENDENCE. With the poison rows written resolved-first, an implementation
+        #     whose precedence key is a constant still picks "resolved" (max() is stable and
+        #     returns the first maximal row) — the assertions above would pass a rule that does
+        #     no ranking at all. Assert the SAME winner with the rows written open-first.
+        write([row("lq-order01", "2026-08-27T01:07:22Z", "open"),
+               row("lq-order01", "2026-08-27T01:07:22Z", "resolved", round="2026-08-30")])
+        if lq_run("fsck", "--fix").returncode != 0:
+            fails.append("fsck --fix failed on the open-first ordering")
+        ordered = [json.loads(l) for l in open(qfile) if l.strip()]
+        if len(ordered) != 1 or ordered[0].get("status") != "resolved":
+            fails.append(f"winner depends on ROW ORDER (open-first collapsed to "
+                         f"{[r.get('status') for r in ordered]}, want ['resolved'])")
+        write([row("lq-poison01", "2026-08-27T01:07:22Z", "resolved", round="2026-08-30"),
+               row("lq-poison01", "2026-08-27T01:07:22Z", "open"),
+               row("lq-recur001", "2026-08-25T14:47:24Z", "resolved", round="2026-08-26"),
+               row("lq-recur001", "2026-08-27T13:45:46Z", "resolved", round="2026-08-28",
+                   recurred=True)])
+        # 3. --fix collapses the poisoned incarnation to its winner and leaves RECURRENCE alone
+        fixrep = json.loads(lq_run("fsck", "--fix", "--json").stdout or "{}")
+        rows = [json.loads(l) for l in open(qfile) if l.strip()]
+        if fixrep.get("rows_after") != len(rows):
+            fails.append(f"fsck reported rows_after={fixrep.get('rows_after')} but wrote "
+                         f"{len(rows)} rows")
+        if len(rows) != 3:
+            fails.append(f"fsck --fix left {len(rows)} rows (want 3: 1 collapsed + 2 recurrence)")
+        if len([r for r in rows if r["id"] == "lq-recur001"]) != 2:
+            fails.append("fsck --fix ate the legitimate recurrence pair (dedupe by bare id?)")
+        surv = [r for r in rows if r["id"] == "lq-poison01"]
+        if len(surv) != 1 or surv[0].get("status") != "resolved":
+            fails.append(f"poison collapsed to the wrong winner: "
+                         f"{[r.get('status') for r in surv]} (want ['resolved'])")
+        if lq_run("fsck").returncode != 0:
+            fails.append("fsck still reports poison after --fix")
+        # 4. a clean queue must NOT be flagged (no false positive on recurrence alone)
+        write([row("lq-recur002", "2026-08-25T14:47:24Z", "resolved", round="2026-08-26"),
+               row("lq-recur002", "2026-08-27T13:45:46Z", "open", recurred=True)])
+        if lq_run("fsck").returncode != 0:
+            fails.append("fsck flagged a legitimate recurrence pair as merge poison")
+        if lq_run("status", "--gate").returncode != 0:
+            fails.append("gate went idle on a real open recurrence (expected 0=act)")
+        # 4b. THE REAL RECURRENCE PATH, under a PINNED clock. `ts` is second-granular and
+        #     LOOP_QUEUE_TS pins it outright, so a recurrence row can carry its predecessor's
+        #     exact timestamp — keying identity on (id, ts) classifies that as poison and eats
+        #     the reopen. Drive the actual add→resolve→add sequence rather than a fixture, so
+        #     the contract crosses the same boundary the loop does.
+        os.remove(qfile)
+        lq_run("add", "--layer", "V", "--source", "manual", "pinned-clock recurrence")
+        first = json.loads(lq_run("list", "--status", "open", "--json").stdout or "[]")
+        if len(first) != 1:
+            fails.append("pinned-clock: first add did not create exactly one open row")
+        else:
+            lq_run("resolve", first[0]["id"])
+            lq_run("add", "--layer", "V", "--source", "manual", "pinned-clock recurrence")
+            again = json.loads(lq_run("list", "--status", "open", "--json").stdout or "[]")
+            if not (len(again) == 1 and again[0].get("recurred")):
+                fails.append("a recurrence sharing its predecessor's PINNED ts was swallowed "
+                             "as merge poison (identity keyed on ts?)")
+            if lq_run("fsck").returncode != 0:
+                fails.append("fsck flagged a same-ts recurrence as merge poison")
+        # 4c. Rows the tool never wrote (hand-edited / corrupt, no id) must PASS THROUGH, never
+        #     be grouped with each other and silently collapsed.
+        write([{"ts": "2026-08-27T01:07:22Z", "flaw": "identical but for status", "status": "open"},
+               {"ts": "2026-08-27T01:07:22Z", "flaw": "identical but for status",
+                "status": "resolved"}])
+        if lq_run("fsck").returncode != 0:
+            fails.append("fsck flagged id-less rows as poison")
+        lq_run("fsck", "--fix")
+        if len([l for l in open(qfile) if l.strip()]) != 2:
+            fails.append("fsck --fix collapsed two distinct id-less rows (silent data loss)")
+        # 4d. Every RUNG of the status ladder must be ordered, in BOTH row orders. Asserting only
+        #     resolved-vs-open leaves the ladder's interior unpinned: a rank table that collapses
+        #     two rungs to the same value degrades to "first row wins" for that pair.
+        for hi, lo in (("claimed", "open"), ("resolved", "claimed")):
+            for first, second in ((hi, lo), (lo, hi)):
+                write([row("lq-ladder01", "2026-08-27T01:07:22Z", first),
+                       row("lq-ladder01", "2026-08-27T01:07:22Z", second)])
+                lq_run("fsck", "--fix")
+                got = [json.loads(l) for l in open(qfile) if l.strip()]
+                if len(got) != 1 or got[0].get("status") != hi:
+                    fails.append(f"status ladder unpinned: {first}-first vs {second} collapsed to "
+                                 f"{[r.get('status') for r in got]} (want ['{hi}'])")
+        # 4e. TWO successive recurrences under the pinned clock — the case the incarnation counter
+        #     exists for. Rows 2 and 3 share id, ts AND recurred=True, so nothing but that counter
+        #     tells them apart; without it the second recurrence is eaten as merge poison.
+        os.remove(qfile)
+        for _ in range(3):
+            lq_run("add", "--layer", "V", "--source", "manual", "twice-recurring flaw")
+            cur = json.loads(lq_run("list", "--status", "open", "--json").stdout or "[]")
+            if cur:
+                lq_run("resolve", cur[0]["id"])
+        rows3 = [json.loads(l) for l in open(qfile) if l.strip()]
+        if len(rows3) != 3:
+            fails.append(f"two successive same-ts recurrences collapsed: {len(rows3)} rows "
+                         f"(want 3) — incarnations indistinguishable")
+        if len({r.get("inc") for r in rows3}) != 3:
+            fails.append(f"incarnation counters not distinct: {[r.get('inc') for r in rows3]}")
+        if lq_run("fsck").returncode != 0:
+            fails.append("fsck flagged two successive same-ts recurrences as poison")
+        # 4f. `_find` must still accept the bare hash (no lq- prefix) through the canonical view.
+        os.remove(qfile)
+        lq_run("add", "--layer", "V", "--source", "manual", "bare hash resolve")
+        bare = json.loads(lq_run("list", "--status", "open", "--json").stdout or "[]")
+        if bare and lq_run("resolve", bare[0]["id"].removeprefix("lq-")).returncode != 0:
+            fails.append("resolve by BARE hash (no lq- prefix) stopped working")
+        # 5. a REOPEN must outrank its pre-reopen "resolved" twin, else the collapse silently
+        #    erases a deliberate reopen (the case a naive status-only rule gets wrong).
+        write([row("lq-reopen01", "2026-08-27T01:07:22Z", "resolved", round="2026-08-30"),
+               row("lq-reopen01", "2026-08-27T01:07:22Z", "open",
+                   reopened_at="2026-08-31T00:00:00Z", reopen_count=1)])
+        st2 = json.loads(lq_run("status", "--json").stdout or "{}")
+        if st2.get("actionable") != 1:
+            fails.append(f"collapse erased a deliberate reopen (actionable "
+                         f"{st2.get('actionable')}, want 1)")
+        lq_run("fsck", "--fix")
+        rows2 = [json.loads(l) for l in open(qfile) if l.strip()]
+        if len(rows2) != 1 or int(rows2[0].get("reopen_count") or 0) != 1:
+            fails.append(f"reopen row lost in the collapse: {rows2}")
+        # 6. `--fix` REWRITES the queue, so it must join the bounded lock transaction like every
+        #    other mutating verb; a lock-free repair silently drops a concurrent writer's row.
+        #    Audit mode must stay lock-FREE, else contention would exit 1 and be misread as
+        #    "poison found". Hold the sidecar lock and assert both halves.
+        write([row("lq-locked01", "2026-08-27T01:07:22Z", "resolved", round="2026-08-30"),
+               row("lq-locked01", "2026-08-27T01:07:22Z", "open")])
+        held = open(qfile + ".lock", "a+")
+        try:
+            fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            benv = dict(env, LOOP_QUEUE_LOCK_TIMEOUT="1")
+            busy = subprocess.run([*interp, lq, "fsck", "--fix"], capture_output=True, text=True,
+                                  env=benv, timeout=30)
+            if busy.returncode != 1 or "lock busy" not in busy.stderr:
+                fails.append(f"fsck --fix wrote WITHOUT the queue lock (rc={busy.returncode}) — "
+                             f"a concurrent writer would be lost")
+            if len([l for l in open(qfile) if l.strip()]) != 2:
+                fails.append("fsck --fix modified the queue while the lock was held")
+            ro = subprocess.run([*interp, lq, "fsck", "--json"], capture_output=True, text=True,
+                                env=benv, timeout=30)
+            if ro.returncode != 1 or "lock busy" in ro.stderr:
+                fails.append("fsck AUDIT blocked on the lock — contention would read as poison")
+        finally:
+            held.close()
+    except Exception as ex:
+        fails.append(f"loop-queue merge-poison self-test crashed: {ex}")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return fails
@@ -1800,7 +1971,16 @@ KNOWN_PLUGIN_MARKETPLACES = ("claude-code-warp", "claude-hud", "claude-plugins-o
                              "openai-codex", "i-have-adhd")
 # "openai-curated" is Codex's builtin curated marketplace — implicit today (absent from
 # config.toml), but any Codex version that materializes it must not warn on stock state.
-KNOWN_CODEX_MARKETPLACES = ("openai-curated", "personal", "i-have-adhd")
+# Measured on the Mac 2026-09-06 from the deployed ~/.codex/config.toml, never guessed.
+# All eight registrations were provenance-checked before being admitted: four are vendor
+# builtins or first-party plugin sources (openai-*, claude-plugins-official), two are
+# Warp's own agent plugins for Claude Code and Codex — legitimate now that Warp is a
+# first-class surface, and claude-code-warp was already admitted on the Claude side —
+# and claude-hud is the operator's statusline plugin. None is foreign.
+KNOWN_CODEX_MARKETPLACES = ("openai-curated", "personal", "i-have-adhd",
+                            "openai-bundled", "openai-primary-runtime",
+                            "claude-code-warp", "claude-hud",
+                            "claude-plugins-official", "openai-codex", "codex-warp")
 
 # (name, source) pinning — lq-d45051fa. Name-only matching let a foreign installer pass
 # green by REUSING a known name; on the Codex side [marketplaces.personal] would also
@@ -1821,6 +2001,19 @@ KNOWN_PLUGIN_MARKETPLACE_SOURCES = {
 }
 KNOWN_CODEX_MARKETPLACE_SOURCES = {
     "i-have-adhd": ("git:https://github.com/ayghri/i-have-adhd.git",),
+    # Git-sourced registrations carry a stable cross-machine identity, so they are pinned.
+    # Measured 2026-09-06 on the Mac; a second machine registering a different source for
+    # one of these names will now warn, which is the point of (name, source) pinning.
+    "claude-code-warp": ("git:https://github.com/warpdotdev/claude-code-warp.git",),
+    "codex-warp": ("git:https://github.com/warpdotdev/codex-warp.git",),
+    "claude-hud": ("git:https://github.com/jarrodwatts/claude-hud.git",),
+    "claude-plugins-official": ("git:https://github.com/anthropics/claude-plugins-official.git",),
+    "openai-codex": ("git:https://github.com/openai/codex-plugin-cc.git",),
+    # "openai-bundled" and "openai-primary-runtime" are deliberately NOT pinned: both are
+    # local vendor paths that vary per machine and per Codex version
+    # (~/.codex/.tmp/bundled-marketplaces/…, ~/.cache/codex-runtimes/…). A literal path pin
+    # would manufacture phantom warns on the other machine — the same signal-vs-artifact
+    # reasoning that leaves "personal" unpinned. They stay name-only matched.
     # "personal" is deliberately NOT pinned to a literal path: the checkout lives at
     # ~/dev on Ubuntu, ~/Dev on the Mac, and harness-verify itself runs from loop
     # worktrees — a realpath pin would manufacture phantom warns (signal-vs-artifact).
@@ -2039,15 +2232,10 @@ def deployed_host_state_ok(root, home=None):
     if os.path.isfile(codex_cfg):
         try:
             with open(codex_cfg, "rb") as fh:
-                cfg = _tomllib().load(fh)
-        except ModuleNotFoundError:
-            cfg = None
-            issues.append(("warn", "~/.codex/config.toml",
-                           "TOML inspection unavailable: requires Python >= 3.11"))
+                cfg = tomllib.load(fh)
         except Exception as ex:
-            cfg = None
             issues.append(("warn", "~/.codex/config.toml", f"unparseable TOML: {ex}"))
-        if cfg is not None:
+        else:
             # Scan nested tables too. A pin only takes effect at top level, but scanning
             # the whole tree removes an ambiguity class: a red-proof that appended the key
             # at EOF landed it inside [mcp_servers] and read as "not caught", which is
@@ -2125,7 +2313,8 @@ def deployed_host_state_ok(root, home=None):
                        # Zed's always-on global Instructions file; the isfile
                        # skip below keeps Zed-less machines green.
                        (os.path.join(".config", "zed", "AGENTS.md"),
-                        "~/.config/zed/AGENTS.md")):
+                        "~/.config/zed/AGENTS.md"),
+                       (os.path.join(".agents", "AGENTS.md"), "~/.agents/AGENTS.md")):
         path = os.path.join(home, rel)
         if not os.path.isfile(path):
             continue
@@ -2282,43 +2471,6 @@ def deployed_host_state_ok(root, home=None):
                                f"bin/{name} — install.sh never prunes; remove it with "
                                f"`rm ~/.local/bin/{name}`"))
 
-    # Compare matching bin/ names; generated and renamed destinations have no same-name source.
-    if os.path.isdir(bin_dst):
-        repo_bin = os.path.join(root, "bin")
-        try:
-            names = sorted(os.listdir(repo_bin))
-        except OSError:
-            issues.append(("warn", "~/.local/bin",
-                           "deploy-freshness inspection unavailable: bin/ unreadable"))
-        else:
-            drifted, unreadable = [], []
-            for name in names:
-                source = os.path.join(repo_bin, name)
-                installed = os.path.join(bin_dst, name)
-                if not os.path.isfile(source) or not os.path.isfile(installed):
-                    continue
-                try:
-                    with open(source, "rb") as a, open(installed, "rb") as b:
-                        if os.fstat(a.fileno()).st_size != os.fstat(b.fileno()).st_size:
-                            drifted.append(name)
-                            continue
-                        while True:
-                            left, right = a.read(65536), b.read(65536)
-                            if left != right:
-                                drifted.append(name)
-                                break
-                            if not left:
-                                break
-                except OSError:
-                    unreadable.append(name)
-            if drifted:
-                issues.append(("warn", "~/.local/bin",
-                               "deployed bridges differ from the repo: " + ", ".join(drifted)
-                               + "; rerun ./install.sh to update them"))
-            if unreadable:
-                issues.append(("warn", "~/.local/bin",
-                               "deploy-freshness inspection unavailable: " + ", ".join(unreadable)))
-
     return issues
 
 
@@ -2427,43 +2579,39 @@ def audit(root):
                          "BSD sed reads the script as the suffix (macOS red "
                          "lq-09c00748); rewrite with python3 or `sed -i.bak`")
 
-    # --- Lifecycle/Governance: deploy coverage — actual copies, never mentions ---
-    # This is a lint for our direct cp/chmod convention, not a shell evaluator.
-    # Skip heredoc payloads (Python, generated scripts and documentation).
-    copied, chmodded, shipped = set(), set(), set()
-    heredocs = []
-    for line in install_txt.splitlines():
-        if heredocs:
-            delimiter, strip_tabs = heredocs[0]
-            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
-                heredocs.pop(0)
-            continue
-        heredocs.extend((m.group(3), bool(m.group(1))) for m in re.finditer(
-            r"<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z_0-9]*)\2", line))
-        try:
-            words = shlex.split(line, comments=True)
-        except ValueError:
-            continue
-        if not words:
-            continue
-        if words[0] == "cp" and len(words) >= 3:
-            src, dest = words[-2:]
-            match = re.fullmatch(r"\$BIN_DST/([\w.+-]+)", dest)
-            name = match.group(1) if match else (
-                os.path.basename(src) if dest in ("$BIN_DST", "$BIN_DST/") else None)
-            if name:
-                copied.add(name)
-                source = re.fullmatch(r"\$REPO_DIR/bin/([\w.+-]+)", src)
-                if source:
-                    shipped.add(source.group(1))
-        elif words[0] == "chmod" and "+x" in words:
-            chmodded.update(m.group(1) for word in words for m in
-                            [re.fullmatch(r"\$BIN_DST/([\w.+-]+)", word)] if m)
+    # --- Lifecycle/Governance: deploy coverage — every tool & command is in install.sh ---
+    # A tool that exists but install.sh never copies = it won't reach a global install.
     for rel in tools:
-        if install_txt and os.path.basename(rel) not in shipped:
-            err(rel, "exists but is never copied by install.sh to $BIN_DST")
-    for name in sorted(copied - chmodded):
-        err("install.sh", f"{name} is copied to $BIN_DST but never chmod +x'd — ships non-executable")
+        base = os.path.basename(rel)
+        if install_txt and base not in install_txt:
+            err(rel, f"exists but is never referenced in install.sh — global install won't ship it")
+
+    # A tool can be cp'd to the global bindir but left out of the `chmod +x` line —
+    # it then ships NON-EXECUTABLE and silently breaks, while this guard stays green.
+    # Spec: every basename copied to $BIN_DST must also be made executable there.
+    # Accept both `cp src "$BIN_DST/name"` (explicit) and `cp src "$BIN_DST/"` (dir dest →
+    # basename from source). Checks against an EXPLICIT chmod list (our install.sh convention);
+    # a glob `chmod +x "$BIN_DST/"*` would trip a false POSITIVE — which is the safe direction
+    # for a guard (it flags loudly instead of silently passing a non-exec tool) and nudges back
+    # to an explicit list. We never silently pass via a glob (no dangerous false negative).
+    if install_txt:
+        explicit_re = re.compile(r"\$BIN_DST/([\w.+-]+)")   # "$BIN_DST/oll"
+        dir_dest_re = re.compile(r"\$BIN_DST/?$")           # "$BIN_DST" or "$BIN_DST/"
+        copied, chmodded = set(), set()
+        for line in install_txt.splitlines():
+            s = line.strip()
+            quoted = re.findall(r'"([^"]+)"', line)
+            if s.startswith("cp ") and "$BIN_DST" in line and len(quoted) >= 2:
+                src, dest = quoted[0], quoted[-1]
+                m = explicit_re.search(dest)
+                if m:
+                    copied.add(m.group(1))
+                elif dir_dest_re.search(dest):
+                    copied.add(os.path.basename(src))
+            elif "chmod" in line and "+x" in line and "$BIN_DST" in line:
+                chmodded |= set(explicit_re.findall(line))
+        for name in sorted(copied - chmodded):
+            err("install.sh", f"{name} is copied to $BIN_DST but never chmod +x'd — ships non-executable")
 
     if os.path.isdir(cmd_dir):
         for f in sorted(os.listdir(cmd_dir)):
@@ -2521,7 +2669,7 @@ def audit(root):
             rel = f".codex/agents/{f}"
             try:
                 with open(os.path.join(codex_agent_dir, f), "rb") as fh:
-                    data = _tomllib().load(fh)
+                    data = tomllib.load(fh)
                 missing = [k for k in ("name", "description", "developer_instructions")
                            if not isinstance(data.get(k), str) or not data[k].strip()]
                 if missing:
@@ -2532,7 +2680,7 @@ def audit(root):
         sol_planner = os.path.join(codex_agent_dir, "sol-planner.toml")
         if os.path.isfile(sol_planner):
             with open(sol_planner, "rb") as fh:
-                sol = _tomllib().load(fh)
+                sol = tomllib.load(fh)
             if sol.get("model") != "gpt-5.6-sol" or sol.get("model_reasoning_effort") != "ultra":
                 err(".codex/agents/sol-planner.toml",
                     "Codex planner must pin gpt-5.6-sol with ultra reasoning")
@@ -2632,7 +2780,7 @@ def audit(root):
     if os.path.isfile(codex_config):
         try:
             with open(codex_config, "rb") as fh:
-                cfg = _tomllib().load(fh)
+                cfg = tomllib.load(fh)
             agents = cfg.get("agents") or {}
             if agents.get("max_depth") != 1:
                 err(".codex/config.toml", "agents.max_depth must stay 1 (no recursive fan-out)")
@@ -2677,11 +2825,11 @@ def audit(root):
             err("plugins/orchestratormaxxing",
                 "install.sh must register, install, and verify the plugin is installed+enabled")
         prompts = (manifest.get("interface") or {}).get("defaultPrompt") or []
-        astra_i = next((i for i, p in enumerate(prompts) if "$orchestratormaxxing:astraplan" in p), None)
+        sol_i = next((i for i, p in enumerate(prompts) if "$orchestratormaxxing:solplan" in p), None)
         fan_i = next((i for i, p in enumerate(prompts) if "$orchestratormaxxing:fanout" in p), None)
-        if astra_i is None or fan_i is None or astra_i >= fan_i:
+        if sol_i is None or fan_i is None or sol_i >= fan_i:
             err("plugins/orchestratormaxxing/.codex-plugin/plugin.json",
-                "default prompts must prioritize astraplan before fanout")
+                "default prompts must prioritize solplan before fanout")
         if "EXPECTED_PLUGIN_VERSION" not in install_txt or 'p.get("version") == expected' not in install_txt:
             err("install.sh", "Codex plugin install must verify the exact manifest version")
 
@@ -2694,29 +2842,39 @@ def audit(root):
             err("plugins/orchestratormaxxing/hooks/hooks.json",
                 f"missing lifecycle hooks: {', '.join(sorted(missing_hook_events))}")
         hook_text = open(plugin_hooks).read()
-        for command in ("mem-audit", "loop-tick", "session-log", "agent-tab-status",
-                        "warp-agent-event", "warp-agent-recovery", "codex-stop-hook"):
-            if command not in hook_text:
+        startup_helper = os.path.join(root, "bin", "codex-session-start")
+        startup_text = open(startup_helper).read() if os.path.isfile(startup_helper) else ""
+        lifecycle_text = hook_text + "\n" + startup_text
+        for command in ("codex-session-start", "mem-audit", "loop-tick", "session-log",
+                        "agent-tab-status", "warp-agent-event", "warp-agent-recovery",
+                        "codex-stop-hook"):
+            if command not in lifecycle_text:
                 err("plugins/orchestratormaxxing/hooks/hooks.json", f"missing {command} lifecycle wiring")
         hook_commands = [hook.get("command", "") for phase in hooks.values()
                          for group in phase for hook in group.get("hooks", [])]
-        guard_commands = {'"$HOME/.local/bin/agent-guard" pre',
-                          '"$HOME/.local/bin/agent-guard" post'}
-        if any("SOLPLAN_CHILD" not in command and command not in guard_commands
-               for command in hook_commands):
+        # The agent-guard pre/post hooks are the one deliberate exception: a
+        # bounded Solplan child gets the seatbelt too, so they carry no
+        # short-circuit (tests/agent-guard/run.sh C13 pins the absence).
+        guard_commands = [c for c in hook_commands
+                          if 'agent-guard" pre' in c or 'agent-guard" post' in c]
+        lifecycle_commands = [c for c in hook_commands if c not in guard_commands]
+        if any("SOLPLAN_CHILD" not in command for command in lifecycle_commands):
             err("plugins/orchestratormaxxing/hooks/hooks.json",
-                "lifecycle hooks must skip bounded planner children; exact guard hooks remain active")
-        for command in guard_commands:
-            if command not in hook_commands:
-                err("plugins/orchestratormaxxing/hooks/hooks.json",
-                    "command guard hooks must remain active for planner children")
+                "every lifecycle hook must skip bounded Solplan children")
+        if any("SOLPLAN_CHILD" in command for command in guard_commands):
+            err("plugins/orchestratormaxxing/hooks/hooks.json",
+                "agent-guard hooks must not skip bounded Solplan children")
         loop_hooks = [hook for group in hooks.get("SessionStart", [])
                       for hook in group.get("hooks", [])
-                      if "loop-tick" in hook.get("command", "")]
+                      if ("loop-tick" in hook.get("command", "")
+                          or "codex-session-start" in hook.get("command", ""))]
+        loop_sources = [startup_text if "codex-session-start" in hook.get("command", "")
+                        else hook.get("command", "") for hook in loop_hooks]
         if (not loop_hooks
-                or any("loop-tick --kick --quiet" not in hook.get("command", "")
-                       or "loop-tick --gate" in hook.get("command", "")
-                       for hook in loop_hooks)):
+                or any("loop-tick\", \"--kick\", \"--quiet" not in source
+                       and "loop-tick --kick --quiet" not in source
+                       for source in loop_sources)
+                or any("loop-tick --gate" in source for source in loop_sources)):
             err("plugins/orchestratormaxxing/hooks/hooks.json",
                 "SessionStart watcher must kick the verifier asynchronously, never gate inline")
         if any(not 0 < hook.get("timeout", 0) <= 15 for hook in loop_hooks):
@@ -2730,7 +2888,7 @@ def audit(root):
     if os.path.isdir(plugin_skills):
         skills = [d for d in sorted(os.listdir(plugin_skills))
                   if os.path.isdir(os.path.join(plugin_skills, d))]
-        required = {"fanout", "ideas", "self-improve", "wrap-up", "solplan", "astraplan", "memory", "graduate", "omaxxing-public-improve", "public-improve-security"}
+        required = {"fanout", "ideas", "self-improve", "wrap-up", "solplan", "astraplan", "memory", "graduate"}
         if fleet_present:
             required.add("product-manager")   # Hermes roadmap/kanban role: fleet-only
         missing = required - set(skills)
@@ -2777,8 +2935,7 @@ def audit(root):
                 err(rel, f"gauntlet intake positioning missing (needs {token!r})")
         routing_contract = {
             "solplan": ("Prioritize this before $orchestratormaxxing:fanout", "EXECUTION SHAPE"),
-            "astraplan": ("Prioritize this before $orchestratormaxxing:fanout", "EXECUTION SHAPE"),
-            "fanout": ("Use only after planning is complete", "invoke `$orchestratormaxxing:astraplan`"),
+            "fanout": ("Use only after planning is complete", "invoke `$orchestratormaxxing:solplan`"),
         }
         for name, tokens in routing_contract.items():
             path = os.path.join(plugin_skills, name, "SKILL.md")
@@ -2851,7 +3008,8 @@ def audit(root):
                 test_env["PYTHONDONTWRITEBYTECODE"] = "1"
                 try:
                     result = subprocess.run(
-                        [sys.executable, runner_test], cwd=root, env=test_env,
+                        [sys.executable, "-m", "unittest", "discover", "-s",
+                         os.path.dirname(runner_test), "-p", "test_*runner.py"], cwd=root, env=test_env,
                         capture_output=True, text=True, timeout=30,
                     )
                 except subprocess.TimeoutExpired:
@@ -3123,13 +3281,13 @@ def audit(root):
             if h not in low:
                 warn("CLAUDE.md", f"missing load-bearing doctrine section: '{h}'")
         if "codex plan-first routing" not in low:
-            err("CLAUDE.md", "Codex adapter must prioritize astraplan before fanout")
+            err("CLAUDE.md", "Codex adapter must prioritize solplan before fanout")
     else:
         err("CLAUDE.md", "missing")
 
-    if not os.path.isfile(codex_design) or "routes nontrivial unplanned work through `$orchestratormaxxing:astraplan` first" not in open(codex_design).read():
+    if not os.path.isfile(codex_design) or "routes nontrivial unplanned work through `$orchestratormaxxing:solplan` first" not in open(codex_design).read():
         err("knowledge/codex-harness-design.md",
-            "Codex design must document astraplan-before-fanout routing")
+            "Codex design must document solplan-before-fanout routing")
 
     # --- Governance: doc-inventory policy (lq-1f8b2552) ---
     # CLAUDE.md's tools section and README's table are explicitly CURATED, not
@@ -3198,6 +3356,30 @@ def audit(root):
     fn_contract("loop-queue-ttl", loop_queue_ttl_ok, "bin/loop-queue",
                 ("bin/loop-queue",))
 
+    # The queue is committed and cross-machine merged, so a git line-merge can resurrect a stale
+    # row and make the loop's forward state lie to its own gate. Assert the (id, ts) poison guard
+    # AND that it leaves legitimate recurrence history alone.
+    fn_contract("loop-queue-merge-poison", loop_queue_merge_poison_ok, "bin/loop-queue",
+                ("bin/loop-queue",))
+
+    # ...and run that same audit against the REAL queue. A poisoned file is a DATA condition, not
+    # a code regression, so it WARNS rather than reds — but it must not be silent: the 2026-08-30
+    # poisoning was found by hand, which is precisely the observability gap. An audit that cannot
+    # RUN also warns; "I could not measure it" must never render as "clean" (signal-vs-artifact).
+    try:
+        _fsck = subprocess.run(
+            [sys.executable, os.path.join(bindir, "loop-queue"), "fsck", "--json"],
+            capture_output=True, text=True, timeout=20,
+            env=dict(os.environ, ORCHESTRATORMAXXING_HARNESS_CHILD="1"))
+        _rep = json.loads(_fsck.stdout or "{}")
+        if _rep.get("poisoned_incarnations"):
+            warn("knowledge/loop-queue.jsonl",
+                 f"{_rep['poisoned_incarnations']} merge-duplicated incarnation(s) "
+                 f"({', '.join(_rep.get('ids') or [])}) — a git line-merge resurrected a stale "
+                 f"row; repair with `loop-queue fsck --fix`")
+    except Exception as ex:
+        warn("knowledge/loop-queue.jsonl", f"merge-poison audit could not run: {ex}")
+
     # intent-queue (the proactive layer's forward state): gate exit-code + idempotent add +
     # sticky-dismiss (no re-nag). Same black-box posture as loop-queue.
     fn_contract("intent-queue", intent_queue_behavior_ok, "bin/intent-queue",
@@ -3258,15 +3440,17 @@ def audit(root):
     # Safe experiments and context policy stay gated by offline/proposal-only contracts.
     # These make no network calls and mutate only disposable fixture homes.
     for contract_id, rel, where, timeout_seconds in (
-        ("agent-guard", "tests/agent-guard/run.sh", "bin/agent-guard", 120),
-        ("worker-path-bench", "experiments/worker-path-bench/contract.sh", "bin/worker-path-bench", 120),
-        ("portable-examples", "tests/portable-examples/run.sh", "examples/portable-orchestration", 120),
-        ("weekly-contribution-install", "tests/weekly-contribution-install/run.sh", "install.sh", 180),
-        ("worker-path-bench-boundaries", "tests/worker-path-bench-boundaries/run.sh", "bin/worker-path-bench", 120),
+        ("worker-path-bench", "experiments/worker-path-bench/contract.sh", "bin/worker-path-bench", 30),
         ("ticket-route", "tests/ticket-route/run.sh", "bin/ticket-route", 30),
+        ("portable-examples", "tests/portable-examples/run.sh", "examples/portable-orchestration", 30),
+        ("public-improve", "tests/public-improve/run.sh", "plugins/orchestratormaxxing/skills/public-improve-security", 30),
+        ("worker-path-bench-boundaries", "tests/worker-path-bench-boundaries/run.sh", "bin/worker-path-bench", 30),
         # Provider-capacity CLI: loopback Hermes fixture + fake official Codex
         # app-server protocol. No egress, tmux, credentials, or live provider state.
         ("capacity", "tests/capacity/run.sh", "bin/capacity", 15),
+        # Cross-host pre/post security hooks. C3 is the proof of red: a patterns file with
+        # one rule removed must let its command through, so a guard matching nothing cannot pass.
+        ("agent-guard", "tests/agent-guard/run.sh", "bin/agent-guard", 120),
         # Chapter-18 token audit + loop-portfolio ledger. Fixture $HOME (so
         # .claude.json, transcripts and systemd user units are all fixtures),
         # fixture repo, pinned clock. The load-bearing assertions discriminate
@@ -3313,6 +3497,10 @@ def audit(root):
         ("model-eval", "tests/model-eval/run.sh", "bin/model-eval", 30),
         ("pipefail-lint", "tests/pipefail-lint/run.sh", "bin/harness-verify", 20),
         ("model-routing-consistency", "tests/model-routing-consistency/run.sh", "knowledge/delegation-playbook.md", 10),
+        # One bounded formatter owns Codex's human-visible SessionStart context.
+        # Oversized UTF-8 fixtures prove required memory/queue/changelog/WIP state
+        # survives under the 16 KiB ceiling while the watcher fires exactly once.
+        ("codex-session-start", "tests/codex-session-start/run.sh", "bin/codex-session-start", 15),
         ("agent-tab-status", "tests/agent-tab-status/run.sh", "bin/agent-tab-status", 30),
         ("warp-agent-event", "tests/warp-agent-event/run.sh", "bin/warp-agent-event", 15),
         ("warp-agent-transport", "tests/warp-agent-transport/run.sh", "bin/warp-agent-event", 15),
@@ -3399,9 +3587,6 @@ def audit(root):
         # doctrine, lane primitives resolve. Proven red 4 ways (tag-strip,
         # dangling ref, superseded marker, doctrine-token strip) 2026-08-12.
         ("cheap-delegate", "tests/cheap-delegate/run.sh", "knowledge/delegation-playbook.md", 30),
-        ("astraplan", "tests/astraplan/run.sh", "plugins/orchestratormaxxing/skills/astraplan/SKILL.md", 45),
-        ("public-improve", "tests/public-improve/run.sh", "plugins/orchestratormaxxing/skills/public-improve-security/SKILL.md", 30),
-        ("ci-verify", "tests/ci-verify/run.sh", ".github/workflows/verify.yml", 30),
         ("occ", "tests/occ/run.sh", "bin/occ", 30),
         ("o", "tests/o/run.sh", "bin/o", 60),
         # In-place mutation is crash-safe + serialized: interrupted runs auto-recover,
@@ -3451,6 +3636,23 @@ def audit(root):
         # after a regression. Proven red by rebalancing the labels toward one route.
         ("design-router", "tests/design-router/run.sh", "bin/design-eval", 20),
         ("firecrawl", "tests/firecrawl/run.sh", "bin/firecrawl", 30),
+        # Workspace-mode resolver (shared|worktree|container). Fakes wt/coder-ws/curl;
+        # proven red by an install-wt that skipped the sha256 check (T5) and a
+        # resolver that scraped `wt switch` prose instead of `wt list` JSON (T2).
+        ("task-workspace", "tests/task-workspace/run.sh", "bin/task-workspace", 30),
+        # Third fleet-service resolver: the Coder server. Fakes docker/ssh/coder/
+        # getent/launchctl/systemctl + a loopback /healthz fixture. Proven red by a
+        # 0.0.0.0 publish (C5), a `coder ssh` against a disconnected agent (C12) and
+        # a mac template using ssh:// (compose gate). Fleet-only row.
+        ("coder-ws", "tests/coder-ws/run.sh", "bin/coder-ws", 30),
+        # The -W|--workspace flag on c/g/o. L1 is a byte-identical snapshot of the
+        # default argv against the pre-flag launcher; L4 proves a resolver failure
+        # creates no tmux session.
+        ("launcher-workspace", "tests/launcher-workspace/run.sh", "shell/claude-c.sh", 30),
+        # Worktrunk on all six surfaces (Claude, Codex, OpenCode, Hermes, Warp, Zed)
+        # + installer wiring; carries its own stripped-surface negative fixture.
+        ("worktree-surfaces", "tests/worktree-surfaces/run.sh",
+         "plugins/orchestratormaxxing/skills/worktree/SKILL.md", 10),
         # Disposable Semantica projection: fake Docker/SSH + loopback fixture,
         # so routing/security policy is deterministic and offline. The pytest
         # companion covers privacy, fallback, 50 replays, 100 rebuilds and

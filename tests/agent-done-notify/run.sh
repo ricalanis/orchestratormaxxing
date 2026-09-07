@@ -427,4 +427,95 @@ PY
   [[ "$(wc -l < "$CALLS")" -eq "$after" ]] || fail 'repeated permission within cooldown must not re-send'
 }
 
-printf 'agent-done-notify contract: PASS\n'
+# --- 12. Dashboard session-events: the needs-me queue gets a WRITER again ---
+# pending_input() (orchestration.py) reads session_events rows of kind
+# input_needed; the only writer, orchestrator/hooks/orch-notify.py, was retired
+# by install.sh, so the queue had been inert since. The notifier already fires
+# on every host for Notification/PermissionRequest/PreToolUse and Stop, so it
+# also POSTs the event to the dashboard: bearer token from
+# ~/.config/orchestratormaxxing/dashboard-token (HERMES_DASHBOARD_TOKEN env wins),
+# 2 s timeout, fail-open, and NO request when the token or the dashboard
+# base is absent. Proven red against the pre-writer tool (no POST at all).
+rm -f "$TMP/bin/tmux"
+printf 'local\n' > "$HOME/.config/orchestratormaxxing/notify-host-key"
+REC="$TMP/http.log"; : > "$REC"
+PORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
+python3 - "$PORT" "$REC" <<'PY' &
+import json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+port, rec = int(sys.argv[1]), sys.argv[2]
+class H(BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(n).decode("utf-8", "replace")
+        with open(rec, "a") as f:
+            f.write(json.dumps({"path": self.path, "auth": self.headers.get("Authorization", ""), "body": body}) + "\n")
+        self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+        self.wfile.write(b'{"status":"ok"}')
+    def log_message(self, *a): pass
+HTTPServer(("127.0.0.1", port), H).serve_forever()
+PY
+HTTPD=$!
+trap 'kill $HTTPD 2>/dev/null || true; rm -rf "$TMP"' EXIT
+for _ in 1 2 3 4 5 6 7 8 9 10; do python3 -c "import socket;socket.create_connection(('127.0.0.1',$PORT),1).close()" 2>/dev/null && break; sleep 0.2; done
+printf 'tok-123\n' > "$HOME/.config/orchestratormaxxing/dashboard-token"
+note3=$(python3 -c "import json;print(json.dumps({
+  'hook_event_name':'Notification','session_id':'dash-note-1','cwd':'/tmp/miproyecto',
+  'message':'Claude needs your permission to use Bash','notification_type':'permission_prompt'}))")
+before=$(wc -l < "$CALLS")
+printf '%s' "$note3" | DASHBOARD_URL="http://127.0.0.1:$PORT" PATH="$BASEPATH" "$TOOL" || fail 'dashboard note run failed'
+after=$(wc -l < "$CALLS")
+[[ "$after" -eq $((before + 1)) ]] || fail 'needs-input must still reach Telegram when the dashboard is configured'
+[[ "$(wc -l < "$REC")" -eq 1 ]] || fail "needs-input must POST exactly one session event (got $(wc -l < "$REC"))"
+python3 - "$REC" <<'PY' || fail 'input_needed event shape'
+import json, sys
+r = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+assert r["path"] == "/api/session-events", r["path"]
+assert r["auth"] == "Bearer tok-123", r["auth"]
+b = json.loads(r["body"])
+assert b["kind"] == "input_needed", b
+assert b["host"] == "local", b
+assert b["session_key"], b
+p = b["payload"]
+assert "permission to use Bash" in p["message"], p
+assert p["notification_type"] == "permission_prompt", p
+assert p["hook_event_name"] == "Notification" and p["agent"] == "claude" and p["project"] == "miproyecto", p
+PY
+# repeated ask within the cooldown: no second Telegram send, no second POST
+printf '%s' "$note3" | DASHBOARD_URL="http://127.0.0.1:$PORT" PATH="$BASEPATH" "$TOOL" || fail 'cooldown dashboard run failed'
+[[ "$(wc -l < "$REC")" -eq 1 ]] || fail 'a repeated ask inside the cooldown must not POST again'
+# Stop → kind stop (the dashboard resolves that session's open asks on it)
+printf '%s' "$payload" | DASHBOARD_URL="http://127.0.0.1:$PORT" PATH="$BASEPATH" "$TOOL" || fail 'dashboard stop run failed'
+[[ "$(wc -l < "$REC")" -eq 2 ]] || fail 'Stop must POST one session event'
+python3 - "$REC" <<'PY' || fail 'stop event shape'
+import json, sys
+b = json.loads(json.loads(open(sys.argv[1]).read().splitlines()[-1])["body"])
+assert b["kind"] == "stop" and b["host"] == "local" and b["session_key"], b
+PY
+# env token wins over the file (fresh session_id: the cooldown is per session)
+note3e=$(python3 -c "import json;print(json.dumps({
+  'hook_event_name':'Notification','session_id':'dash-note-env','cwd':'/tmp/miproyecto','message':'Token por env'}))")
+printf '%s' "$note3e" | DASHBOARD_URL="http://127.0.0.1:$PORT" HERMES_DASHBOARD_TOKEN=tok-env PATH="$BASEPATH" "$TOOL" --agent codex || fail 'env token run failed'
+python3 -c "import json,sys; r=json.loads(open(sys.argv[1]).read().splitlines()[-1]); assert r['auth']=='Bearer tok-env', r['auth']" "$REC" || fail 'HERMES_DASHBOARD_TOKEN must override the token file'
+# no token → no POST (never an unauthenticated write), Telegram unaffected
+rm -f "$HOME/.config/orchestratormaxxing/dashboard-token"
+n=$(wc -l < "$REC")
+note4=$(python3 -c "import json;print(json.dumps({
+  'hook_event_name':'Notification','session_id':'dash-note-2','cwd':'/tmp/miproyecto','message':'Sin token'}))")
+before=$(wc -l < "$CALLS")
+printf '%s' "$note4" | DASHBOARD_URL="http://127.0.0.1:$PORT" PATH="$BASEPATH" "$TOOL" || fail 'no-token run failed'
+[[ "$(wc -l < "$REC")" -eq "$n" ]] || fail 'without a dashboard token there must be no POST'
+[[ "$(wc -l < "$CALLS")" -eq $((before + 1)) ]] || fail 'without a dashboard token Telegram must still be notified'
+# dashboard unreachable → exit 0, silent, bounded by the 2 s timeout
+printf 'tok-123\n' > "$HOME/.config/orchestratormaxxing/dashboard-token"
+kill $HTTPD 2>/dev/null || true; wait $HTTPD 2>/dev/null || true
+note5=$(python3 -c "import json;print(json.dumps({
+  'hook_event_name':'Notification','session_id':'dash-note-3','cwd':'/tmp/miproyecto','message':'Sin dashboard'}))")
+t0=$(python3 -c 'import time;print(int(time.time()*1000))')
+out="$(printf '%s' "$note5" | DASHBOARD_URL="http://127.0.0.1:$PORT" PATH="$BASEPATH" "$TOOL")" || fail 'unreachable dashboard must exit 0'
+t1=$(python3 -c 'import time;print(int(time.time()*1000))')
+[[ -z "$out" ]] || fail 'unreachable dashboard must stay silent'
+[[ $((t1 - t0)) -lt 4000 ]] || fail "unreachable dashboard must fail open quickly (took $((t1 - t0)) ms)"
+rm -f "$HOME/.config/orchestratormaxxing/dashboard-token" "$HOME/.config/orchestratormaxxing/notify-host-key"
+
+echo "agent-done-notify contract: PASS"

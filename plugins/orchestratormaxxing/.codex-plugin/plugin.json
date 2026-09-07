@@ -1,6 +1,6 @@
 {
   "name": "orchestratormaxxing",
-  "version": "0.1.0+codex.20260906045328",
+  "version": "0.1.0+codex.20260906astraplan1",
   "description": "Codex workflows and lifecycle gates for the orchestratormaxxing orchestration harness.",
   "author": {
     "name": "Ricardo Alanis"
@@ -8,8 +8,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Orchestratormaxxing",
-    "shortDescription": "Planning, research, bounded workers and verified public contributions.",
-    "longDescription": "Plan with Astra, create research briefs and durable project plans, propose coherent product tasks, verify bounded workers, and prepare weekly public contributions with explicit security gates.",
+    "shortDescription": "Astra or Sol planning and governed worker execution.",
+    "longDescription": "Plan with Astra and route demanding bounded implementation to Sol and routine work to cheap-delegate, or use the existing Sol-first workflow, with shared lifecycle and verification gates.",
     "developerName": "Ricardo Alanis",
     "category": "Developer Tools",
     "capabilities": [
@@ -18,10 +18,11 @@
     ],
     "defaultPrompt": [
       "For a broad or multi-deliverable request, use $orchestratormaxxing:gauntlet first to divide it into incremental parts; each part then follows normal routing.",
-      "Use $orchestratormaxxing:astraplan first for nontrivial unplanned work.",
+      "Use $orchestratormaxxing:solplan first for nontrivial unplanned work.",
+      "Use $orchestratormaxxing:astraplan for Astra-led planning, Sol implementation, and cheap-delegate for routine chunks.",
       "After root review, use $orchestratormaxxing:fanout only for independent implementation chunks.",
-      "Use $orchestratormaxxing:ideas for diverse approaches.",
-      "Use omaxxing-public-improve and public-improve-security for validated public capability contributions."
+      "Use $orchestratormaxxing:worktree before parallel or risky edits to isolate the task in a worktree; keep the shared tree only for small single-session edits.",
+      "Use $orchestratormaxxing:ideas for diverse approaches."
     ]
   }
 }

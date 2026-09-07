@@ -1,2 +1,0 @@
-{"id":"exact-ping","prompt":"Return exactly PONG","timeout_seconds":2,"contract":{"type":"exact","expected":"PONG"}}
-{"id":"json-fields","prompt":"Return a JSON object with ok=true and value=7","timeout_seconds":2,"contract":{"type":"json_fields","expected":{"ok":true,"value":7}}}

@@ -194,7 +194,7 @@ g() {
     shift
   fi
 
-  local headless=0 attach=0 detach=0 prompt_text="" role="" feature=""
+  local headless=0 attach=0 detach=0 prompt_text="" role="" feature="" workspace="shared"
   # Warp otherwise replaces OSC titles with its cwd/process-derived title.
   export WARP_DISABLE_AUTO_TITLE=true
   local codex_args=()
@@ -213,6 +213,11 @@ g() {
       -F|--feature)
         [[ $# -ge 2 ]] || { echo "g: --feature requires a value" >&2; return 2; }
         feature="$2"; shift 2 ;;
+      -W|--workspace)
+        [[ $# -ge 2 ]] || { echo "g: --workspace requires shared|worktree|container" >&2; return 2; }
+        workspace="$2"; shift 2 ;;
+      -wt|--wt|--worktree) workspace="worktree"; shift ;;     # same as -W worktree
+      -c|--container)      workspace="container"; shift ;;    # same as -W container
       --)
         shift
         while [[ $# -gt 0 ]]; do codex_args+=("$1"); shift; done
@@ -224,11 +229,49 @@ g() {
     echo "g: --attach and --detach are mutually exclusive" >&2
     return 2
   fi
+  case "$workspace" in
+    shared|worktree|container) ;;
+    *) echo "g: --workspace must be shared|worktree|container (got '$workspace')" >&2; return 2 ;;
+  esac
 
   [[ -n "$name" ]] || name="$(basename "$(pwd)")"
   name="$(_g_slug "$name")"
   local base="codex-$name"
   [[ -n "$role" ]] && base="codex-$name-$role"
+
+  # Workspace mode (-W): shared = today's behaviour ($PWD). worktree = an
+  # isolated worktree from bin/task-workspace; container = the launch wrapped
+  # in `coder-ws ssh -t <slug> --` so Codex runs inside the Coder workspace at
+  # the same absolute path. Resolved before any tmux session exists.
+  local launch_dir="$PWD" container_slug=""
+  if [[ "$workspace" != "shared" ]]; then
+    if [[ "$headless" == "1" || -n "$prompt_text" ]]; then
+      echo "g: -W $workspace applies to interactive sessions only" >&2
+      return 2
+    fi
+    if [[ "$workspace" == "worktree" ]]; then
+      launch_dir="$(command task-workspace resolve --mode worktree --project "$PWD" \
+        --branch "task/${feature:-$name}")" || {
+        echo "g: task-workspace could not resolve a worktree for $PWD" >&2
+        return 1
+      }
+      base="$base-wt"
+    else
+      command -v coder-ws >/dev/null 2>&1 || {
+        echo "g: coder-ws is not installed (run install-fleet.sh); -W container needs it" >&2
+        return 2
+      }
+      container_slug="$(basename "$PWD")"
+      # Readiness BEFORE any session exists (typed exit 2 from coder-ws, nothing created).
+      command coder-ws ssh "$container_slug" -- true >/dev/null 2>&1 || {
+        echo "g: Coder workspace '$container_slug' is not reachable — run: coder-ws status (then coder-ws start $container_slug)" >&2
+        return 2
+      }
+      base="$base-ws"
+    fi
+  fi
+  # printf '%q ' with ZERO args prints '' — an empty positional for the inner CLI.
+  _g_quote_args() { (( $# )) && printf '%q ' "$@"; true; }
 
   local env_args=(env "PATH=$PATH")
   [[ -z "${CODEX_HOME:-}" ]] || env_args+=("CODEX_HOME=$CODEX_HOME")
@@ -286,8 +329,13 @@ g() {
   fi
 
   if [[ -n "${TMUX:-}" && "$detach" == "0" ]]; then
-    command "$codex_bin" --dangerously-bypass-approvals-and-sandbox \
-      --dangerously-bypass-hook-trust "${codex_tui_args[@]}" "${codex_args[@]}"
+    if [[ -n "$container_slug" ]]; then
+      command coder-ws ssh -t "$container_slug" -- bash -lc \
+        "cd $(printf '%q' "$PWD") && exec codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust $(_g_quote_args ${codex_tui_args[@]+"${codex_tui_args[@]}"} ${codex_args[@]+"${codex_args[@]}"})"
+      return $?
+    fi
+    ( cd "$launch_dir" && command "$codex_bin" --dangerously-bypass-approvals-and-sandbox \
+      --dangerously-bypass-hook-trust "${codex_tui_args[@]}" "${codex_args[@]}" )
     return $?
   fi
 
@@ -307,9 +355,14 @@ g() {
     echo "→ Creating new Codex session: $sess"
   fi
   _g_register_recovery "$sess"
-  if ! tmux new-session -d -s "$sess" -c "$PWD" \
-    "${env_args[@]}" "$codex_bin" --dangerously-bypass-approvals-and-sandbox \
-    --dangerously-bypass-hook-trust "${codex_tui_args[@]}" "${codex_args[@]}"; then
+  local launch_cmd=("$codex_bin" --dangerously-bypass-approvals-and-sandbox
+    --dangerously-bypass-hook-trust "${codex_tui_args[@]}" "${codex_args[@]}")
+  if [[ -n "$container_slug" ]]; then
+    launch_cmd=(coder-ws ssh -t "$container_slug" -- bash -lc \
+      "cd $(printf '%q' "$PWD") && exec codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust $(_g_quote_args ${codex_tui_args[@]+"${codex_tui_args[@]}"} ${codex_args[@]+"${codex_args[@]}"})")
+  fi
+  if ! tmux new-session -d -s "$sess" -c "$launch_dir" \
+    "${env_args[@]}" "${launch_cmd[@]}"; then
     echo "g: failed to create tmux session '$sess'" >&2
     return 1
   fi

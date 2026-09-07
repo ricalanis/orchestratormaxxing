@@ -384,7 +384,7 @@ found = []
 def walk(node):
     if isinstance(node, dict):
         cmd = node.get("command")
-        if isinstance(cmd, str) and "loop-tick" in cmd:
+        if isinstance(cmd, str) and ("loop-tick" in cmd or "codex-session-start" in cmd):
             found.append(cmd)
         for v in node.values(): walk(v)
     elif isinstance(node, list):
@@ -445,7 +445,7 @@ codex_state="$(sed -n 's/^codex=//p' "$TMP/hoststatus.txt" 2>/dev/null)"
 c9meta_bad=0
 grep -qF '"host": "codex"' "$TMP/hostcmds.txt" 2>/dev/null || {
   c9meta_bad=1
-  bad C9 "no codex watcher extracted from the in-repo plugin hooks (state=${codex_state:-unknown}) — the shipped hooks.json must carry a loop-tick watcher; if it does, the extraction is broken"
+  bad C9 "no codex watcher extracted from the in-repo plugin hooks (state=${codex_state:-unknown}) — the shipped hooks.json must carry a loop-tick watcher or the codex-session-start formatter; if it does, the extraction is broken"
 }
 
 # Machine-state Claude config: a closed enumeration of not-measurable states

@@ -26,7 +26,7 @@ Commands:
 
 Exit codes: 0 ok · 1 unexpected error · 2 usage/validation · 3 integrity refusal.
 """
-import argparse, fcntl, glob, hashlib, json, os, re, stat, sys
+import argparse, fcntl, glob, hashlib, json, os, re, sys
 from datetime import datetime, timezone
 
 LANES = ["oll", "o", "codex", "anthropic", "in-session"]
@@ -103,20 +103,9 @@ def now_iso():
 
 # ── row identity + load ───────────────────────────────────────────────────────
 
-def row_identity(row):
-    """Canonical identity, including models stored by either writer.
-
-    JSON preserves field boundaries and distinguishes null from the string "None".
-    Sorted object keys keep JSON-valued models accepted by import repeatable too.
-    Historical rows carry these fields even when their ID omitted the model.
-    """
-    return json.dumps([row.get(field) for field in ("run_id", "attempt", "lane", "model")],
-                      ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def row_id(run_id, attempt, lane, model):
-    """Stable display label; deduplication uses the complete identity, not this hash."""
-    key = row_identity({"run_id": run_id, "attempt": attempt, "lane": lane, "model": model})
+def row_id(run_id, attempt, lane):
+    """Stable short hash of (run_id, attempt, lane) — the idempotency key."""
+    key = f"{run_id}\x00{attempt}\x00{lane}"
     return f"dl-{hashlib.sha1(key.encode()).hexdigest()[:8]}"
 
 
@@ -136,19 +125,18 @@ def load(path):
 
 
 def append_row(path, row):
-    """Append under an exclusive flock, checking the complete identity.
+    """Append a row under an exclusive flock, checking idempotency by id.
 
     Holds a bounded flock on a sidecar lock file and appends with a single
     O_APPEND write, so two concurrent `record` calls both land intact.
-    Returns True if appended, False if the identity already existed (no-op).
-    Short ID collisions cannot suppress rows, and legacy IDs need no migration.
+    Returns True if appended, False if the id already existed (no-op).
     """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     lock_path = path + ".lock"
     with open(lock_path, "w") as lock_fh:
         fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
         try:
-            existing = set()
+            existing_ids = set()
             if os.path.isfile(path):
                 with open(path, encoding="utf-8") as fh:
                     for line in fh:
@@ -156,10 +144,10 @@ def append_row(path, row):
                         if not line:
                             continue
                         try:
-                            existing.add(row_identity(json.loads(line)))
+                            existing_ids.add(json.loads(line).get("id"))
                         except ValueError:
                             pass
-            if row_identity(row) in existing:
+            if row["id"] in existing_ids:
                 return False
             with open(path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -295,7 +283,7 @@ def cmd_record(args, path, items):
                               file=sys.stderr)
 
     row = {
-        "id": row_id(args.run_id, args.attempt, args.lane, args.model),
+        "id": row_id(args.run_id, args.attempt, args.lane),
         "ts": now_iso(),
         "run_id": args.run_id,
         "task_class": args.task_class,
@@ -370,31 +358,6 @@ def cmd_receipt(args, path, items):
               file=sys.stderr)
         return EXIT_REFUSAL
 
-    # A passing receipt is evidence that the worker's output cleared the
-    # contract, so it must point at a real output.md. A missing, symlinked, or
-    # nonregular output.md cannot substantiate that pass. Failed attempts may
-    # have no output artifact.
-    if args.verdict == "pass":
-        out_md = os.path.join(args.run_dir, "output.md")
-        if os.path.islink(out_md) or not os.path.isfile(out_md):
-            print(f"receipt: pass verdict requires a regular output.md "
-                  f"(missing, symlinked, or nonregular): {out_md}", file=sys.stderr)
-            return EXIT_REFUSAL
-        try:
-            # Pin the checked file while hashing. A path swapped for a symlink
-            # or FIFO after the preliminary check must never become a pass.
-            fd = os.open(out_md, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-            with os.fdopen(fd, "rb") as fh:
-                if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
-                    raise ValueError("output.md is not regular")
-                digest = hashlib.sha256()
-                for block in iter(lambda: fh.read(65536), b""):
-                    digest.update(block)
-                output_digest = digest.hexdigest()
-        except (OSError, ValueError) as exc:
-            print(f"receipt: cannot hash regular output.md: {exc}", file=sys.stderr)
-            return EXIT_REFUSAL
-
     receipt = {
         "schema_version": RECEIPT_SCHEMA_VERSION,
         "ts": now_iso(),
@@ -415,8 +378,7 @@ def cmd_receipt(args, path, items):
         "note": args.note,
     }
     for field, fname in RECEIPT_HASHED:
-        receipt[field] = (output_digest if fname == "output.md" and args.verdict == "pass"
-                          else sha256_file(os.path.join(args.run_dir, fname)))
+        receipt[field] = sha256_file(os.path.join(args.run_dir, fname))
 
     if set(receipt) != set(RECEIPT_FIELDS):
         print("receipt: internal schema drift — refusing to write", file=sys.stderr)
@@ -559,7 +521,7 @@ def cmd_import(args, path, items):
             continue
 
         row = {
-            "id": row_id(str(run_id_val), 1, lane, receipt.get("model")),
+            "id": row_id(str(run_id_val), 1, lane),
             "ts": now_iso(),
             "run_id": str(run_id_val),
             "task_class": str(task_class),

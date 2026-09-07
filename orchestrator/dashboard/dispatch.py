@@ -52,6 +52,7 @@ ever touching the real kanban, spawning a real Codex, or sending Ricardo a real
 Telegram message — and it is why a wrong flag is a red test rather than a
 silent no-op in production.
 """
+import json
 import os
 import re
 import shutil
@@ -440,14 +441,80 @@ def _resolve_workspace(task: dict) -> Optional[str]:
     return None
 
 
+def _tool_bin(name: str) -> str:
+    """Same rule as `_codex_bin`: PATH first, else the installer's bindir."""
+    return shutil.which(name) or str(Path.home() / ".local" / "bin" / name)
+
+
+def _workspace_mode(task: dict) -> str:
+    """`tasks.workspace_mode` (m34) — shared | worktree | container. Read
+    straight from the row so a DB that predates m34 (or a task dict built
+    before the column existed) still answers `shared`, today's behaviour."""
+    explicit = (task.get("workspace_mode") or "").strip()
+    if explicit:
+        return explicit
+    conn = db.get_conn()
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
+        if "workspace_mode" not in cols:
+            return "shared"
+        row = conn.execute("SELECT workspace_mode FROM tasks WHERE id = ?",
+                           (task.get("id"),)).fetchone()
+        return (row["workspace_mode"] if row and row["workspace_mode"] else "shared")
+    finally:
+        conn.close()
+
+
+def _resolve_mode_workspace(task: dict, mode: str, workspace: str) -> tuple:
+    """(prefix_argv, cwd, error_dict_or_None) for the workspace MODE.
+
+    shared    → ([], workspace, None) — byte-identical to the pre-m34 argv.
+    worktree  → `task-workspace resolve --mode worktree --project <ws>
+                 --branch task/<id> --json`; cwd is the JSON `path`. The
+                 resolver's own stderr is the note on failure, and nothing is
+                 spawned — the outbox row says why, before any process exists.
+    container → ([coder-ws, ssh, <slug>, --], workspace): Codex runs INSIDE
+                 the Coder workspace named after the project folder, at the
+                 same absolute path (the template bind-mounts it there).
+    """
+    if mode == "shared":
+        return [], workspace, None
+    if mode == "worktree":
+        argv = [_tool_bin("task-workspace"), "resolve", "--mode", "worktree",
+                "--project", workspace, "--branch", f"task/{task['id']}", "--json"]
+        code, out, err = _run_cli(argv, timeout=120)
+        if code != 0:
+            return [], workspace, {"ok": False, "code": "no_workspace", "steps": [],
+                                   "note": f"task-workspace resolve failed ({code}): "
+                                           f"{(err or out).strip()[:300]}"}
+        try:
+            path = json.loads(out)["path"]
+        except Exception:  # noqa: BLE001 - a resolver that prints prose is a failure
+            return [], workspace, {"ok": False, "code": "no_workspace", "steps": [],
+                                   "note": "task-workspace resolve returned no JSON path"}
+        return [], path, None
+    if mode == "container":
+        slug = Path(workspace).name
+        return [_tool_bin("coder-ws"), "ssh", slug, "--"], workspace, None
+    return [], workspace, {"ok": False, "code": "no_workspace", "steps": [],
+                           "note": f"unknown workspace_mode {mode!r}"}
+
+
 def _dispatch_codex(task: dict, dispatch_id: str) -> dict:
     workspace = _resolve_workspace(task)
     if not workspace:
         return {"ok": False, "code": "no_workspace", "steps": [],
                 "note": "no runnable workspace: set the task's workspace_path or "
                         "the project's repo_path"}
+    mode = _workspace_mode(task)
+    prefix, workspace, failure = _resolve_mode_workspace(task, mode, workspace)
+    if failure:
+        return failure
     prompt = compose_brief(task, "codex", workspace)
-    argv = [_codex_bin(), "exec", "-C", workspace, "-s", "workspace-write", prompt]
+    # Inside a container the image's own `codex` runs — a host-absolute path
+    # would not exist there. The host path is only right when nothing wraps it.
+    codex = "codex" if prefix else _codex_bin()
+    argv = prefix + [codex, "exec", "-C", workspace, "-s", "workspace-write", prompt]
     try:
         proc = _spawn(argv)
     except Exception as e:

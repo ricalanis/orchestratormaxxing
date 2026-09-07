@@ -1976,15 +1976,16 @@ async def api_recent_errors(hours: float = 24):
 
 _COGLOAD_CHECK_CACHE: dict = {"val": None, "at": 0.0}
 _COGLOAD_CHECK_TTL = 30.0
+_SESSIONS_HEALTH_OBSERVATION: dict = {"ts": None, "since": 0.0}
 
 
 def _healthz_checks() -> tuple[dict, list]:
     """Downstream dependency checks for /healthz. Returns (checks, degraded)
     — degraded is the list of FAILING gating check names; [] = healthy.
 
-    GATING (drive 200 vs 503): kanban DB readable; sessions-cache pipeline not
-    flatlined (a populated cache older than 10× its TTL means the sweeper/
-    refresh path is dead — a cold cache right after boot is fine).
+    GATING (drive 200 vs 503): kanban DB readable; an on-demand sessions refresh
+    must not remain in flight with the same cache timestamp for over 10× TTL
+    across health checks. An old idle cache or a cold cache is healthy.
     INFORMATIONAL (reported, never gate): remote SSH hosts (a sleeping laptop
     is normal) and the MCP SSE server (optional; may not be armed).
     """
@@ -2004,15 +2005,22 @@ def _healthz_checks() -> tuple[dict, list]:
     # -- sessions cache (gating on flatline only) --
     cache = sessions._SESSIONS_CACHE
     ttl = sessions.SESSIONS_CACHE_TTL
+    refreshing = sessions._REFRESHING["on"]
+    observation = _SESSIONS_HEALTH_OBSERVATION
+    now = time.monotonic()
+    if not refreshing or cache["data"] is None:
+        observation.update(ts=None, since=now)
+    elif observation["ts"] != cache["ts"]:
+        observation.update(ts=cache["ts"], since=now)
     if cache["data"] is None:
         checks["sessions_cache"] = {"ok": True, "state": "cold", "ttl_seconds": ttl}
     else:
         age = round(time.time() - cache["ts"], 1)
-        flatlined = age > ttl * 10
+        flatlined = refreshing and now - observation["since"] > ttl * 10
         cc = cache["data"].get("claude_code", [])
         checks["sessions_cache"] = {
             "ok": not flatlined,
-            "state": "flatlined" if flatlined else ("fresh" if age < ttl else "refreshing"),
+            "state": "flatlined" if flatlined else ("fresh" if age < ttl else ("refreshing" if refreshing else "idle")),
             "age_seconds": age, "ttl_seconds": ttl,
             "sessions": len(cc),
             "tmux_attached": sum(1 for x in cc if x.get("tmux_attached")),

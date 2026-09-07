@@ -1,5 +1,5 @@
 {
-  "file_count": 649,
+  "file_count": 687,
   "files": [
     {
       "mode": "file",
@@ -9,7 +9,7 @@
     {
       "mode": "file",
       "path": ".claude/agents/fable-planner.md",
-      "sha256": "ce9ee6f16c9ec68ce5a1a783e1e9135fc381cfc46b82e12025553e5d373c357e"
+      "sha256": "2e8d89cec4d5377f119b47169fb4e3f9655bbd9897686b09aa9dd047cf933543"
     },
     {
       "mode": "file",
@@ -24,7 +24,7 @@
     {
       "mode": "file",
       "path": ".claude/commands/fableplan.md",
-      "sha256": "47e2913690b95ebca733dab554682ba4051526b81eb0f2fb0dec62d32601906a"
+      "sha256": "607964e39beb8ed9408bb645efffb879bff45b98486d01dc381592162832f28b"
     },
     {
       "mode": "file",
@@ -53,6 +53,11 @@
     },
     {
       "mode": "file",
+      "path": ".claude/commands/worktree.md",
+      "sha256": "15debbd57d1461329be733f0d09ccdd3e4a5a653bd49fecffb7e50a1829cba73"
+    },
+    {
+      "mode": "file",
       "path": ".claude/commands/wrap-up.md",
       "sha256": "51b51b7862719fb363d610e33716607e8f2161aed1f58a0cfadcfd3e75df0a5a"
     },
@@ -60,6 +65,11 @@
       "mode": "file",
       "path": ".claude/settings.json",
       "sha256": "59386edbfd058ef4a179432ff64ed84de20f9bdaf4068d335c86e059a52ce6cf"
+    },
+    {
+      "mode": "file",
+      "path": ".codex/agents/astra-planner.toml",
+      "sha256": "fad3619a85d939d88620422e989873f22d57ef57cb770ab1674b93aa0d4a20b5"
     },
     {
       "mode": "file",
@@ -94,7 +104,7 @@
     {
       "mode": "file",
       "path": "CLAUDE.md",
-      "sha256": "16629f8da06d2bd180b0f594d60772e4f63073af09f943acac87a42e56344747"
+      "sha256": "8b626ee2da8e418f6a45c16436c507facfef7d788ec20ce59e2f88ccbc50910e"
     },
     {
       "mode": "file",
@@ -124,7 +134,12 @@
     {
       "mode": "exec",
       "path": "bin/agent-done-notify",
-      "sha256": "822c10e5eb6bfec9ae18e0b9d1c33e6b0e1c04f375b99f67784ea7a154f5e77d"
+      "sha256": "7485984e992a2335aa407845b1a3244f54e41179d3471d7fa454667a47381e89"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/agent-guard",
+      "sha256": "d59895e203ea43cbb062261a4500838bcb55487d73e3ae03a1ed882703dec589"
     },
     {
       "mode": "exec",
@@ -150,6 +165,11 @@
       "mode": "exec",
       "path": "bin/chrome-debug-wayland-shim",
       "sha256": "107b600c41354223a8123a1f193c98e54d195c15db3dca74e758ab512cf0c620"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/codex-session-start",
+      "sha256": "8c2eee37b0bd3ea383b6bee3959bcb289132adf95a0cf1fb0e20f0fe3abdca56"
     },
     {
       "mode": "exec",
@@ -199,7 +219,7 @@
     {
       "mode": "exec",
       "path": "bin/harness-verify",
-      "sha256": "1bc2f49e2c455a43151e3b20117e61821ea89ea0d12c434e204e55de94f3c9f2"
+      "sha256": "4f19e5c06ab1a55c43a715744b73c8e5f90c4679e5fdd927677150f2438f3598"
     },
     {
       "mode": "exec",
@@ -219,7 +239,7 @@
     {
       "mode": "exec",
       "path": "bin/loop-queue",
-      "sha256": "be102bae55cb5e54a1666faa9615a086c21055ebbaff5e898d65d93a69c93341"
+      "sha256": "3d866bbda9cfde7742222a9a90ee9d28e1ad838a9153c231960d94e1b813a104"
     },
     {
       "mode": "exec",
@@ -314,12 +334,17 @@
     {
       "mode": "exec",
       "path": "bin/sync-agent-skills",
-      "sha256": "6f9df963df524240f892d93dc17caa3249761cdf6c15326f32efa5f9ad6a53fe"
+      "sha256": "53563628f25ec01384607db529c615563b95c9bfcac03d64b189e983a4516525"
     },
     {
       "mode": "exec",
       "path": "bin/task-plan",
       "sha256": "81e3957e137a00fa88973f6da9301488904d9af7d9bf21fe9a2439a55aaed4a9"
+    },
+    {
+      "mode": "exec",
+      "path": "bin/task-workspace",
+      "sha256": "f8df4f59b11082961f6b454971eff9cdad691535440422dffd7ef82b61238195"
     },
     {
       "mode": "exec",
@@ -380,6 +405,51 @@
       "mode": "exec",
       "path": "bootstrap.sh",
       "sha256": "cefec2568f71a6a385d37ebf4435d63214f9755180b133f9ee86fe7a06307a59"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/agent-guard/LICENSE.claude-plugins-official",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/agent-guard/LICENSE.davidondrej-skills",
+      "sha256": "1bd321a3b9cfa8d4af2105e20edd69d830df0b28e83a1b0255558f888e493981"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/agent-guard/PROVENANCE.json",
+      "sha256": "288c40dac4b85d86f717b88830f09134244f9f3dca8690cf2a9be1e6023acfdb"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/agent-guard/dangerous-patterns.txt",
+      "sha256": "bbdd742c05e1f644d460392bfe3e229c7992456d3d69cc04b2ee731a62f8e1f6"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/agent-guard/guard-cases.txt",
+      "sha256": "592dcdb18a813c9ddec0cee5bba4cdf98107bdc6ffefbd629d17d629c818a9cf"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/agent-guard/hermes/command-guard/__init__.py",
+      "sha256": "80cd6ccce3af416c2293212210212e91729ac8b6bf1a7f28cbb2a8d6a4332745"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/agent-guard/hermes/command-guard/plugin.yaml",
+      "sha256": "e93d49bdc5de8d3de3363771d2ffd0815d1c6dad24f81c377708bfae216ddffe"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/agent-guard/security_patterns.py",
+      "sha256": "8cd874aa113801f869679045e0b38b669988b6a7d33b611b10ef01f474ca1eef"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/agent-guard/warp-default-patterns.json",
+      "sha256": "b18ecad46fbf6f8129a2567b77d20d2db1980659799a9a6cd85d5aa825c0d967"
     },
     {
       "mode": "file",
@@ -488,13 +558,33 @@
     },
     {
       "mode": "file",
+      "path": "deploy/warp/orchestratormaxxing-worktree-list.yaml",
+      "sha256": "5433706ec48ed74182f2c7af4ebce2cce3b36490fe900ac06d756629795dbf11"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/warp/orchestratormaxxing-worktree.yaml",
+      "sha256": "621c73a39c9153fcd174e5dd0fe8efd5d3646b29836d52d535fec1d5a123260b"
+    },
+    {
+      "mode": "file",
+      "path": "deploy/worktrunk.lock",
+      "sha256": "09b62138ab58c3e8f3868dfbc1c2b3b96066021c789a53a31b61fb5431aeadbb"
+    },
+    {
+      "mode": "file",
       "path": "docs/skill-style-guide.md",
       "sha256": "ee1493ce5f5173bafb63f18ea5f0c55ba43b65b18981862daecb73a3c5195899"
     },
     {
       "mode": "exec",
       "path": "install.sh",
-      "sha256": "486a58050c45f29e8de60c8e3c4ff1cbecedec92fd4c2a86bfa3df87393aa7b1"
+      "sha256": "e4374e3539cda9a1ee0b1c160511055c39fda53706a46fbc9c90d2268245f97b"
+    },
+    {
+      "mode": "file",
+      "path": "knowledge/agent-guard-adoption-2026-09-05.md",
+      "sha256": "bdccbf301ee80efbbd04dc73beb877dc2d960974516474eeb51527e3bdfcc6da"
     },
     {
       "mode": "file",
@@ -514,7 +604,7 @@
     {
       "mode": "file",
       "path": "knowledge/delegation-playbook.md",
-      "sha256": "1b37fa67afb7515c9a163115299ed56c5eeab885c8d8bf683ffca474453f8f2f"
+      "sha256": "ec64466538be8987a258b525601f38619debef6c63fbcf936016755016911a71"
     },
     {
       "mode": "file",
@@ -634,7 +724,7 @@
     {
       "mode": "file",
       "path": "knowledge/tool-inventory.md",
-      "sha256": "79adc5370f1a11704aa8b6ec15b758a51abdc98dce27dcfd13bf034c29dd6900"
+      "sha256": "e9672314efaeba25e4b326a8312f6179ab505e17969f54a8a0089045f287359c"
     },
     {
       "mode": "file",
@@ -695,6 +785,16 @@
       "mode": "file",
       "path": "opencode/commands/sonnet.md",
       "sha256": "091e237d333ddbc09e090edad6b848913a26e7cf8a8981737fd1f9e881ec7b1c"
+    },
+    {
+      "mode": "file",
+      "path": "opencode/commands/worktree.md",
+      "sha256": "a6f49fc87088bfcd8f10b1d43cb6233123325d6e39690a48e1c12bcf84b42b70"
+    },
+    {
+      "mode": "file",
+      "path": "opencode/plugins/orchestratormaxxing-guard.js",
+      "sha256": "8df5066d66f149daa80c577bd072a438f664d0ded369138b40ff0d7669ea6f70"
     },
     {
       "mode": "file",
@@ -804,12 +904,12 @@
     {
       "mode": "file",
       "path": "orchestrator/dashboard/agent_status.py",
-      "sha256": "da9a74a2f3a6cab124883dc5e405c19e2138663b25336ab9c70735dc3f819807"
+      "sha256": "c6eb55541ca49287da02e124e71131461a2d547a0111550f0f3ffcd782232862"
     },
     {
       "mode": "file",
       "path": "orchestrator/dashboard/api.py",
-      "sha256": "09ab858a8742c17069ca55cf7e6f9b13efdc982f930d2c1e3d53d04798c2947a"
+      "sha256": "6cc73590f3ac21efc9151df6d5a6696754631e3c91dc91a85f75b7c896ff48bb"
     },
     {
       "mode": "file",
@@ -899,7 +999,7 @@
     {
       "mode": "file",
       "path": "orchestrator/dashboard/dispatch.py",
-      "sha256": "2882193926107bf8ab006ea955bdaacdd229f5541196c3c65c3167dba06b4203"
+      "sha256": "18dd60a4bee618e5cef9d89ea761979266d59064a92271f1d085c31955d7d3ec"
     },
     {
       "mode": "file",
@@ -1133,6 +1233,11 @@
     },
     {
       "mode": "file",
+      "path": "orchestrator/dashboard/migrations/m34_task_workspace_mode.py",
+      "sha256": "c6d843155b58ae423326b1949fb65491924439ce8c130afe337724c573e3641c"
+    },
+    {
+      "mode": "file",
       "path": "orchestrator/dashboard/migrations/p0_2_unify_cycle.py",
       "sha256": "74cd6807879359f1c986b07c29c1b6d7befb2c0866533624cd7d1ea88cbb8d09"
     },
@@ -1159,7 +1264,7 @@
     {
       "mode": "file",
       "path": "orchestrator/dashboard/migrations/runner.py",
-      "sha256": "9a312567beeaf639e776e953854614d65c3549a18da724068efd5dca47a95293"
+      "sha256": "712aea2dc8223f8f2fd8932db3d7910d0e03afe53d5ccc767a6061c969f7ba71"
     },
     {
       "mode": "file",
@@ -2144,7 +2249,7 @@
     {
       "mode": "file",
       "path": "orchestrator/tests/test_dispatch.py",
-      "sha256": "759e1c7c7539cf876eb64c5001099784ef278ff05c52f2ba4ef318a44f1047c3"
+      "sha256": "4e5bddab32c7486dfbc03292c00830980088be9573bf9f4bdc31b0f7788187ee"
     },
     {
       "mode": "file",
@@ -2629,17 +2734,32 @@
     {
       "mode": "file",
       "path": "plugins/orchestratormaxxing/.codex-plugin/plugin.json",
-      "sha256": "933592333f3028a30e865a9e47a4f2412ce9c85c5f5bd942f687ebb473daf80d"
+      "sha256": "4f1cbec324d4389be2d19e7ae85ff63ea483e7dde3edbbbe46577377158a9286"
     },
     {
       "mode": "file",
       "path": "plugins/orchestratormaxxing/hooks/hooks.json",
-      "sha256": "efb62492e214873e99e876418363c2861f89c415fa87ac838169a09db4003be1"
+      "sha256": "dd9a6d73bc39e6b84508797a6dff820a76cc6453ac0285490f41320eaa2b694a"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/orchestratormaxxing/skills/astraplan/SKILL.md",
+      "sha256": "0279493edef6815dd93712425f578cd3f4a7fca941ef2c4af468341cab003cfb"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/orchestratormaxxing/skills/astraplan/agents/openai.yaml",
+      "sha256": "4e722f9d6b3f110f6d00372622b93ffb51583468062925c46f1e6679f94174c1"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/orchestratormaxxing/skills/astraplan/scripts/run_astraplan.py",
+      "sha256": "57bd2598c5f8706b326ed2b59cfebf609b15a4811582b7c53c2ad22e25b5b49d"
     },
     {
       "mode": "file",
       "path": "plugins/orchestratormaxxing/skills/cheap-delegate/SKILL.md",
-      "sha256": "b90910e6e74853db6d7af21449a910f16fbf4bec355a1d27c4c2fa18419f0b59"
+      "sha256": "eb39b99d785e1f2311414bb154f795c078f1a06b8dcf1f366972cb9933c198fb"
     },
     {
       "mode": "file",
@@ -2729,7 +2849,22 @@
     {
       "mode": "file",
       "path": "plugins/orchestratormaxxing/skills/solplan/scripts/run_solplan.py",
-      "sha256": "38b5f954061e94b66f01431e0ada9114a7181713a436b8a8f5ee260b86779a4a"
+      "sha256": "0f58dd8ceed5ea46ebab94763583de96b9790ec4ba94bb4ecd2494bdc4b568e0"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/orchestratormaxxing/skills/worktree/SKILL.md",
+      "sha256": "aa350b7b5d607b0c8891e78ecc647a5d7b0eb34136a4ab43891ff88868506525"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/orchestratormaxxing/skills/worktree/agents/openai.yaml",
+      "sha256": "15bc1be3214ea42286490a467fa5921942f24c8f9de6bb1ddd6501de765e1ab5"
+    },
+    {
+      "mode": "file",
+      "path": "plugins/orchestratormaxxing/skills/worktree/references/commands.md",
+      "sha256": "f0b921c845532af597860e5872ede6f28ef644a4327519d662236b67f2cdda1f"
     },
     {
       "mode": "file",
@@ -2749,17 +2884,17 @@
     {
       "mode": "file",
       "path": "shell/claude-c.sh",
-      "sha256": "4817940c67453a3ec8fd0c403aee3687bd99e134857d072a889952172289adc6"
+      "sha256": "d0051b03fde1d21dc9639860959cf1164daf5181c198be9a649cedfaf036ee1e"
     },
     {
       "mode": "file",
       "path": "shell/codex-g.sh",
-      "sha256": "353be99d8eeaffee3f93d96fe53d4919a7eba84e6cb477ef1d0c0db733e96d16"
+      "sha256": "b0d3b549b219b6590205a7cd2fa2126f59d68378dd4a71cd00007ff385d3b77b"
     },
     {
       "mode": "file",
       "path": "shell/opencode-o.sh",
-      "sha256": "3265eb96c23305b6a7d6db4e10097da90567e5dbd8e4512e7babef49795f5ed9"
+      "sha256": "4802f03ef245546ebdc38f38cbd1f7408e488c5f74f73261c4d09d91e08d12b7"
     },
     {
       "mode": "file",
@@ -2773,13 +2908,18 @@
     },
     {
       "mode": "file",
+      "path": "skills/agent-guard/SKILL.md",
+      "sha256": "9a4c0719ae5964df48f55c9208db77662677e6e07e2831eab3e11683dae583b9"
+    },
+    {
+      "mode": "file",
       "path": "skills/anti-slop-design/SKILL.md",
       "sha256": "cf651eb674412e9c968aa4dd40a7c1777918179da073bc9f02f6cc5b8d4e72d1"
     },
     {
       "mode": "file",
       "path": "skills/external-stack.json",
-      "sha256": "f572c59c2213dcd242a18c441b66c71029870a9e4a3d918e6b983b5cf2624819"
+      "sha256": "23d0372c48a98e30794c93d228f8f557656e5d98d8152f91b1879aca6a973c44"
     },
     {
       "mode": "file",
@@ -2792,9 +2932,34 @@
       "sha256": "cbf02260234e7fbf98931de4330de930a12954aeb2e8f4890e7f14c89f6f4d8a"
     },
     {
+      "mode": "file",
+      "path": "skills/research-prompt/SKILL.md",
+      "sha256": "6873d5a484b1bf294ff85bdb32f144d98d2669849b8f276626c846d68298ddb4"
+    },
+    {
+      "mode": "file",
+      "path": "skills/research-prompt/references/rules.md",
+      "sha256": "2a49217c7b368e38aa74305e7bfc66a2e60931bc4eddf7fc24d5e944a9735c31"
+    },
+    {
       "mode": "exec",
       "path": "tests/agent-done-notify/run.sh",
-      "sha256": "f2ae91bedb7c548af1efff92400ca153462a6a7c84e97e47afc2ac2996f305c8"
+      "sha256": "4bdacb5b5a54d342391e0b83ff6736c9459a6b80b679dd26b38dceeebb219391"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/agent-guard/run.sh",
+      "sha256": "2336e00aa643565470f3e148fd66d42bb118e8741621db3f290c17145d0dde21"
+    },
+    {
+      "mode": "file",
+      "path": "tests/agent-guard/warp-parser.py",
+      "sha256": "8346e5e104086c225f43266c26e19b3c7f25cbb4336e1cbf6b1e927ec443a28e"
+    },
+    {
+      "mode": "file",
+      "path": "tests/agent-guard/warp-policy.py",
+      "sha256": "2661fedb3833b2c30f5aee1a2a72f16559528ded0af353f91b7f47cc2ba73dcc"
     },
     {
       "mode": "exec",
@@ -2804,7 +2969,7 @@
     {
       "mode": "exec",
       "path": "tests/agent-tab-status/run.sh",
-      "sha256": "992f03bbe13f9588cd93a38aeab73a15df5f17c2464758c09565e00352bb9e30"
+      "sha256": "407060d206a8fc72674b6890db9f29f959c4bae8836a2161180f5e54c34715af"
     },
     {
       "mode": "exec",
@@ -2865,6 +3030,11 @@
       "mode": "exec",
       "path": "tests/cheap-delegate/run.sh",
       "sha256": "8e051ee82d56f4e78a486234d9117797d378d149e71bbe8740e245669f587040"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/codex-session-start/run.sh",
+      "sha256": "1aad3117ab21d4931b014a3bfa83fd527c92cd04bac6db811e2b92f1ba4d3fbc"
     },
     {
       "mode": "exec",
@@ -2954,7 +3124,7 @@
     {
       "mode": "exec",
       "path": "tests/harness-reentrancy/run.sh",
-      "sha256": "dfc381e18922c8d75b47a8023b7c57ee86233a63808fa3aab50ca08e12024c63"
+      "sha256": "c0d1e2d45a66380e8b8a94695f14e1ffe47ba80d48e00e2d6aa90d6c92a7d224"
     },
     {
       "mode": "exec",
@@ -2990,6 +3160,11 @@
       "mode": "exec",
       "path": "tests/kimi-k3-routing/run.sh",
       "sha256": "35764ca603f4fdbb4048853f90268db69f651070bf7cbe14c0176a27dda467a0"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/launcher-workspace/run.sh",
+      "sha256": "a3920b957110c4c88e80de5521128180c85311fc883f4923eb3e81b069563d79"
     },
     {
       "mode": "file",
@@ -3164,7 +3339,12 @@
     {
       "mode": "exec",
       "path": "tests/skill-stack-install/run.sh",
-      "sha256": "295da52a74a0c82516782741d4f0c35488e722400fba15052f2f5fc994a82252"
+      "sha256": "4948c8207681e2e312445c310c48314b8da3133dd4763b4ff2d9d0a87abf0793"
+    },
+    {
+      "mode": "file",
+      "path": "tests/solplan-runner/test_astraplan_runner.py",
+      "sha256": "49143a3f87f1139ad29c66a1bac1986f63e74fe9b18d44912d81942af6442c9b"
     },
     {
       "mode": "file",
@@ -3175,6 +3355,11 @@
       "mode": "exec",
       "path": "tests/task-plan/run.sh",
       "sha256": "8e806a2626c5df231ca8668667970484752feece0e8b120ef0b7a7d9d6fa4c4b"
+    },
+    {
+      "mode": "exec",
+      "path": "tests/task-workspace/run.sh",
+      "sha256": "6147f0344533680e5d6de7d16f993844a5ba528ed88b95cca32584c26fc4ac2a"
     },
     {
       "mode": "file",
@@ -3214,7 +3399,7 @@
     {
       "mode": "exec",
       "path": "tests/warp-agent-install/run.sh",
-      "sha256": "96fda829e7cbae8b2aa14f11e9a5d32a00224cb6fc38983d454876141a67942b"
+      "sha256": "1f916a7f9485d08f15abc6ef49fb5effd62f2830d6a49162ad23e8ae0ec79c59"
     },
     {
       "mode": "exec",
@@ -3243,6 +3428,11 @@
     },
     {
       "mode": "exec",
+      "path": "tests/worktree-surfaces/run.sh",
+      "sha256": "62c05d4a1a40644eba740063c7dc9f44e8d0b9a9f0c3b87e2e273d8b92994763"
+    },
+    {
+      "mode": "exec",
       "path": "tests/zed-setup/run.sh",
       "sha256": "8e9273365339c4e38bac39706b427c1a213b200ff7097d61aa46867c1b161132"
     }
@@ -3253,8 +3443,8 @@
     "literal_hits": 0
   },
   "manifest": "deploy/graduation.manifest",
-  "manifest_sha256": "a117faf05daa2df1e9f6b59b7dc036376846fa91101712ccc41db168e0d4141d",
-  "source_commit": "4f25afefdf2e9b66c92187f3e646075c7d175e0a",
+  "manifest_sha256": "3b50df20d941e78ba2e2422bf879aee9ab3eb407a1f688b1fcc64e7d6d67afd3",
+  "source_commit": "d58dfdd9cf7e277f347dd9f392b2bf8bb587d42a",
   "source_tree_ish": "HEAD",
   "stripped": {
     "CLAUDE.md": 7,

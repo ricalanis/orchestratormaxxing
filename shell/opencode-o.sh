@@ -412,20 +412,7 @@ _o_submit_run_turn() {
     "ORCHESTRATORMAXXING_HARNESS_CHILD=1 ORCHESTRATORMAXXING_O_DELEGATED=1 ORCHESTRATORMAXXING_O_SHELL=$(printf '%q' "${ORCHESTRATORMAXXING_O_SHELL:-$HOME/.config/orchestratormaxxing/opencode-o.sh}") O_TURN_TIMEOUT_SECONDS=$(printf '%q' "${O_TURN_TIMEOUT_SECONDS:-600}") $cmd" 2>/dev/null
 }
 
-_o_clear_output() {
-  # Invalidate a previous turn's output.md before a new dispatch or on an owned
-  # stale/pending/malformed handoff, so it can never certify a new turn's pass
-  # receipt. Removes the link itself (never follows it) and fails closed if the
-  # artifact cannot be removed — a caller must not proceed on a stale artifact.
-  local run_abs="$1"
-  [[ -n "$run_abs" && -d "$run_abs" ]] || return 1
-  if [[ -e "$run_abs/output.md" || -L "$run_abs/output.md" ]]; then
-    rm -f -- "$run_abs/output.md" || return 1
-  fi
-  return 0
-}
-
-_o_send_worker() (
+_o_send_worker() {
   local sess="${1:-}" prompt_text="" as_json=0
   [[ -n "$sess" ]] || { echo 'o send: SESSION is required' >&2; return 2; }
   shift
@@ -446,24 +433,6 @@ _o_send_worker() (
     return "$rc"
   }
   _o_wait_ready "$sess" || { [[ "$as_json" == 1 ]] && _o_json_status not_ready "$sess" 'worker is busy or unreadable'; return 4; }
-  # A new turn invalidates the previous turn's output.md before dispatch, so a
-  # stale artifact can never certify the new turn's pass receipt. Fail closed:
-  # if the artifact cannot be cleared, do not dispatch on top of it.
-  local send_run_abs
-  send_run_abs="$(_o_worker_option "$sess" @orchestratormaxxing_run_dir)"
-  [[ -n "$send_run_abs" && -d "$send_run_abs" ]] || return 4
-  local output_lock="$send_run_abs/.output-operation"
-  if ! (umask 077; mkdir -- "$output_lock") 2>/dev/null; then
-    [[ "$as_json" == 1 ]] && _o_json_status lock_unavailable "$sess" 'another output operation is active or its lock remains; retry after it finishes or use a fresh run-dir'
-    return 4
-  fi
-  trap 'rmdir -- "$output_lock" 2>/dev/null || true' EXIT
-  # Recheck after acquiring the lock: another sender may have advanced the turn.
-  _o_wait_ready "$sess" || { [[ "$as_json" == 1 ]] && _o_json_status not_ready "$sess" 'worker is busy or unreadable'; return 4; }
-  if ! _o_clear_output "$send_run_abs"; then
-    [[ "$as_json" == 1 ]] && _o_json_status invalidate_failed "$sess" 'could not clear previous output.md before dispatch'
-    return 4
-  fi
   old_turn="$(_o_worker_option "$sess" @orchestratormaxxing_turn)"
   [[ "$old_turn" =~ ^[0-9]+$ ]] || old_turn=0
   new_turn=$((old_turn + 1))
@@ -489,7 +458,7 @@ _o_send_worker() (
   else
     printf '%s\n' "$sess"
   fi
-)
+}
 
 # Machine-only turn runner for delegated workers (runs INSIDE the worker pane).
 # The OpenTUI cannot be born reliably in a clientless pane (measured 2026-09-01:
@@ -709,7 +678,7 @@ print(o["opencode_session_id"]); print(o["message_id"])' "$run_abs/binding.json"
   fi
 }
 
-_o_handoff_worker() (
+_o_handoff_worker() {
   local sess="${1:-}" timeout="${O_HANDOFF_TIMEOUT_SECONDS:-600}" as_json=0
   [[ -n "$sess" ]] || { echo 'o handoff: SESSION is required' >&2; return 2; }
   shift
@@ -731,17 +700,6 @@ _o_handoff_worker() (
     [[ "$as_json" == 1 ]] && _o_json_status unbound "$sess" 'worker has no durable turn binding'
     return 4
   }
-  [[ -d "$run_abs" ]] || return 4
-  local output_lock="$run_abs/.output-operation"
-  if ! (umask 077; mkdir -- "$output_lock") 2>/dev/null; then
-    [[ "$as_json" == 1 ]] && _o_json_status lock_unavailable "$sess" 'another output operation is active or its lock remains; retry after it finishes or use a fresh run-dir'
-    return 4
-  fi
-  trap 'rmdir -- "$output_lock" 2>/dev/null || true' EXIT
-  # Handoff publication and send invalidation share one portable atomic lock.
-  # Capture the turn again inside it so an old reader cannot publish after send.
-  turn="$(_o_worker_option "$sess" @orchestratormaxxing_turn)"
-  [[ "$turn" =~ ^[1-9][0-9]*$ ]] || return 4
   file="$run_abs/handoff.json"
   ticks=$((timeout * 5))
   while :; do
@@ -752,10 +710,6 @@ raise SystemExit(0 if o.get("worker_session")==sys.argv[2] and o.get("turn")==in
       break
     fi
     [[ "$waited" -lt "$ticks" ]] || {
-      # Owned stale/malformed/pending handoff: the turn never produced a valid
-      # terminal event, so a previous turn's output.md must not remain eligible
-      # for a passing receipt. Clear it; the handoff already fails closed.
-      _o_clear_output "$run_abs" || true
       pending="$(_o_worker_option "$sess" @orchestratormaxxing_pending)"
       [[ "$as_json" == 1 ]] && _o_json_status readiness_failure "$sess" "turn $turn pending=${pending:-unknown}"
       return 4
@@ -763,27 +717,8 @@ raise SystemExit(0 if o.get("worker_session")==sys.argv[2] and o.get("turn")==in
     sleep 0.2
     waited=$((waited + 1))
   done
-  python3 -c 'import json,os,sys,tempfile
-path,worker,turn,as_json,run_abs=sys.argv[1],sys.argv[2],int(sys.argv[3]),sys.argv[4]=="1",sys.argv[5]
-def publish(text):
-    # Atomic durable output: write a temp sibling, fsync, chmod 0600, then
-    # os.replace so a reader never sees a partial output.md. No symlink-following
-    # writes: os.replace over a symlink replaces the link itself, never its target.
-    fd,tmp=tempfile.mkstemp(prefix=".output.md.",dir=run_abs)
-    try:
-        with os.fdopen(fd,"w",encoding="utf-8") as f:
-            f.write(text); f.flush(); os.fsync(f.fileno())
-        os.chmod(tmp,0o600)
-        os.replace(tmp,os.path.join(run_abs,"output.md"))
-    finally:
-        if os.path.exists(tmp): os.unlink(tmp)
-def clear_stale():
-    # A failed/invalid/stale turn must not leave a previous turn output.md
-    # eligible for a passing receipt on the new turn.
-    try:
-        os.unlink(os.path.join(run_abs,"output.md"))
-    except OSError:
-        pass
+  python3 -c 'import json,sys
+path,worker,turn,as_json=sys.argv[1],sys.argv[2],int(sys.argv[3]),sys.argv[4]=="1"
 try:
     o=json.load(open(path))
     required={"schema_version","worker_session","turn","opencode_session_id",
@@ -805,10 +740,6 @@ try:
         status="provider_empty"; rc=65
     elif n>65536:
         status="oversize"; rc=65
-    if rc==0:
-        publish(text)
-    else:
-        clear_stale()
     row={"status":status,"session":worker,"turn":turn,
          "opencode_session":o["opencode_session_id"],
          "message_id":o["message_id"],"finish":finish,
@@ -823,13 +754,12 @@ try:
 except SystemExit:
     raise
 except Exception as exc:
-    clear_stale()
     row={"status":"malformed_handoff","session":worker,"turn":turn,
          "detail":str(exc)[:80]}
     if as_json: print(json.dumps(row,separators=(",",":")))
     else: print("o handoff: malformed_handoff",file=sys.stderr)
-    raise SystemExit(65)' "$file" "$sess" "$turn" "$as_json" "$run_abs"
-)
+    raise SystemExit(65)' "$file" "$sess" "$turn" "$as_json"
+}
 
 _o_output_worker() {
   local sess="${1:-}" lines=80 as_json=0
@@ -1109,20 +1039,6 @@ while True:
     [[ "$as_json" == 1 ]] && _o_json_status invalid_turn1_task '' "$turn1_mode"
     return 2
   fi
-  # A run directory belongs to one worker session, including before its first
-  # output. Refuse legacy runtime traces and atomically claim fresh admission;
-  # otherwise a concurrent/late handoff could publish into a new worker's run.
-  local prior_artifact
-  for prior_artifact in output.md binding.json handoff.json turn-1.prompt; do
-    if [[ -e "$run_abs/$prior_artifact" || -L "$run_abs/$prior_artifact" ]]; then
-      [[ "$as_json" == 1 ]] && _o_json_status invalid_contract '' 'run-dir already contains worker evidence; use a fresh run-dir'
-      return 2
-    fi
-  done
-  if ! (umask 077; mkdir -- "$run_abs/.delegation-started") 2>/dev/null; then
-    [[ "$as_json" == 1 ]] && _o_json_status invalid_contract '' 'run-dir is already claimed or unavailable; use a fresh run-dir'
-    return 2
-  fi
   contract_sha="$(_o_sha256 "$contract")" || return 2
   brief_sha="$(_o_sha256 "$brief")" || return 2
   # Dispatch is the natural sweep point (occ reaps orphans the same way): a new
@@ -1231,7 +1147,7 @@ o() {
     shift
   fi
 
-  local headless=0 attach=0 detach=0 prompt_text="" role="" feature="" agent=""
+  local headless=0 attach=0 detach=0 prompt_text="" role="" feature="" agent="" workspace="shared"
   # Warp otherwise replaces OSC titles with its cwd/process-derived title.
   export WARP_DISABLE_AUTO_TITLE=true
   local opencode_args=()
@@ -1253,6 +1169,11 @@ o() {
       -F|--feature)
         [[ $# -ge 2 ]] || { echo "o: --feature requires a value" >&2; return 2; }
         feature="$2"; shift 2 ;;
+      -W|--workspace)
+        [[ $# -ge 2 ]] || { echo "o: --workspace requires shared|worktree|container" >&2; return 2; }
+        workspace="$2"; shift 2 ;;
+      -wt|--wt|--worktree) workspace="worktree"; shift ;;     # same as -W worktree
+      -c|--container)      workspace="container"; shift ;;    # same as -W container
       --)
         shift
         while [[ $# -gt 0 ]]; do opencode_args+=("$1"); shift; done
@@ -1264,11 +1185,49 @@ o() {
     echo "o: --attach and --detach are mutually exclusive" >&2
     return 2
   fi
+  case "$workspace" in
+    shared|worktree|container) ;;
+    *) echo "o: --workspace must be shared|worktree|container (got '$workspace')" >&2; return 2 ;;
+  esac
 
   [[ -n "$name" ]] || name="$(basename "$(pwd)")"
   name="$(_o_slug "$name")"
   local base="opencode-$name"
   [[ -n "$role" ]] && base="opencode-$name-$role"
+
+  # Workspace mode (-W): shared = today's behaviour ($PWD). worktree = an
+  # isolated worktree from bin/task-workspace; container = the launch wrapped
+  # in `coder-ws ssh -t <slug> --` so OpenCode runs inside the Coder workspace
+  # at the same absolute path. Resolved before any tmux session exists.
+  local launch_dir="$PWD" container_slug=""
+  if [[ "$workspace" != "shared" ]]; then
+    if [[ "$headless" == "1" || -n "$prompt_text" ]]; then
+      echo "o: -W $workspace applies to interactive sessions only" >&2
+      return 2
+    fi
+    if [[ "$workspace" == "worktree" ]]; then
+      launch_dir="$(command task-workspace resolve --mode worktree --project "$PWD" \
+        --branch "task/${feature:-$name}")" || {
+        echo "o: task-workspace could not resolve a worktree for $PWD" >&2
+        return 1
+      }
+      base="$base-wt"
+    else
+      command -v coder-ws >/dev/null 2>&1 || {
+        echo "o: coder-ws is not installed (run install-fleet.sh); -W container needs it" >&2
+        return 2
+      }
+      container_slug="$(basename "$PWD")"
+      # Readiness BEFORE any session exists (typed exit 2 from coder-ws, nothing created).
+      command coder-ws ssh "$container_slug" -- true >/dev/null 2>&1 || {
+        echo "o: Coder workspace '$container_slug' is not reachable — run: coder-ws status (then coder-ws start $container_slug)" >&2
+        return 2
+      }
+      base="$base-ws"
+    fi
+  fi
+  # printf '%q ' with ZERO args prints '' — an empty positional for the inner CLI.
+  _o_quote_args() { (( $# )) && printf '%q ' "$@"; true; }
 
   local env_args=(env "PATH=$PATH")
   [[ -z "${WARP_TERMINAL_SESSION_UUID:-}" ]] || env_args+=("WARP_TERMINAL_SESSION_UUID=$WARP_TERMINAL_SESSION_UUID")
@@ -1331,7 +1290,12 @@ o() {
   (( ${#opencode_args[@]} )) && tui_args+=("${opencode_args[@]}")
 
   if [[ -n "${TMUX:-}" && "$detach" == "0" ]]; then
-    command "$opencode_bin" ${tui_args[@]+"${tui_args[@]}"}
+    if [[ -n "$container_slug" ]]; then
+      command coder-ws ssh -t "$container_slug" -- bash -lc \
+        "cd $(printf '%q' "$PWD") && exec opencode $(_o_quote_args ${tui_args[@]+"${tui_args[@]}"})"
+      return $?
+    fi
+    ( cd "$launch_dir" && command "$opencode_bin" ${tui_args[@]+"${tui_args[@]}"} )
     return $?
   fi
 
@@ -1352,16 +1316,21 @@ o() {
   fi
   _o_register_recovery "$sess"
   local create_rc=0
+  local launch_cmd=("$opencode_bin" ${tui_args[@]+"${tui_args[@]}"})
+  if [[ -n "$container_slug" ]]; then
+    launch_cmd=(coder-ws ssh -t "$container_slug" -- bash -lc \
+      "cd $(printf '%q' "$PWD") && exec opencode $(_o_quote_args ${tui_args[@]+"${tui_args[@]}"})")
+  fi
   if [[ "$detach" == "1" ]]; then
-    tmux new-session -d -s "$sess" -c "$PWD" \
-      "${env_args[@]}" "$opencode_bin" ${tui_args[@]+"${tui_args[@]}"} || create_rc=$?
+    tmux new-session -d -s "$sess" -c "$launch_dir" \
+      "${env_args[@]}" "${launch_cmd[@]}" || create_rc=$?
   else
     # OpenTUI probes the real terminal during process birth. If OpenCode starts
     # in the detached gap before `tmux attach-session`, those replies are lost
     # and the TUI remains permanently blank. Keep the pane alive as a tiny gate
     # and exec OpenCode only after tmux reports an attached human client. This
     # also covers o-ubuntu: its SSH PTY becomes that client on remote attach.
-    tmux new-session -d -s "$sess" -c "$PWD" \
+    tmux new-session -d -s "$sess" -c "$launch_dir" \
       sh -c 'session="$1"
 shift
 i=0
@@ -1372,7 +1341,7 @@ while [ "$i" -lt 600 ]; do
   i=$((i + 1))
 done
 printf "o: timed out waiting for an attached tmux client\n" >&2
-exit 70' sh "$sess" "${env_args[@]}" "$opencode_bin" ${tui_args[@]+"${tui_args[@]}"} || create_rc=$?
+exit 70' sh "$sess" "${env_args[@]}" "${launch_cmd[@]}" || create_rc=$?
   fi
   if [[ "$create_rc" -ne 0 ]]; then
     echo "o: failed to create tmux session '$sess'" >&2

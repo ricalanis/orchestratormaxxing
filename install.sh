@@ -4,7 +4,7 @@
 #
 # Makes the agentic layer available in EVERY Claude Code and Codex session, with no
 # references back to this repo's path:
-#   • bridges  → ~/.local/bin/{oll,oll-council,oll-sync,occ,worker-path-bench,ticket-route,provider-ask,multi-council,cross-review,xsearch,mem-audit,memory-bridge-hermes.sh,loop-queue,loop-tick,intent-queue,hermes-watch,kpi-brief,capacity,token-ledger,model-catalog,model-bench,model-eval,win-log,delegate-ledger,warp-ollama,warp-model-pin,zed-setup,session-log,task-plan,project-new,drive,gpu-desktop,tmux-send,harness-agent-run,opencode-browser-mcp,gcloud,coolify,gauntlet-judge}  (on PATH)
+#   • bridges  → ~/.local/bin/{oll,oll-council,oll-sync,occ,worker-path-bench,ticket-route,provider-ask,multi-council,cross-review,xsearch,mem-audit,memory-bridge-hermes.sh,loop-queue,loop-tick,intent-queue,hermes-watch,kpi-brief,capacity,token-ledger,model-catalog,model-bench,model-eval,win-log,delegate-ledger,warp-ollama,warp-model-pin,zed-setup,session-log,task-plan,project-new,drive,gpu-desktop,tmux-send,harness-agent-run,opencode-browser-mcp,gcloud,coolify,gauntlet-judge,agent-guard}  (on PATH)
 #   • agents   → ~/.claude/agents/{ollama-worker,product-manager,fable-planner}.md
 #   • commands → ~/.claude/commands/{fanout,ideas,self-improve,wrap-up,fableplan,gauntlet,cheap-delegate}.md (bare `oll`/`session-log`)
 #   • codex    → repo marketplace plugin + ~/.codex/agents/*.toml
@@ -20,8 +20,6 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
-# Containers and service shells may have no login USER environment.
-INSTALL_USER="${USER:-$(id -un)}"
 say(){ printf "\n\033[1;36m== %s\033[0m\n" "$*"; }
 # 0 iff launchd agent $1 is loaded AND its plist is exactly $2 (i.e. owned by THIS $HOME).
 _launchd_owned_here(){
@@ -70,6 +68,7 @@ cp "$REPO_DIR/bin/agent-tab-status" "$BIN_DST/agent-tab-status"
 cp "$REPO_DIR/bin/warp-agent-event" "$BIN_DST/warp-agent-event"
 cp "$REPO_DIR/bin/warp-agent-recovery" "$BIN_DST/warp-agent-recovery"
 cp "$REPO_DIR/bin/codex-stop-hook" "$BIN_DST/codex-stop-hook"
+cp "$REPO_DIR/bin/codex-session-start" "$BIN_DST/codex-session-start"
 cp "$REPO_DIR/bin/agent-done-notify" "$BIN_DST/agent-done-notify"
 cp "$REPO_DIR/bin/ticket-route" "$BIN_DST/ticket-route"
 cp "$REPO_DIR/bin/provider-ask"  "$BIN_DST/provider-ask"
@@ -88,7 +87,6 @@ cp "$REPO_DIR/bin/mut"         "$BIN_DST/mut"
 cp "$REPO_DIR/bin/harness-verify" "$BIN_DST/harness-verify"
 cp "$REPO_DIR/bin/harness-scan"   "$BIN_DST/harness-scan"
 cp "$REPO_DIR/bin/loop-queue"     "$BIN_DST/loop-queue"
-cp "$REPO_DIR/bin/intent-queue"   "$BIN_DST/intent-queue"
 cp "$REPO_DIR/bin/loop-tick"      "$BIN_DST/loop-tick"
 cp "$REPO_DIR/bin/token-ledger"   "$BIN_DST/token-ledger"
 cp "$REPO_DIR/bin/model-catalog"  "$BIN_DST/model-catalog"
@@ -103,6 +101,15 @@ cp "$REPO_DIR/bin/session-log"    "$BIN_DST/session-log"
 cp "$REPO_DIR/bin/sync-agent-skills" "$BIN_DST/sync-agent-skills"
 cp "$REPO_DIR/bin/orchestration-practice" "$BIN_DST/orchestration-practice"
 cp "$REPO_DIR/bin/cogload"        "$BIN_DST/cogload"
+# bin/task-workspace — the workspace-mode resolver (shared | worktree | container) behind
+# `c/g/o -W` and the dashboard's Codex lane. ADOPTS worktrunk (`wt`): the pinned lock ships
+# here, the binary itself is installed only by the explicit `task-workspace install-wt` verb
+# (sha256-verified from deploy/worktrunk.lock) — this installer downloads nothing.
+cp "$REPO_DIR/bin/task-workspace" "$BIN_DST/task-workspace"
+chmod +x "$BIN_DST/task-workspace"
+cp "$REPO_DIR/deploy/worktrunk.lock" "$CFG_DIR/worktrunk.lock"
+command -v wt >/dev/null 2>&1 || [ -x "$BIN_DST/wt" ] || [ -x /opt/homebrew/bin/wt ] \
+  || echo "  NOTE: wt (worktrunk) not installed — run 'task-workspace install-wt' (pinned $(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["version"])' "$REPO_DIR/deploy/worktrunk.lock"))"
 # Global accident barrier: normal tmux commands pass through, while the one
 # server-wide destructive command cannot erase every c/g/o session at once.
 cp "$REPO_DIR/bin/tmux-guard"    "$BIN_DST/tmux"
@@ -111,12 +118,9 @@ cp "$REPO_DIR/bin/harness-agent-run" "$BIN_DST/harness-agent-run"
 cp "$REPO_DIR/bin/opencode-browser-mcp" "$BIN_DST/opencode-browser-mcp"
 cp "$REPO_DIR/bin/browser-mcp-contract" "$BIN_DST/browser-mcp-contract"
 cp "$REPO_DIR/bin/gauntlet-judge" "$BIN_DST/gauntlet-judge"
-cp "$REPO_DIR/bin/agent-guard" "$BIN_DST/agent-guard"
-cp "$REPO_DIR/bin/worker-path-bench" "$BIN_DST/worker-path-bench"
-# The benchmark must run from an installed HOME without its checkout.
-BENCH_DST="$HOME/.local/share/orchestratormaxxing/worker-path-bench"
-mkdir -p "$BENCH_DST"
-cp "$REPO_DIR/experiments/worker-path-bench/score.py" "$BENCH_DST/score.py"
+# bin/agent-guard → the cross-host pre (dangerous command) + post (write-content security
+# guidance) hook runner; its vendored data ships to $CFG_DIR/agent-guard below.
+cp "$REPO_DIR/bin/agent-guard"   "$BIN_DST/agent-guard"
 
 cp "$REPO_DIR/bin/xsearch"     "$BIN_DST/xsearch"
 mkdir -p "$SHARE_DIR"
@@ -124,7 +128,7 @@ chmod +x "$BIN_DST/o"
 rm -rf -- "$SHARE_DIR/orchestration_practices"
 cp -R "$REPO_DIR/orchestration_practices" "$SHARE_DIR/orchestration_practices"
 cp "$REPO_DIR/prompts/context/compact.md" "$SHARE_DIR/context-compact.md"
-chmod +x "$BIN_DST/oll" "$BIN_DST/oll-council" "$BIN_DST/oll-sync" "$BIN_DST/occ" "$BIN_DST/agent-tab-status" "$BIN_DST/warp-agent-event" "$BIN_DST/warp-agent-recovery" "$BIN_DST/codex-stop-hook" "$BIN_DST/agent-done-notify" "$BIN_DST/ticket-route" "$BIN_DST/provider-ask" "$BIN_DST/multi-council" "$BIN_DST/cross-review" "$BIN_DST/mem-audit" "$BIN_DST/memoryctl" "$BIN_DST/harness-sync" "$BIN_DST/core-export" "$BIN_DST/mut" "$BIN_DST/harness-verify" "$BIN_DST/harness-scan" "$BIN_DST/loop-queue" "$BIN_DST/intent-queue" "$BIN_DST/loop-tick" "$BIN_DST/token-ledger" "$BIN_DST/model-catalog" "$BIN_DST/model-bench" "$BIN_DST/model-eval" "$BIN_DST/win-log" "$BIN_DST/delegate-ledger" "$BIN_DST/warp-ollama" "$BIN_DST/warp-model-pin" "$BIN_DST/zed-setup" "$BIN_DST/session-log" "$BIN_DST/sync-agent-skills" "$BIN_DST/orchestration-practice" "$BIN_DST/cogload" "$BIN_DST/tmux" "$BIN_DST/tmux-send" "$BIN_DST/harness-agent-run" "$BIN_DST/opencode-browser-mcp" "$BIN_DST/browser-mcp-contract" "$BIN_DST/gauntlet-judge" "$BIN_DST/xsearch" "$BIN_DST/memory-bridge-hermes.sh" "$BIN_DST/hermes-watch" "$BIN_DST/kpi-brief" "$BIN_DST/capacity" "$BIN_DST/task-plan" "$BIN_DST/agent-guard" "$BIN_DST/worker-path-bench"
+chmod +x "$BIN_DST/oll" "$BIN_DST/oll-council" "$BIN_DST/oll-sync" "$BIN_DST/occ" "$BIN_DST/agent-tab-status" "$BIN_DST/warp-agent-event" "$BIN_DST/warp-agent-recovery" "$BIN_DST/codex-stop-hook" "$BIN_DST/codex-session-start" "$BIN_DST/agent-done-notify" "$BIN_DST/ticket-route" "$BIN_DST/provider-ask" "$BIN_DST/multi-council" "$BIN_DST/cross-review" "$BIN_DST/mem-audit" "$BIN_DST/memoryctl" "$BIN_DST/harness-sync" "$BIN_DST/core-export" "$BIN_DST/mut" "$BIN_DST/harness-verify" "$BIN_DST/harness-scan" "$BIN_DST/loop-queue" "$BIN_DST/loop-tick" "$BIN_DST/token-ledger" "$BIN_DST/model-catalog" "$BIN_DST/model-bench" "$BIN_DST/model-eval" "$BIN_DST/win-log" "$BIN_DST/delegate-ledger" "$BIN_DST/warp-ollama" "$BIN_DST/warp-model-pin" "$BIN_DST/zed-setup" "$BIN_DST/session-log" "$BIN_DST/sync-agent-skills" "$BIN_DST/orchestration-practice" "$BIN_DST/cogload" "$BIN_DST/tmux" "$BIN_DST/tmux-send" "$BIN_DST/harness-agent-run" "$BIN_DST/opencode-browser-mcp" "$BIN_DST/browser-mcp-contract" "$BIN_DST/gauntlet-judge" "$BIN_DST/xsearch" "$BIN_DST/memory-bridge-hermes.sh" "$BIN_DST/hermes-watch" "$BIN_DST/kpi-brief" "$BIN_DST/capacity" "$BIN_DST/task-plan" "$BIN_DST/agent-guard"
 
 # bin/chrome-debug-wayland-shim → shadows google-chrome(-stable) on PATH (Linux only).
 # Any launch carrying --remote-debugging-port under a Wayland session gets
@@ -155,12 +159,10 @@ cp "$REPO_DIR/.claude/commands/ideas.md"       "$CLAUDE_DIR/commands/ideas.md"
 cp "$REPO_DIR/.claude/commands/self-improve.md" "$CLAUDE_DIR/commands/self-improve.md"
 cp "$REPO_DIR/.claude/commands/wrap-up.md"     "$CLAUDE_DIR/commands/wrap-up.md"
 cp "$REPO_DIR/.claude/commands/fableplan.md"   "$CLAUDE_DIR/commands/fableplan.md"
-cp "$REPO_DIR/.claude/commands/astraplan.md" "$CLAUDE_DIR/commands/astraplan.md"
-cp "$REPO_DIR/.claude/commands/omaxxing-public-improve.md" "$CLAUDE_DIR/commands/omaxxing-public-improve.md"
-cp "$REPO_DIR/.claude/commands/public-improve-security.md" "$CLAUDE_DIR/commands/public-improve-security.md"
 cp "$REPO_DIR/.claude/commands/gauntlet.md"    "$CLAUDE_DIR/commands/gauntlet.md"
 cp "$REPO_DIR/.claude/commands/graduate.md"    "$CLAUDE_DIR/commands/graduate.md"
 cp "$REPO_DIR/.claude/commands/cheap-delegate.md" "$CLAUDE_DIR/commands/cheap-delegate.md"
+cp "$REPO_DIR/.claude/commands/worktree.md"    "$CLAUDE_DIR/commands/worktree.md"
 
 say "Governed skill stack → Claude, Codex, OpenCode, and production Hermes"
 # ADOPT + EXTEND: upstream payloads stay pinned in skills/external-stack.json;
@@ -218,6 +220,11 @@ if command -v codex >/dev/null 2>&1; then
       exit 1
     }
   echo "  installed and verified orchestratormaxxing Codex plugin"
+  # The plugin now ships two guard hooks (PreToolUse Bash → agent-guard pre, PostToolUse
+  # apply_patch → agent-guard post). Codex refuses to run an untrusted/modified hook until
+  # its hash is trusted in ~/.codex/config.toml. NEVER run this from install.sh: it spawns
+  # `codex app-server` (an agent process) — the one-time step is the operator's.
+  echo "  run 'agent-guard trust-codex --apply' once to trust the two new guard hooks (then 'agent-guard trust-codex --check')"
 else
   echo "  (Codex not installed — plugin registration skipped; bootstrap.sh can install it)"
 fi
@@ -588,19 +595,25 @@ say "Zed editor → Ollama Cloud provider config (interactive surface, never a l
 if [ -d "$HOME/.config/zed" ] || command -v zed >/dev/null 2>&1; then
   "$BIN_DST/zed-setup" || echo "  (zed-setup could not merge — run 'zed-setup --print' and paste manually)"
   echo "  one-time auth: 'zed-setup --key-hint' → paste in Zed Agent Panel → LLM Providers → Ollama"
+  # The dangerous-command denylist for Zed's terminal tool is applied in the
+  # "Agent guard" section below — AFTER its data directory exists (a first install
+  # used to refuse here because the patterns were not deployed yet).
 else
   echo "  (Zed not installed — 'curl -f https://zed.dev/install.sh | sh' on Linux, 'brew install --cask zed' on macOS)"
 fi
 
-say "Orchestrator pointer → Claude, Codex, OpenCode, optional Hermes, and Zed global instructions"
+say "Orchestrator pointer → Claude, Codex, OpenCode, Zed, and Warp global instructions"
 BEGIN="<!-- orchestratormaxxing:orchestrator:begin -->"
 END="<!-- orchestratormaxxing:orchestrator:end -->"
 # Same marked doctrine block into every harness-aware agent's global context file:
 # Claude Code reads ~/.claude/CLAUDE.md; Codex reads ~/.codex/AGENTS.md;
 # OpenCode reads ~/.config/opencode/AGENTS.md; Zed's agent reads the always-on
-# ~/.config/zed/AGENTS.md (its "Instructions" file). Warp has no file-based
-# global rules (Warp Drive is cloud-only) — in-repo it reads the project
-# AGENTS.md → CLAUDE.md symlink natively, like Zed does.
+# ~/.config/zed/AGENTS.md (its "Instructions" file). Warp app and Agent CLI
+# document ~/.agents/AGENTS.md as their shared global rule file.
+case "$(uname -s)" in
+  Darwin) WARP_SETTINGS_TOML="$HOME/.warp/settings.toml"; WARP_CLI_SETTINGS_TOML="$HOME/.warp_cli/settings.toml" ;;
+  *) WARP_SETTINGS_TOML="${XDG_CONFIG_HOME:-$HOME/.config}/warp-terminal/settings.toml"; WARP_CLI_SETTINGS_TOML="${XDG_CONFIG_HOME:-$HOME/.config}/warp-terminal/cli/settings.toml" ;;
+esac
 mkdir -p "$CODEX_DIR"
 POINTER_TARGETS=("$CLAUDE_DIR/CLAUDE.md" "$CODEX_DIR/AGENTS.md")
 if [ -d "$OPENCODE_CFG_DIR" ] || command -v opencode >/dev/null 2>&1; then
@@ -611,10 +624,12 @@ if [ -d "$HOME/.config/zed" ] || command -v zed >/dev/null 2>&1; then
   mkdir -p "$HOME/.config/zed"
   POINTER_TARGETS+=("$HOME/.config/zed/AGENTS.md")
 fi
-# Warp has no file-based global rules (Warp Drive is cloud-only), so the
-# directive cannot be installed — but its paste source can. This file always
-# carries the CURRENT doctrine block; the human pastes it once into
-# Warp → Warp Drive → Rules, and re-pastes after doctrine changes.
+if [ -f "$WARP_SETTINGS_TOML" ] || [ -f "$WARP_CLI_SETTINGS_TOML" ]; then
+  mkdir -p "$HOME/.agents"
+  POINTER_TARGETS+=("$HOME/.agents/AGENTS.md")
+fi
+# Keep the older Warp Drive paste source as a fallback until native rule loading
+# is verified on the installed desktop build.
 WARP_RULES_MD="$CFG_DIR/warp-global-rules.md"
 if [ ! -f "$WARP_RULES_MD" ] || ! grep -qF "$BEGIN" "$WARP_RULES_MD"; then
   cat > "$WARP_RULES_MD" <<'MD'
@@ -626,10 +641,6 @@ install.sh refreshes this file on every run.
 MD
 fi
 POINTER_TARGETS+=("$WARP_RULES_MD")
-# Match sync-agent-skills: unrelated Hermes directories stay untouched.
-if [ -f "$HOME/.hermes/kanban.db" ]; then
-  POINTER_TARGETS+=("$HOME/.hermes/AGENTS.md")
-fi
 for GLOBAL_MD in "${POINTER_TARGETS[@]}"; do
 touch "$GLOBAL_MD"
 # strip any previous block (idempotent), then append fresh
@@ -644,15 +655,15 @@ if i != -1 and j != -1:
 open(path, "w").write(t)
 PY
 fi
-HOST_ROUTING='Use the installed `astraplan` skill for nontrivial planning, then root review and native `cheap-delegate` for bounded execution. Explicit Sol/Fable/Kimi choices remain available; interactive host models stay unchanged.'
+HOST_ROUTING=""
 if [ "$GLOBAL_MD" = "$CODEX_DIR/AGENTS.md" ]; then
-  HOST_ROUTING='- **Codex plan-first routing:** use the namespaced `$orchestratormaxxing:*` skills; nontrivial unplanned work → `$orchestratormaxxing:astraplan` → root review → `$orchestratormaxxing:fanout` only for independent chunks.'
+  HOST_ROUTING='- **Codex plan-first routing:** use the namespaced `$orchestratormaxxing:*` skills; nontrivial unplanned work → `$orchestratormaxxing:solplan` → root review → `$orchestratormaxxing:fanout` only for independent chunks. Use `$orchestratormaxxing:astraplan` for Astra planning, demanding bounded Sol implementation, and cheap-delegate for routine chunks; Root retains policy and sign-off.'
+elif [ "$GLOBAL_MD" = "$HOME/.agents/AGENTS.md" ]; then
+  HOST_ROUTING='- **Warp routing:** interactive human surface; command_denylist confirms before execution. Launch c/g/o in a Warp terminal for host lifecycle hooks, governed memory and notifications. Native Warp agent hooks and third-party child config inheritance are not assumed; use installed portable skills and project doctrine.'
 elif [ "$GLOBAL_MD" = "$OPENCODE_CFG_DIR/AGENTS.md" ]; then
-  HOST_ROUTING='- **OpenCode routing:** the orchestratormaxxing workflow skills are installed natively. Use `/astraplan` for read-only planning, then native `cheap-delegate` for bounded execution and `fanout` only for independent chunks; explicit `/kimiplan` remains available; `o delegate/send/handoff/close` remains the stateful worker lifecycle.'
-elif [ "$GLOBAL_MD" = "$HOME/.config/zed/AGENTS.md" ] || [ "$GLOBAL_MD" = "$WARP_RULES_MD" ]; then
-  HOST_ROUTING="For nontrivial planning, read $REPO_DIR/plugins/orchestratormaxxing/skills/astraplan/SKILL.md and use its documented CLI runner with the paired solplan engine in that repository. After root review, read $REPO_DIR/plugins/orchestratormaxxing/skills/cheap-delegate/SKILL.md for bounded execution. This is a repository CLI entry point, not a Zed/Warp native skill installation or execution adapter; interactive models stay unchanged."
+  HOST_ROUTING='- **OpenCode routing:** the orchestratormaxxing workflow skills are installed natively. Use `/kimiplan` for read-only planning, then `fanout` only for independent chunks; `o delegate/send/handoff/close` remains the stateful worker lifecycle.'
 elif [ "$GLOBAL_MD" = "$HOME/.hermes/AGENTS.md" ]; then
-  HOST_ROUTING='- **Hermes routing:** the orchestratormaxxing workflow skills are installed natively; Use `astraplan` for read-only planning, native `cheap-delegate` for bounded execution, and the same `oll`/`o` deterministic worker lifecycle. A separately installed `plan-to-repo` is optional.'
+  HOST_ROUTING='- **Hermes routing:** the orchestratormaxxing workflow skills are installed natively; Hermes keeps its richer native `plan-to-repo`. Use `solplan` for read-only planning and the same `oll`/`o` deterministic worker lifecycle.'
 fi
 cat >> "$GLOBAL_MD" <<MD
 
@@ -664,6 +675,7 @@ The primary host (Claude, Codex, OpenCode, or Hermes) orchestrates + verifies; h
 - **Iron rule of verification:** verification cost scales with the *spec*, not the *solution* — never re-do a worker's work to check it. Author the contract (tests/checklist) first; read only pass/fail. If you can't cheaply specify "correct," keep it in the frontier thread.
 - **Physical delegation gate:** Root persists read-only \`.results/delegation/<run-id>/contract.md\` + \`brief.md\` before dispatch; workers never author/certify their gate. New OpenCode briefs mark exactly one complete bounded turn-1 assignment with \`<!-- o-delegate-turn-1:begin -->\` / \`<!-- o-delegate-turn-1:end -->\`: \`o delegate\` executes it immediately, while \`o send\` is repair-only and never the initial task (unmarked legacy bounded briefs execute as a whole). Direct \`oll\` is response-only (no files/shell/tests); workspace reads/edits, commands/tests, persistent artifacts, and repairs route through the public \`o\` worker runtime (\`o delegate/send/handoff\`; \`o output\` is pane diagnostics; then \`o close\` — an unclosed worker leaks a process tree); \`occ\` is internal one-shot transport.
 - Tools (on PATH): \`oll "<task>" --model <m>\` · \`oll-council "<q>"\` · \`memoryctl\` · \`mem-audit\`. Workflows: Claude \`/gauntlet\` (divide a broad request into gated increments, one step before planning; promotes, never accepts) + \`/fanout\` + \`/ideas\`; Codex \`\$orchestratormaxxing:gauntlet\` + \`\$orchestratormaxxing:fanout\` + \`\$orchestratormaxxing:ideas\` + \`\$orchestratormaxxing:memory\`. Optional agent: \`ollama-worker\`.
+- **Workspace modes (\`workspace: shared|worktree|container\`):** \`task-workspace resolve --mode <m> --project <path> [--branch task/<slug>]\` resolves where a task runs; \`c/g/o -W <mode>\` (aliases \`-wt\`, \`-c\`) launch there. \`shared\` keeps the shared-tree rule (reread the diff, stage only owned hunks); \`worktree\` is a worktrunk (\`wt\`) worktree under \`~/dev/.worktrees/<repo>.<branch>\` (Mac \`~/Dev/.worktrees/\`), merged with \`task-workspace merge\`; \`container\` is a Coder workspace on the GPU box or the Mac via \`coder-ws\` (loopback server, SSH re-exec, same absolute project path). Skills: \`/worktree\` · \`\$orchestratormaxxing:worktree\` · \`/coder-workspace\`.
 $HOST_ROUTING
 - **Shared-skill vocabulary:** inside an OpenCode or Hermes session, "root Codex" in a shared workflow means the current primary host. Keep the invariant and use the host routing above; do not launch Codex merely to rename the orchestrator.
 - **Memory governance:** Claude and Codex share the file-backed \`<git-root>/.agents/memory/\` store. Use \`memoryctl show/add/supersede/consolidate\`; never scrape Codex SQLite. Supersede (don't append) on conflict; stamp \`created\`/\`last_verified\` + decay (reference 30d / project 14d → re-verify when stale); gate only belief-changing writes with a different-family critic; keep \`MEMORY.md\` one line per active fact. Above 25 facts, merge safe groups with atomic \`memoryctl consolidate\` or bind a no-safe-merge review to the exact semantic set with \`memoryctl review-consolidation --decision no-safe-merge\`; any meaning or membership change reopens it. Run \`mem-audit\` and act on its flags — never re-read the vault to re-derive staleness.
@@ -685,7 +697,7 @@ GUARD_DST="$CFG_DIR/agent-guard"
 if [ -d "$GUARD_SRC" ]; then
   mkdir -p "$GUARD_DST"
   _guard_copied=0; _guard_missing=0
-  for _guard_file in dangerous-patterns.txt guard-cases.txt security_patterns.py PROVENANCE.json LICENSE.davidondrej-skills LICENSE.claude-plugins-official; do
+  for _guard_file in dangerous-patterns.txt guard-cases.txt security_patterns.py warp-default-patterns.json PROVENANCE.json LICENSE.davidondrej-skills LICENSE.claude-plugins-official; do
     if [ -f "$GUARD_SRC/$_guard_file" ]; then
       cp "$GUARD_SRC/$_guard_file" "$GUARD_DST/$_guard_file"
       _guard_copied=$((_guard_copied + 1))
@@ -702,14 +714,26 @@ fi
 # them reproduces the original byte-for-byte) and refuses (exit 2, file untouched) a profile with
 # no command_denylist key; a refusal is a note here, never an install failure. Warp rewrites
 # settings.toml from the account at startup (measured in bin/warp-model-pin) — re-run to re-pin.
-case "$(uname -s)" in
-  Darwin) WARP_SETTINGS_TOML="$HOME/.warp/settings.toml" ;;
-  *)      WARP_SETTINGS_TOML="$HOME/.config/warp-terminal/settings.toml" ;;
-esac
-if [ -f "$WARP_SETTINGS_TOML" ]; then
+if [ -f "$WARP_SETTINGS_TOML" ] || [ -f "$WARP_CLI_SETTINGS_TOML" ]; then
   "$BIN_DST/agent-guard" warp --apply || echo "  NOTE: agent-guard warp --apply refused — run 'agent-guard warp --check' (Warp denylist = confirm-before-run, not a block)"
 else
   echo "  (no Warp settings at $WARP_SETTINGS_TOML — Warp command_denylist not applied)"
+fi
+
+# Warp workflows (deploy/warp/*.yaml → Warp's local workflows dir): the worktrunk verbs as
+# Warp-native workflows. Same gate as the settings block — only when Warp already keeps a
+# workflows dir here; never created on a machine without Warp.
+case "$(uname -s)" in
+  Darwin) WARP_WORKFLOWS_DIR="$HOME/.warp/workflows" ;;
+  *) WARP_WORKFLOWS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/warp-terminal/workflows" ;;
+esac
+if [ -d "$WARP_WORKFLOWS_DIR" ]; then
+  for _wf in "$REPO_DIR"/deploy/warp/*.yaml; do
+    [ -f "$_wf" ] && cp "$_wf" "$WARP_WORKFLOWS_DIR/$(basename "$_wf")"
+  done
+  echo "  Warp workflows → $WARP_WORKFLOWS_DIR (deploy/warp/*.yaml)"
+else
+  echo "  (no Warp workflows dir at $WARP_WORKFLOWS_DIR — worktrunk workflows not deployed)"
 fi
 
 # Zed: the same patterns into agent.tool_permissions.tools.terminal.always_deny
@@ -955,9 +979,12 @@ with open(path, "w") as f:
     f.write("\n")
 print("  merged SessionStart (shared memory, loop-tick, session-log) + Stop audit/log hooks into", path)
 PY
-
-"$BIN_DST/agent-guard" wire claude --settings "$GLOBAL_SETTINGS" || echo "  NOTE: guard hook wiring refused; inspect agent-guard status --json"
-echo "  Codex hook trust is explicit: agent-guard trust-codex --check; use --apply only after reviewing the hooks."
+# PreToolUse Bash → `agent-guard pre` (dangerous-command denylist, exit 2 blocks) and
+# PostToolUse Edit|Write|MultiEdit|NotebookEdit → `agent-guard post` (security guidance as
+# additionalContext). The tool owns the merge — idempotent, dedupes by command substring,
+# preserves every other hook — so Claude and the Codex plugin carry the same entries.
+# Hooks fire under --dangerously-skip-permissions too, so `claude -p` workers are covered.
+"$BIN_DST/agent-guard" wire claude --settings "$GLOBAL_SETTINGS" || echo "  NOTE: agent-guard wire claude failed — run 'agent-guard wire claude' manually"
 
 # Codex now owns these lifecycle hooks through the installed orchestratormaxxing
 # plugin. Older Mac installs copied Claude's hook set into ~/.codex/hooks.json;
@@ -1097,7 +1124,7 @@ Linux)
     else
       printf '  \033[1;33mautonomous loop NOT armed\033[0m — to enable the daily 07:00 self-improve round:\n'
       printf '    systemctl --user enable --now orchestratormaxxing-loop.timer\n'
-      printf '    sudo loginctl enable-linger %s   # once: so it fires without an active login\n' "$INSTALL_USER"
+      printf '    sudo loginctl enable-linger %s   # once: so it fires without an active login\n' "$USER"
     fi
   fi
   ;;
@@ -1166,9 +1193,9 @@ if [ "$(uname -s)" = "Linux" ] && command -v systemctl >/dev/null 2>&1 \
     # groups across logout/login — so a plain re-login leaves the collector
     # exactly as blind as before.
     if ! id -nG 2>/dev/null | tr " " "\n" | grep -qx input; then
-      printf '  \033[1;33mcogload: %s is not in the `input` group\033[0m — evdev cannot read keyboards.\n' "$INSTALL_USER"
-      printf '    sudo usermod -aG input %s\n' "$INSTALL_USER"
-      printf '    loginctl terminate-user %s   # REQUIRED: a plain logout keeps the old groups while lingering is on\n' "$INSTALL_USER"
+      printf '  \033[1;33mcogload: %s is not in the `input` group\033[0m — evdev cannot read keyboards.\n' "$USER"
+      printf '    sudo usermod -aG input %s\n' "$USER"
+      printf '    loginctl terminate-user %s   # REQUIRED: a plain logout keeps the old groups while lingering is on\n' "$USER"
     fi
   fi
 fi
@@ -1308,8 +1335,9 @@ fi
 
 say "DONE — verify:"
 echo "  command -v oll oll-council oll-sync mem-audit xsearch"
+echo "  agent-guard status --gate && agent-guard selftest   # every present host wired, corpus green"
 echo "  (cd /tmp && oll 'say hi' --model glm-5.3)"
 echo "  (cd /tmp && xsearch 'test query' --days 1)"
 echo "  Claude: new session → /gauntlet (divide broad requests into increments) · /fanout · /ideas"
-echo '  Codex:  new thread  → $orchestratormaxxing:gauntlet to divide broad requests · $orchestratormaxxing:astraplan first for nontrivial work · $orchestratormaxxing:fanout after planning · $orchestratormaxxing:memory; shell: g / g ls'
+echo '  Codex:  new thread  → $orchestratormaxxing:gauntlet to divide broad requests · $orchestratormaxxing:solplan first for nontrivial work · $orchestratormaxxing:fanout after planning · $orchestratormaxxing:memory; shell: g / g ls'
 echo '  Fleet:  c-ubuntu · g-ubuntu · o-ubuntu · harness-sync status · gpu-agent c|g|o|ls|send'

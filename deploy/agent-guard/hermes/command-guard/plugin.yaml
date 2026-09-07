@@ -1,6 +1,6 @@
 name: command-guard
 version: "0.1.0"
-description: "Block dangerous terminal commands before they run (rm -rf /, disk writes, curl|sh, git push --force, password-manager CLIs, ...). A pre_tool_call hook that shells out to the orchestratormaxxing cross-host runner `agent-guard pre` — the same denylist Claude Code, Codex, OpenCode, Warp and Zed enforce (davidondrej/skills dangerous-patterns.txt, MIT). Fail-open: a missing or broken guard never bricks the terminal tool; coverage is measured by `agent-guard status --gate`."
-author: "orchestratormaxxing (orchestratormaxxing) — pattern data davidondrej/skills (MIT)"
+description: "Block dangerous terminal commands before they run (rm -rf /, disk writes, curl|sh, git push --force, password-manager CLIs, ...). A pre_tool_call hook that shells out to the cmaxxing cross-host runner `agent-guard pre` — the same denylist Claude Code, Codex, OpenCode, Warp and Zed enforce (davidondrej/skills dangerous-patterns.txt, MIT). Fail-open: a missing or broken guard never bricks the terminal tool; coverage is measured by `agent-guard status --gate`."
+author: "cmaxxing (orchestratormaxxing) — pattern data davidondrej/skills (MIT)"
 hooks:
   - pre_tool_call

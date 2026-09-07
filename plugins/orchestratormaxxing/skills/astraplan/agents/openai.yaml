@@ -1,4 +1,4 @@
 interface:
-  display_name: "Astraplan"
-  short_description: "Astra planning and bounded coordination across hosts"
-  default_prompt: "Use $orchestratormaxxing:astraplan to plan this work before execution or fanout."
+  display_name: "Astra Plan"
+  short_description: "Astra plans; Sol and cheap workers execute"
+  default_prompt: "Use $orchestratormaxxing:astraplan to plan this work with Astra, assign demanding implementation to Sol, and cheap-delegate the routine chunks."
