@@ -14,39 +14,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ \"${SOLPLAN_CHILD:-0}\" = 1 ] && exit 0; \"$HOME/.local/bin/memoryctl\" brief --max-bytes 12000 2>/dev/null; true",
+            "command": "[ \"${SOLPLAN_CHILD:-0}\" = 1 ] && exit 0; \"$HOME/.local/bin/codex-session-start\" 2>/dev/null; true",
             "timeout": 15,
-            "statusMessage": "Loading shared Claude/Codex memory"
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "[ \"${SOLPLAN_CHILD:-0}\" = 1 ] && exit 0; o=\"$(\"$HOME/.local/bin/mem-audit\" 2>/dev/null)\"; echo \"$o\" | grep -qE '\u26a0|\u2717' && printf 'Memory audit flags (re-verify stale/superseded memory before trusting it):\\n%s\\n' \"$o\"; true",
-            "timeout": 15,
-            "statusMessage": "Auditing project memory"
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "[ \"${SOLPLAN_CHILD:-0}\" = 1 ] && exit 0; loop-tick --kick --quiet >/dev/null 2>&1; n=\"$(loop-queue status --json 2>/dev/null)\"; echo \"$n\" | grep -q '\"actionable\": 0' || printf 'Self-improve queue has open flaws \u2014 use $orchestratormaxxing:self-improve to drain:\\n%s\\n' \"$(loop-queue list 2>/dev/null)\"; true",
-            "timeout": 5,
-            "statusMessage": "Watching harness health"
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "[ \"${SOLPLAN_CHILD:-0}\" = 1 ] && exit 0; session-log tail 2>/dev/null; true",
-            "timeout": 15,
-            "statusMessage": "Loading project session log"
+            "statusMessage": "Loading bounded SessionStart context"
           }
         ]
       }

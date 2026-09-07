@@ -1,6 +1,6 @@
 # orchestratormaxxing
 
-A verifier-gated orchestration harness for Claude Code, Codex, OpenCode, Zed and Warp. It is for developers who want a deterministic, self-improving setup that protects frontier-model tokens. The public project originated in a private lab and develops through public contributions.
+A verifier-gated orchestration harness for Claude Code, Codex, OpenCode, Zed and Warp. It is for developers who want a deterministic, self-improving setup that protects frontier-model tokens. The public project is a graduation of a private lab.
 
 ## Quick start — agent kickoff
 
@@ -64,29 +64,6 @@ join a fleet or personalize, copy `deploy/fleet.env.example` to
 `~/.config/orchestratormaxxing/fleet.env` and fill only the keys you use; personal
 seeds (OKR catalog, dashboard env) live under `~/.hermes/` and the service
 environment — see `SETUP.md`. No key ever lands in the repo.
-
-## Delegation lifecycle reliability
-
-A successful `o handoff` saves its exact response as a private, atomic artifact;
-a passing delegation receipt requires a regular output file. Each new worker
-session claims a fresh run directory. Handoff and send serialize access to the
-output; an abandoned operation lock fails closed, so close that worker and start
-a fresh run. `mut` gives contract
-children a chance to handle termination before bounded escalation, including on
-macOS. Parallel writers use separate worktrees and root verifies their combined
-result after integration.
-
-`harness-verify` can recover from an older PATH-selected Python when Python 3.11+
-is available, reports unavailable TOML inspection honestly, and names installed
-bridges whose bytes differ from the checkout. Installation ships `intent-queue`,
-works without a login `USER` variable, and deploy coverage checks actual copy
-and executable-permission commands.
-
-These mechanisms support the sun's unattended Linux workers and the earth's
-interactive macOS sessions. Durable evidence survives a disconnected client;
-bounded cancellation reclaims worker processes; drift reports expose stale copies
-across hosts. Moons use the same contracts inside their containers. Standalone
-earth operation requires no sun connection, cloud identity, or new service.
 
 ## What gets installed
 
@@ -178,11 +155,11 @@ The doctrine isn't folklore — each rule traces to a verified paper (full notes
 
 ## Fleet mode (private half)
 
-These tools ship only from the private installer and are not part of this public projection: `folder-sync`, `gpu-agent`, `gpu-desktop`, `harness-remote`, `project-new`, `semantica`, `firecrawl`, `opendesign`, `drive`, `design-eval`, `transcription-fix`, and the proposal toolchain. The historical `/graduate` surfaces also ship, but require the maintainer's private manifest, which is absent here. Use `omaxxing-public-improve` for ordinary public contribution PRs; `bin/core-export` remains available for operator-configured projections.
+These tools ship only from the private installer and are not part of this public projection: `folder-sync`, `gpu-agent`, `gpu-desktop`, `harness-remote`, `project-new`, `semantica`, `firecrawl`, `opendesign`, `drive`, `design-eval`, `worker-path-bench`, `transcription-fix`, and the proposal toolchain. The maintainer's graduation workflow (`/graduate`) is also private; `bin/core-export` itself ships so you can run your own projection.
 
 ## Graduation
 
-The project began as a gated export. Public contributions now start from current public main through `omaxxing-public-improve` and `public-improve-security`; they require no private source. Historical `core-export` operations can still replace a destination tree. This update does not disable any private export automation: its operator must reconcile independent public additions before using it. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md). Licensed MIT, with vendored notices retained alongside their files.
+This repo is produced by `bin/core-export` from a private source of truth. Direct edits are overwritten by the next graduation. Contributions go through PRs that the maintainer absorbs with `core-export --absorb-pr <n>`. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md). Licensed MIT.
 
 ## Tools
 
@@ -216,7 +193,7 @@ Tools are dependency-free (Python stdlib or plain bash), read-only where they au
 | `/self-improve [focus]` | One governed round of harness self-improvement (see below). |
 | `ollama-worker` (subagent) | A cheap dispatcher (Haiku) that hands a single well-scoped task to an Ollama Cloud model via `oll` and returns the output verbatim. |
 
-Codex exposes Astra planning, native cheap-delegate execution, fanout, ideas, self-improve, wrap-up, memory, and public improvement/projection-security skills. `astraplan` uses GPT-6 Astra Ultra with bounded read-only delegation across supported hosts. Explicit Sol/Fable/Kimi planning remains available. The calling host reviews the plan, delegates bounded contracts, and accepts the combined result; fanout requires genuinely independent chunks.
+Codex exposes `$orchestratormaxxing:fanout`, `$orchestratormaxxing:ideas`, `$orchestratormaxxing:self-improve`, `$orchestratormaxxing:wrap-up`, `$orchestratormaxxing:solplan`, and `$orchestratormaxxing:memory`. Planning is host-native: Claude's `/fableplan` delegates to Fable, while Codex prioritizes `$orchestratormaxxing:solplan` with GPT-5.6 Sol Ultra and bounded read-only delegation for nontrivial unplanned work. After root review, `$orchestratormaxxing:fanout` is used only for genuinely independent implementation chunks.
 
 ### Worker models — heavy frontier only
 
@@ -258,85 +235,3 @@ knowledge/         # research notes, protocol specs, self-improve log, transcrip
 ---
 
 *The name is the method: take Claude Code, and max it out.*
-
-## Plan, execute and verify a public improvement
-
-Use `astraplan` for GPT-6 Astra Ultra design, review the plan in the calling host, then
-use native `cheap-delegate` for bounded execution. `fanout` applies only to independent
-chunks with separate contracts and worktrees. Explicit Sol/Fable/Kimi planning remains
-available; the host's interactive model is unchanged. Codex uses the plugin entry point;
-Claude and OpenCode expose `/astraplan`; Hermes uses the installed skill. The paired
-Sol engine is required by the portable Astra runner, and installation includes both.
-
-`omaxxing-public-improve` inventories the requested period and project-wide capabilities,
-then prepares a coherent contribution from current public main. A private source and
-remote sun are optional inputs. `public-improve-security` reviews the feature projection:
-behavior, dependencies, entry points, host coverage, intentional omissions and security.
-It requires five distinct passes before publication and provides a structural coverage
-checker; that checker cannot certify evidence or authorize a push. Root retains sign-off.
-
-The sun benefits from the same portable planning and review workflow during persistent
-sessions; earth can work without a sun or private services. Host tests use synthetic
-local providers. Server task-plan/kanban planner selectors and live-provider availability
-are separate capabilities, not implied by portable skill support.
-
-### Review triage and scoped SSH
-
-`review-triage` turns cross-provider reviews into a shortlist of supported defects,
-with honest reviewer coverage and approval scoped to the requested fixes. It uses
-the existing `cross-review` and `provider-ask` tools and configured provider access.
-Material must be cleared for those providers before a review is dispatched.
-
-`sun-earth-ssh` guides an authorized remote task through an existing OpenSSH alias.
-It preserves host-key verification, bounds authentication attempts and checks remote
-identity before mutations. It requires your own trusted SSH configuration; it does
-not install keys, discover peers, provision a server or handle passwords for you.
-
-The normal installer exposes review triage as a native skill in Claude, Codex,
-OpenCode and active Hermes installations. SSH is available through the Codex plugin
-as `$orchestratormaxxing:sun-earth-ssh` and as a native skill in the other three hosts.
-For example, ask to “triage the staged review findings” or “use sun-earth-ssh to
-inspect the checkout on my configured remote host.” Both skills install on a
-standalone machine without fleet configuration; SSH is used only for remote tasks.
-
-Offline packaging checks: `bash tests/portable-skills/run.sh` and
-`bash tests/skill-manifest-hash/run.sh`. These exercise installation boundaries;
-they do not contact a provider or establish a live SSH session.
-
-## Portable practice toolkit
-
-These capabilities work from the public checkout without a private lab or fleet.
-The installer deploys the CLI tools and governed skill payloads; Codex discovers plugin
-skills natively, while Claude/OpenCode and an available Hermes installation receive
-managed copies. Zed/Warp can read the repository skills; no native skill adapter is claimed.
-
-| Capability | Start here | Result |
-|---|---|---|
-| Research briefs | [research-prompt](plugins/orchestratormaxxing/skills/research-prompt/SKILL.md) | A self-contained research question, evidence requirements and bounded gap review |
-| Durable plans | [plan-to-repo](plugins/orchestratormaxxing/skills/plan-to-repo/SKILL.md) | Stable project-local plan files with explicit revisions/status; optional indexing |
-| Product planning | [product-manager](plugins/orchestratormaxxing/skills/product-manager/SKILL.md) | Proposal-only initiative/epic/task joins, ownership and testable acceptance |
-| Weekly contributions | [weekly-public-contribution](plugins/orchestratormaxxing/skills/weekly-public-contribution/SKILL.md) | Broad baseline/delta/backlog review with private resumable evidence |
-| Command guard | [agent-guard](plugins/orchestratormaxxing/skills/agent-guard/SKILL.md) | Shared pre-command patterns, write guidance and explicit host wiring checks |
-| Worker benchmark | [protocol](experiments/worker-path-bench/PROTOCOL.md) | Offline adapter comparison with distinct wrong-answer and infrastructure outcomes |
-| Working examples | [portable orchestration](examples/portable-orchestration/README.md) | Disposable memory, evaluation and session-handoff examples |
-
-Try the benchmark with a synthetic adapter, from the checkout:
-
-```bash
-mkdir -p .results/benchmark
-bin/worker-path-bench --cases experiments/worker-path-bench/cases.jsonl \
-  --adapter 'fixture=python3 experiments/worker-path-bench/fixtures/pass_adapter.py' \
-  --output .results/benchmark/results.jsonl --summary .results/benchmark/summary.json
-```
-
-The adapter receives task inputs, not verifier answers. The runner bounds time and output;
-raw rows retain failures, and summaries can be reproduced. No provider account is needed
-for these examples, and fixture scores are not model-performance evidence.
-
-For the guard, start with `agent-guard selftest` and `agent-guard status --gate` after
-installation. The guard reduces accidental dangerous commands; it is not a sandbox.
-It fails open on unavailable/broken runtime data and scans bounded windows. Post-write
-rules give guidance after a write, not enforcement. Warp requests confirmation, while
-Zed receives denial configuration. Codex trust is explicit and hash-pinned; Hermes's
-post-write guidance comes from its separately bundled `security-guidance` plugin.
-Configuration and simulated adapter tests do not prove interception by every host version.

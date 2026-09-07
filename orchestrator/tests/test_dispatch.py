@@ -796,5 +796,91 @@ class UiContract(unittest.TestCase):
         self.assertIn("thread_name", block)
 
 
+class WorkspaceMode(_DispatchCase):
+    """m34 `tasks.workspace_mode` on the Codex lane. D1 pins that the default
+    is byte-identical to the pre-m34 argv; D2/D3 pin the two new shapes; D4
+    pins that a resolver failure is an outbox row and never a spawn; D5 pins
+    the migration's idempotence. The Claude lane is untouched (red line 10)."""
+
+    def _set_mode(self, task_id, mode):
+        c = self._conn()
+        c.execute("UPDATE tasks SET workspace_mode = ? WHERE id = ?", (mode, task_id))
+        c.commit()
+        c.close()
+
+    def test_d1_default_mode_is_the_exact_pre_m34_argv(self):
+        self.assertEqual(self._task("t_disp_ws")["workspace_mode"], "shared")
+        res = _dispatch.dispatch_task("t_disp_ws", "codex")
+        self.assertEqual(res["state"], "delivered", res)
+        argv = self.spawned[0]
+        self.assertEqual(argv[:6],
+                         [_dispatch._codex_bin(), "exec", "-C", str(REPO), "-s", "workspace-write"])
+        self.assertEqual(len(argv), 7)
+        self.assertEqual([c for c in self.calls if "task-workspace" in c[0]], [],
+                         "shared mode consulted the resolver")
+
+    def test_d2_worktree_mode_runs_codex_in_the_resolved_path(self):
+        self._set_mode("t_disp_ws", "worktree")
+        resolved = str(REPO / "tests")   # any existing dir stands in for the worktree
+        real_run = _dispatch._run_cli
+
+        def fake_run(argv, timeout=30):
+            if argv[1] == "resolve":
+                self.calls.append(list(argv))
+                return 0, json.dumps({"mode": "worktree", "path": resolved,
+                                      "branch": "task/t_disp_ws"}), ""
+            return real_run(argv, timeout)
+        _dispatch._run_cli = fake_run
+        res = _dispatch.dispatch_task("t_disp_ws", "codex")
+        self.assertEqual(res["state"], "delivered", res)
+        resolver = [c for c in self.calls if c[1] == "resolve"][0]
+        self.assertTrue(resolver[0].endswith("task-workspace"), resolver)
+        self.assertEqual(resolver[1:], ["resolve", "--mode", "worktree", "--project", str(REPO),
+                                        "--branch", "task/t_disp_ws", "--json"])
+        argv = self.spawned[0]
+        self.assertEqual(argv[:6],
+                         [_dispatch._codex_bin(), "exec", "-C", resolved, "-s", "workspace-write"])
+        self.assertEqual(res["executor_target"], resolved)
+
+    def test_d3_container_mode_wraps_codex_in_coder_ws_ssh(self):
+        self._set_mode("t_disp_ws", "container")
+        res = _dispatch.dispatch_task("t_disp_ws", "codex")
+        self.assertEqual(res["state"], "delivered", res)
+        argv = self.spawned[0]
+        self.assertTrue(argv[0].endswith("coder-ws"), argv)
+        self.assertEqual(argv[1:4], ["ssh", REPO.name, "--"])
+        # The CONTAINER's codex, by bare name: a host-absolute path does not exist there.
+        self.assertEqual(argv[4:10],
+                         ["codex", "exec", "-C", str(REPO), "-s", "workspace-write"])
+        self.assertNotEqual(argv[0], _dispatch._codex_bin(), "codex was spawned directly")
+        self.assertNotIn(_dispatch._codex_bin(), argv, "host codex path leaked into the container argv")
+
+    def test_d4_a_resolver_failure_is_an_outbox_row_and_no_spawn(self):
+        self._set_mode("t_disp_ws", "worktree")
+        real_run = _dispatch._run_cli
+
+        def fake_run(argv, timeout=30):
+            if argv[1] == "resolve":
+                return 2, "", "task-workspace: wt (worktrunk) not found — run: task-workspace install-wt"
+            return real_run(argv, timeout)
+        _dispatch._run_cli = fake_run
+        res = _dispatch.dispatch_task("t_disp_ws", "codex")
+        self.assertEqual(res["state"], "spawn_failed", res)
+        self.assertEqual(res["code"], "no_workspace")
+        self.assertEqual(self.spawned, [], "codex was spawned after the resolver failed")
+        self.assertIn("install-wt", self._outbox("t_disp_ws")[0]["note"])
+
+    def test_d5_the_migration_is_idempotent_and_check_constrained(self):
+        from dashboard.migrations.m34_task_workspace_mode import m34_task_workspace_mode
+        c = self._conn()
+        m34_task_workspace_mode(c)   # second run on an already-migrated DB
+        m34_task_workspace_mode(c)
+        cols = [r[1] for r in c.execute("PRAGMA table_info(tasks)")]
+        self.assertEqual(cols.count("workspace_mode"), 1)
+        with self.assertRaises(sqlite3.IntegrityError):
+            c.execute("UPDATE tasks SET workspace_mode = 'cloud' WHERE id = 't_disp_ws'")
+        c.close()
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

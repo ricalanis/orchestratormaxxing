@@ -127,6 +127,72 @@ def _host_key() -> str:
         return ""
 
 
+def _dashboard_token() -> str:
+    """Bearer token for mutating dashboard calls: HERMES_DASHBOARD_TOKEN env wins,
+    else ~/.config/orchestratormaxxing/dashboard-token (the same two sources the
+    dashboard itself reads). Empty means: never write unauthenticated."""
+    value = os.environ.get("HERMES_DASHBOARD_TOKEN", "").strip()
+    if value:
+        return value
+    try:
+        path = Path.home() / ".config" / "orchestratormaxxing" / "dashboard-token"
+        return path.read_text(encoding="utf-8").splitlines()[0].strip()
+    except (OSError, IndexError, UnicodeError):
+        return ""
+
+
+def _post_session_event(kind: str, session: str, payload: dict) -> None:
+    """Write the event to the dashboard's session_events table, the reader behind
+    the Needs-you queue (orchestration.pending_input). The queue lost its only
+    writer when orchestrator/hooks/orch-notify.py was retired; this notifier already
+    fires on every host for exactly these events, so it is the writer now.
+    Fail-open by construction: no base or no token -> no request; 2 s timeout;
+    every error swallowed. Never blocks or breaks the session it serves."""
+    base = _dashboard_base()
+    token = _dashboard_token()
+    if not base or not token:
+        return
+    key = session or str(payload.get("session_id") or "")
+    if not key:
+        return
+    body = json.dumps({
+        "session_key": key,
+        "host": _host_key(),
+        "kind": kind,
+        "payload": payload,
+    }).encode("utf-8")
+    url = f"{base}/api/session-events"
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
+    # The fleet dashboard sits behind a Tailscale-served HTTPS endpoint; measured
+    # 2026-09-06 from the Mac: ~3 s per POST, so the budget is 5 s, not 2.
+    timeout = 5
+    try:
+        import urllib.request
+        req = urllib.request.Request(url, data=body, method="POST", headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read(64)
+        return
+    except Exception as exc:
+        # macOS system Python ships no CA bundle, so a valid Tailscale/Let's
+        # Encrypt certificate fails CERTIFICATE_VERIFY_FAILED here while curl,
+        # which reads the OS trust store, verifies it. Fall through to curl for
+        # that case only; every other failure is fail-open.
+        if "CERTIFICATE_VERIFY_FAILED" not in str(exc):
+            return
+    curl = shutil.which("curl")
+    if not curl:
+        return
+    try:
+        subprocess.run(
+            [curl, "-sS", "-o", "/dev/null", "-m", str(timeout), "-X", "POST",
+             "-H", "Content-Type: application/json",
+             "-H", f"Authorization: Bearer {token}",
+             "--data-binary", "@-", url],
+            input=body, capture_output=True, timeout=timeout + 2, check=False)
+    except Exception:
+        pass
+
+
 def _session_link(session: str) -> str:
     base = _dashboard_base()
     if not base:
@@ -288,12 +354,23 @@ def main(argv: list[str]) -> int:
         else:
             summary = _claude_summary(payload.get("transcript_path"))
         _send(_bounded_message(f"✅ {agent_name} terminó — {where}", summary, link))
+        _post_session_event("stop", session, {
+            "hook_event_name": event, "agent": agent, "project": project,
+            "session_id": payload.get("session_id"),
+            "summary": _clean(summary)[:400] if isinstance(summary, str) else "",
+        })
     elif event in {"Notification", "PermissionRequest", "PreToolUse"}:
         if _in_cooldown(payload.get("session_id")):
             return 0
         value = payload.get("message")
         reason = value if isinstance(value, str) and value else "permiso o pregunta pendiente"
         _send(_bounded_message(f"⚠️ {agent_name} necesita input — {where}", reason, link))
+        _post_session_event("input_needed", session, {
+            "hook_event_name": event, "agent": agent, "project": project,
+            "session_id": payload.get("session_id"),
+            "message": _clean(reason)[:400],
+            "notification_type": payload.get("notification_type"),
+        })
     return 0
 
 

@@ -13,7 +13,14 @@
       ],
       "license": "MIT",
       "tree_sha256": "565ca453689b81aa9fe8169ca31067a2d7f72d94510272415ebf15c10a4268d8",
-      "note": "Always-on generation router. The other eight entries are the user-requested upstream skills."
+      "note": "Always-on generation router. The other eight entries are the user-requested upstream skills.",
+      "targets": [
+        "Claude",
+        "Codex",
+        "OpenCode",
+        "Hermes",
+        "Warp"
+      ]
     },
     {
       "name": "orchestration-practices",
@@ -27,7 +34,55 @@
       ],
       "license": "MIT",
       "tree_sha256": "9a9a7224322942a5a9e4a2847de1e16b047be7b611c0d6b5fd116935d2cdcacf",
-      "note": "Shared Orchestra-of-One vocabulary router: advisory matching, deterministic preflight, exact four brakes, typed rescue and evidence receipt across Hermes, Claude, Codex, OpenCode and Open Design."
+      "note": "Shared Orchestra-of-One vocabulary router: advisory matching, deterministic preflight, exact four brakes, typed rescue and evidence receipt across Hermes, Claude, Codex, OpenCode and Open Design.",
+      "targets": [
+        "Claude",
+        "Codex",
+        "OpenCode",
+        "Hermes",
+        "Warp"
+      ]
+    },
+    {
+      "name": "research-prompt",
+      "kind": "internal-craft",
+      "repo": "local://orchestratormaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "skills/research-prompt",
+      "include": [
+        "SKILL.md",
+        "references"
+      ],
+      "license": "MIT",
+      "tree_sha256": "5c10d0d5fe29de11ff8563309f6c48bfef4835fe5cfb5db6089259bd22c94ea2",
+      "note": "Adapted from davidondrej/skills@76724e4 research-and-web/research-prompt (MIT): Rules/Process/Template verbatim; the DeepAPI 'Executing the prompt' section is rewritten to route to harness-scan, OpenCode /research (deep-researcher), Firecrawl firecrawl_research_* and xsearch, with the Tier-2 checklist verification rule.",
+      "targets": [
+        "Claude",
+        "Codex",
+        "OpenCode",
+        "Hermes",
+        "Warp"
+      ]
+    },
+    {
+      "name": "agent-guard",
+      "kind": "internal-router",
+      "repo": "local://orchestratormaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "skills/agent-guard",
+      "include": [
+        "SKILL.md"
+      ],
+      "license": "MIT",
+      "tree_sha256": "43cffb0b9b98d6e105f7d122fd191b4ddede9a27868b375dfacfbfe06cabd541",
+      "note": "Operator runbook for bin/agent-guard (state check, pattern tuning, per-host wiring for Claude/Codex/OpenCode/Hermes/Warp/Zed, gotchas, safe E2E probe); adapted from davidondrej/skills@76724e4 ops-and-setup/global-agent-guardrails (MIT).",
+      "targets": [
+        "Claude",
+        "Codex",
+        "OpenCode",
+        "Hermes",
+        "Warp"
+      ]
     },
     {
       "name": "humanizer",
@@ -43,7 +98,14 @@
       ],
       "license": "MIT",
       "tree_sha256": "70e5daebd2924da1e50f21133977457e17565f9f4e9da10c37580c4e61534258",
-      "note": "OneAway's documented SKILL.md URL returns 404. Its page attributes Humanizer to blader; use the maintained MIT v2.9.1 source instead of scraping the page."
+      "note": "OneAway's documented SKILL.md URL returns 404. Its page attributes Humanizer to blader; use the maintained MIT v2.9.1 source instead of scraping the page.",
+      "targets": [
+        "Claude",
+        "Codex",
+        "OpenCode",
+        "Hermes",
+        "Warp"
+      ]
     },
     {
       "name": "creator",
@@ -57,7 +119,14 @@
       ],
       "license": "NOASSERTION",
       "tree_sha256": "a64f60f2303d978d4c29641a65716c994fe3419cbf227ad5388e762c5892755e",
-      "note": "Fetch-only: upstream has no declared license, so its payload is installed from the user's requested source but is not vendored in this repository."
+      "note": "Fetch-only: upstream has no declared license, so its payload is installed from the user's requested source but is not vendored in this repository.",
+      "targets": [
+        "Claude",
+        "Codex",
+        "OpenCode",
+        "Hermes",
+        "Warp"
+      ]
     },
     {
       "name": "filler",
@@ -71,7 +140,14 @@
       ],
       "license": "NOASSERTION",
       "tree_sha256": "5b21b311841b07061d0ea54a5beb7b30ea5f53d96f3b9bfcfab7c1a8b54b4d9b",
-      "note": "Fetch-only: upstream has no declared license, so its payload is installed from the user's requested source but is not vendored in this repository."
+      "note": "Fetch-only: upstream has no declared license, so its payload is installed from the user's requested source but is not vendored in this repository.",
+      "targets": [
+        "Claude",
+        "Codex",
+        "OpenCode",
+        "Hermes",
+        "Warp"
+      ]
     },
     {
       "name": "improver",
@@ -84,7 +160,14 @@
       ],
       "license": "NOASSERTION",
       "tree_sha256": "2ce25dd52914513cfb076ee443fd43700b73c83d9d2cd6b71c5c51ff6c3c1f7e",
-      "note": "Fetch-only: upstream has no declared license, so its payload is installed from the user's requested source but is not vendored in this repository."
+      "note": "Fetch-only: upstream has no declared license, so its payload is installed from the user's requested source but is not vendored in this repository.",
+      "targets": [
+        "Claude",
+        "Codex",
+        "OpenCode",
+        "Hermes",
+        "Warp"
+      ]
     },
     {
       "name": "reviewer",
@@ -97,7 +180,14 @@
       ],
       "license": "NOASSERTION",
       "tree_sha256": "6ba82224ae6ff75ce2bce5ae041c3eb1a9ab6e12a731482f358422cccd6a4bfc",
-      "note": "Fetch-only: upstream has no declared license, so its payload is installed from the user's requested source but is not vendored in this repository."
+      "note": "Fetch-only: upstream has no declared license, so its payload is installed from the user's requested source but is not vendored in this repository.",
+      "targets": [
+        "Claude",
+        "Codex",
+        "OpenCode",
+        "Hermes",
+        "Warp"
+      ]
     },
     {
       "name": "hallmark",
@@ -109,7 +199,14 @@
         "references"
       ],
       "license": "MIT",
-      "tree_sha256": "419f6245abb75bef1a6067f777f8d6d66e574ea92c893ba0834805e537c9b6ae"
+      "tree_sha256": "419f6245abb75bef1a6067f777f8d6d66e574ea92c893ba0834805e537c9b6ae",
+      "targets": [
+        "Claude",
+        "Codex",
+        "OpenCode",
+        "Hermes",
+        "Warp"
+      ]
     },
     {
       "name": "unslop-ui",
@@ -125,7 +222,14 @@
       ],
       "license": "MIT",
       "tree_sha256": "4aff2017278fcf6d431f5d74fbb72b37a675836d375161935bf3c10e9b33fd26",
-      "note": "The supplied Carter URL returns 404; GitHub search resolves the maintained source to JCarterJohnson."
+      "note": "The supplied Carter URL returns 404; GitHub search resolves the maintained source to JCarterJohnson.",
+      "targets": [
+        "Claude",
+        "Codex",
+        "OpenCode",
+        "Hermes",
+        "Warp"
+      ]
     },
     {
       "name": "avoid-ai-design",
@@ -138,7 +242,53 @@
         "references"
       ],
       "license": "MIT",
-      "tree_sha256": "964c2c238a696cd1b24af42322b272f16271bfdd72139245eebf4dfd3a24a179"
+      "tree_sha256": "964c2c238a696cd1b24af42322b272f16271bfdd72139245eebf4dfd3a24a179",
+      "targets": [
+        "Claude",
+        "Codex",
+        "OpenCode",
+        "Hermes",
+        "Warp"
+      ]
+    },
+    {
+      "name": "decisions",
+      "repo": "https://github.com/davidondrej/skills.git",
+      "commit": "76724e4c517f786d631f8e6b8d75078c800357d7",
+      "path": "skills/thinking-and-docs/decisions",
+      "include": [
+        "SKILL.md",
+        "agents"
+      ],
+      "license": "MIT",
+      "tree_sha256": "cad16bc349367e7992cfb112adb7b29d3e59ec084b390d010da58ba2902407ff",
+      "note": "Adopted verbatim: manual-only retrospective audit of low-confidence choices (/decisions, disable-model-invocation + agents/openai.yaml implicit-invocation off). Pairs with next-decision; complements /fableplan review without adding an always-on menu slot.",
+      "targets": [
+        "Claude",
+        "Codex",
+        "OpenCode",
+        "Hermes",
+        "Warp"
+      ]
+    },
+    {
+      "name": "next-decision",
+      "repo": "https://github.com/davidondrej/skills.git",
+      "commit": "76724e4c517f786d631f8e6b8d75078c800357d7",
+      "path": "skills/thinking-and-docs/next-decision",
+      "include": [
+        "SKILL.md"
+      ],
+      "license": "MIT",
+      "tree_sha256": "958bb6b5ed189d1da3359cdc2cd5230a261c3f248892fe1e37588e8eaa86d22c",
+      "note": "Adopted verbatim: forward-looking one-decision-at-a-time drill (top four choices, stated preference, wait for the user) for plans with unresolved choices — the retrospective sibling is decisions.",
+      "targets": [
+        "Claude",
+        "Codex",
+        "OpenCode",
+        "Hermes",
+        "Warp"
+      ]
     },
     {
       "name": "cheap-delegate",
@@ -150,12 +300,12 @@
         "SKILL.md"
       ],
       "targets": [
-        "Claude",
         "OpenCode",
-        "Hermes"
+        "Hermes",
+        "Warp"
       ],
       "license": "MIT",
-      "tree_sha256": "990b3ae45db7560bcdb38b25d1a35503386150dd5b2ec1ed7121c054053aeaef"
+      "tree_sha256": "fcde4e0d6ddd5532dc3b37bff65646482856f6e314e96377d55511dc93b96aa5"
     },
     {
       "name": "fanout",
@@ -168,12 +318,11 @@
         "agents"
       ],
       "targets": [
-        "Claude",
         "OpenCode",
         "Hermes"
       ],
       "license": "MIT",
-      "tree_sha256": "4e7c216cc82181492cdb40d9210eea936cb75b4f9a8a7c1eef229e38a8703691"
+      "tree_sha256": "9e4c0cd5f9fc7e52b4c3389085c0b6bfd5cfdd7c95c037cefd9709e46f543eec"
     },
     {
       "name": "gauntlet",
@@ -190,7 +339,7 @@
         "Hermes"
       ],
       "license": "MIT",
-      "tree_sha256": "f3e97937fa6b9b0df02828f843f97712dce03f5db4427890a19d09549a726dda"
+      "tree_sha256": "2ee511ca8a3562a103aa3ee7574be6eebbc5581f8408a846444b385923ffd0e9"
     },
     {
       "name": "i-have-adhd",
@@ -204,7 +353,8 @@
       ],
       "targets": [
         "OpenCode",
-        "Hermes"
+        "Hermes",
+        "Warp"
       ],
       "license": "MIT",
       "tree_sha256": "4c4b51bd398b159945c88f11d9befa8ff78eb64670ee9d008d8b799319bcfb5f"
@@ -221,7 +371,8 @@
       ],
       "targets": [
         "OpenCode",
-        "Hermes"
+        "Hermes",
+        "Warp"
       ],
       "license": "MIT",
       "tree_sha256": "7b82e5a909bb2c19305326f7604f0fbad74c8fc28698b2a0c04b52d8f5f16605"
@@ -238,7 +389,8 @@
       ],
       "targets": [
         "OpenCode",
-        "Hermes"
+        "Hermes",
+        "Warp"
       ],
       "license": "MIT",
       "tree_sha256": "dc4faccd6cf2073cf85690bb134bd0c08ffe78cc9d4b4a58952835dc1a7e60a4"
@@ -272,12 +424,11 @@
         "scripts/run_solplan.py"
       ],
       "targets": [
-        "Claude",
         "OpenCode",
         "Hermes"
       ],
       "license": "MIT",
-      "tree_sha256": "70976457adaaefffa8e00d4e492fceaeafc81088f684b4ebc4dd0fee8cdc93ee"
+      "tree_sha256": "c05b1e5cb27cbbe710d6f193d3fd2ef4c69c2da9d1f021bd5fa38530e6ac0fd3"
     },
     {
       "name": "wrap-up",
@@ -291,193 +442,30 @@
       ],
       "targets": [
         "OpenCode",
-        "Hermes"
+        "Hermes",
+        "Warp"
       ],
       "license": "MIT",
       "tree_sha256": "261252aeeb12e35bc981fe1dd58abbd022195e01e6441ae8646033ba86056802"
     },
     {
-      "name": "astraplan",
-      "kind": "orchestratormaxxing-workflow",
+      "name": "worktree",
+      "kind": "internal-router",
       "repo": "local://orchestratormaxxing",
       "commit": "0000000000000000000000000000000000000000",
-      "path": "plugins/orchestratormaxxing/skills/astraplan",
-      "include": [
-        "SKILL.md",
-        "agents",
-        "scripts"
-      ],
-      "targets": [
-        "Claude",
-        "OpenCode",
-        "Hermes"
-      ],
-      "license": "MIT",
-      "tree_sha256": "873a80411a5677998049b5813b99e6250c12a935973d629642b30fbe48d01f69"
-    },
-    {
-      "name": "omaxxing-public-improve",
-      "kind": "orchestratormaxxing-workflow",
-      "repo": "local://orchestratormaxxing",
-      "commit": "0000000000000000000000000000000000000000",
-      "path": "plugins/orchestratormaxxing/skills/omaxxing-public-improve",
+      "path": "plugins/orchestratormaxxing/skills/worktree",
       "include": [
         "SKILL.md",
         "agents",
         "references"
       ],
+      "license": "MIT",
+      "tree_sha256": "2a37859db475fbeb4363307e6f7099c7b62595fc8509d04141066be4fc34bfbb",
+      "note": "Workspace-mode router (shared | worktree | container) over bin/task-workspace, which ADOPTS worktrunk (`wt`). Public: the tool, the lock and this skill graduate; the container half's server (coder-ws) stays in the fleet stack.",
       "targets": [
-        "Claude",
         "OpenCode",
         "Hermes"
-      ],
-      "license": "MIT",
-      "tree_sha256": "b87122e9eb682607c03d88c44ed286cddc058aa5acc7c58efcb377460c4a832f"
-    },
-    {
-      "name": "public-improve-security",
-      "kind": "orchestratormaxxing-workflow",
-      "repo": "local://orchestratormaxxing",
-      "commit": "0000000000000000000000000000000000000000",
-      "path": "plugins/orchestratormaxxing/skills/public-improve-security",
-      "include": [
-        "SKILL.md",
-        "agents",
-        "scripts",
-        "references"
-      ],
-      "targets": [
-        "Claude",
-        "OpenCode",
-        "Hermes"
-      ],
-      "license": "MIT",
-      "tree_sha256": "d0ea111bc12344ca93d1d1d5e162465bb94b31e8c26b9c6321f753e28b1dea0a"
-    },
-    {
-      "name": "review-triage",
-      "kind": "orchestratormaxxing-workflow",
-      "repo": "local://orchestratormaxxing",
-      "commit": "0000000000000000000000000000000000000000",
-      "path": "skills/review-triage",
-      "include": [
-        "SKILL.md"
-      ],
-      "license": "MIT",
-      "tree_sha256": "52ee2526febc0ae8ecc6349970d1a30b53f4857327f22e224eef653c13e92302"
-    },
-    {
-      "name": "sun-earth-ssh",
-      "kind": "orchestratormaxxing-workflow",
-      "repo": "local://orchestratormaxxing",
-      "commit": "0000000000000000000000000000000000000000",
-      "path": "plugins/orchestratormaxxing/skills/sun-earth-ssh",
-      "include": [
-        "SKILL.md"
-      ],
-      "license": "MIT",
-      "targets": [
-        "Claude",
-        "OpenCode",
-        "Hermes"
-      ],
-      "tree_sha256": "cad6503589477c49841f6ad008ba674f7003e9cf522a76ee5da2d3cba4b94671"
-    },
-    {
-      "name": "research-prompt",
-      "kind": "orchestratormaxxing-workflow",
-      "repo": "local://orchestratormaxxing",
-      "commit": "0000000000000000000000000000000000000000",
-      "path": "plugins/orchestratormaxxing/skills/research-prompt",
-      "include": [
-        "LICENSE",
-        "SKILL.md",
-        "references"
-      ],
-      "license": "MIT",
-      "tree_sha256": "6e28e894f3ce87cc5a5c839de05768716e72a47a7683fe2cc8b0a7d0e418ffab",
-      "targets": [
-        "Claude",
-        "OpenCode",
-        "Hermes"
-      ],
-      "note": "Portable public workflow; Codex discovers the native plugin skill."
-    },
-    {
-      "name": "plan-to-repo",
-      "kind": "orchestratormaxxing-workflow",
-      "repo": "local://orchestratormaxxing",
-      "commit": "0000000000000000000000000000000000000000",
-      "path": "plugins/orchestratormaxxing/skills/plan-to-repo",
-      "include": [
-        "SKILL.md",
-        "references"
-      ],
-      "license": "MIT",
-      "tree_sha256": "fd990d3d5559a32fc66b96a8b5801a07d74a7048253fb5c8cbadd2d682a0d688",
-      "targets": [
-        "Claude",
-        "OpenCode",
-        "Hermes"
-      ],
-      "note": "Portable public workflow; Codex discovers the native plugin skill."
-    },
-    {
-      "name": "product-manager",
-      "kind": "orchestratormaxxing-workflow",
-      "repo": "local://orchestratormaxxing",
-      "commit": "0000000000000000000000000000000000000000",
-      "path": "plugins/orchestratormaxxing/skills/product-manager",
-      "include": [
-        "SKILL.md",
-        "references"
-      ],
-      "license": "MIT",
-      "tree_sha256": "52d03266936f8ba1bdf3ee7c2cc3ba302f25a3357c28df0436ea9d9c68fa11c6",
-      "targets": [
-        "Claude",
-        "OpenCode",
-        "Hermes"
-      ],
-      "note": "Portable public workflow; Codex discovers the native plugin skill."
-    },
-    {
-      "name": "weekly-public-contribution",
-      "kind": "orchestratormaxxing-workflow",
-      "repo": "local://orchestratormaxxing",
-      "commit": "0000000000000000000000000000000000000000",
-      "path": "plugins/orchestratormaxxing/skills/weekly-public-contribution",
-      "include": [
-        "SKILL.md",
-        "references"
-      ],
-      "license": "MIT",
-      "tree_sha256": "d8e8326ffac2866d3900706d63fa3842627af7c52d90867373704af4de42af75",
-      "targets": [
-        "Claude",
-        "OpenCode",
-        "Hermes"
-      ],
-      "note": "Portable public workflow; Codex discovers the native plugin skill."
-    },
-    {
-      "name": "agent-guard",
-      "kind": "orchestratormaxxing-workflow",
-      "repo": "local://orchestratormaxxing",
-      "commit": "0000000000000000000000000000000000000000",
-      "path": "plugins/orchestratormaxxing/skills/agent-guard",
-      "include": [
-        "LICENSE.davidondrej-skills",
-        "SKILL.md"
-      ],
-      "license": "MIT",
-      "tree_sha256": "33e0c78ef8e8694ae6a2f4c926031f65e6a907169e7c24f8d0cb0f2216da9e29",
-      "targets": [
-        "Claude",
-        "OpenCode",
-        "Hermes"
-      ],
-      "note": "Portable public workflow; Codex discovers the native plugin skill."
+      ]
     }
   ]
 }

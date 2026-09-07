@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Exercise non-login/container environments too; installer derives the account.
-unset USER
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TMP="$(mktemp -d)"
@@ -129,6 +127,22 @@ run_install() {
 }
 
 run_install
+test ! -f "$HOME_DIR/.agents/AGENTS.md" || fail 'Warp-less install created global Warp rules'
+case "$(uname -s)" in
+  Darwin) WARP_FIXTURE="$HOME_DIR/.warp_cli/settings.toml" ;;
+  *) WARP_FIXTURE="$HOME_DIR/.config/warp-terminal/cli/settings.toml" ;;
+esac
+mkdir -p "$(dirname "$WARP_FIXTURE")" "$HOME_DIR/.agents"
+printf '[agents.execution_profiles.default]\ncommand_denylist = []\n' > "$WARP_FIXTURE"
+printf 'keep my shared rules\n' > "$HOME_DIR/.agents/AGENTS.md"
+run_install
+grep -q 'keep my shared rules' "$HOME_DIR/.agents/AGENTS.md" || fail 'Warp global rules lost user text'
+grep -q 'Warp routing:' "$HOME_DIR/.agents/AGENTS.md" || fail 'Warp routing missing'
+grep -q 'Frontier orchestrator workers' "$HOME_DIR/.agents/AGENTS.md" || fail 'Warp doctrine missing'
+cp "$HOME_DIR/.agents/AGENTS.md" "$TMP/warp-global-rules"
+run_install
+cmp "$TMP/warp-global-rules" "$HOME_DIR/.agents/AGENTS.md" || fail 'Warp rules reinstall not idempotent'
+test -f "$HOME_DIR/.codex/agents/astra-planner.toml" || fail 'Astra planner not deployed'
 mkdir -p "$TMP/first"
 for path in \
   "$HOME_DIR/.codex/config.toml" \
@@ -244,9 +258,23 @@ plugin_watchers = [
     hook.get("command", "")
     for group in plugin_hooks["hooks"]["SessionStart"]
     for hook in group.get("hooks", [])
-    if "loop-tick" in hook.get("command", "")
+    if "loop-tick" in hook.get("command", "") or "codex-session-start" in hook.get("command", "")
 ]
-assert len(plugin_watchers) == 1 and "--kick" in plugin_watchers[0] and "--gate" not in plugin_watchers[0], plugin_watchers
+assert len(plugin_watchers) == 1, plugin_watchers
+assert any("--kick" in c or "codex-session-start" in c for c in plugin_watchers), plugin_watchers
+assert not any("--gate" in c for c in plugin_watchers), plugin_watchers
+
+# C10: codex plugin ships the new formatter hook, and agent-guard remains wired.
+plugin_commands = [
+    hook.get("command", "")
+    for groups in plugin_hooks["hooks"].values()
+    for group in groups
+    for hook in group.get("hooks", [])
+]
+codex_session_start = [c for c in plugin_commands if "codex-session-start" in c]
+assert len(codex_session_start) == 1, codex_session_start
+assert any('agent-guard" pre' in c for c in plugin_commands)
+assert any('agent-guard" post' in c for c in plugin_commands)
 
 tmux = (home / ".tmux.conf").read_text()
 assert tmux.count("# >>> orchestratormaxxing:tmux >>>") == 1
@@ -258,15 +286,13 @@ for rc in (home / ".bashrc", home / ".zshrc"):
     assert text.count("# >>> orchestratormaxxing:c-command >>>") == 1
     assert text.count("warp-recovery.sh") == 2
 
-names = ["warp-agent-event", "warp-agent-recovery", "codex-stop-hook", "tmux-send", "o", "intent-queue"]
+names = ["warp-agent-event", "warp-agent-recovery", "codex-stop-hook", "tmux-send", "o"]
 if (pathlib.Path(sys.argv[2]) / "install-fleet.sh").is_file():   # fleet bridges ship only from the private half
     names += ["gpu-agent", "harness-remote"]
 for name in names:
     deployed = home / ".local/bin" / name
     assert deployed.is_file()
     assert deployed.stat().st_mode & 0o111
-    if name == "intent-queue":
-        assert deployed.read_bytes() == (pathlib.Path(sys.argv[2]) / "bin" / name).read_bytes()
 
 for name in ("warp-recovery.sh", "claude-c.sh", "codex-g.sh", "opencode-o.sh"):
     deployed = home / ".config/orchestratormaxxing" / name

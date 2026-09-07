@@ -24,29 +24,44 @@ data = json.load(open(sys.argv[1], encoding="utf-8"))
 expected = {
     "anti-slop-design", "humanizer", "creator", "filler", "improver",
     "reviewer", "hallmark", "unslop-ui", "avoid-ai-design",
-    "review-triage", "sun-earth-ssh",
-    "orchestration-practices",
+    "orchestration-practices", "research-prompt", "agent-guard",
+    "decisions", "next-decision",
     "cheap-delegate", "fanout", "gauntlet", "i-have-adhd",
     "ideas", "memory", "self-improve", "solplan", "wrap-up",
-    "astraplan", "omaxxing-public-improve", "public-improve-security",
-    "research-prompt", "plan-to-repo", "product-manager", "weekly-public-contribution", "agent-guard",
+    "worktree",
 }
 assert {item["name"] for item in data["skills"]} == expected
 assert all(re.fullmatch(r"[0-9a-f]{40}", item["commit"]) for item in data["skills"])
 workflow = {
     "cheap-delegate", "fanout", "gauntlet", "i-have-adhd",
     "ideas", "memory", "self-improve", "solplan", "wrap-up",
-    "astraplan", "omaxxing-public-improve", "public-improve-security",
-    "research-prompt", "plan-to-repo", "product-manager", "weekly-public-contribution", "agent-guard",
+    "worktree",
 }
 for item in data["skills"]:
-    if item["name"] == "sun-earth-ssh":
-        assert item["targets"] == ["Claude", "OpenCode", "Hermes"], item
-    elif item["name"] not in workflow:
-        assert "targets" not in item, item
+    if item["name"] not in workflow:
+        assert item["targets"] == ["Claude", "Codex", "OpenCode", "Hermes", "Warp"], item
     else:
-        expected_targets = ["Claude", "OpenCode", "Hermes"] if item["name"] in {"astraplan", "solplan", "cheap-delegate", "fanout", "omaxxing-public-improve", "public-improve-security", "research-prompt", "plan-to-repo", "product-manager", "weekly-public-contribution", "agent-guard"} else ["OpenCode", "Hermes"]
-        assert item["targets"] == expected_targets, item
+        portable = item['name'] in {'cheap-delegate', 'memory', 'wrap-up', 'i-have-adhd', 'ideas'}
+        assert item["targets"] == ["OpenCode", "Hermes"] + (["Warp"] if portable else []), item
+# The private fleet stack (never graduated) carries exactly the client-anchored and
+# Hermes-bound skills; the two manifests are disjoint.
+import os
+fleet_p = os.path.join(os.path.dirname(sys.argv[1]), "fleet-stack.json")
+if os.path.exists(fleet_p):
+    fleet = json.load(open(fleet_p, encoding="utf-8"))
+    fleet_names = {item["name"] for item in fleet["skills"]}
+    assert fleet_names == {"propuesta", "opportunity-to-project", "fleet-service",
+                           "open-design", "plan-to-repo", "product-manager", "graduate",
+                           "coder-workspace"}, fleet_names
+    assert not (fleet_names & expected)
+    for item in fleet["skills"]:
+        if item["name"] == "plan-to-repo":
+            assert item["targets"] == ["OpenCode"], item
+        elif item["name"] in {"fleet-service", "open-design", "product-manager", "graduate",
+                              "coder-workspace"}:
+            assert item["targets"] == ["OpenCode", "Hermes"], item
+        else:
+            assert "targets" not in item, item
 unslop = next(item for item in data["skills"] if item["name"] == "unslop-ui")
 assert unslop["repo"] == "https://github.com/JCarterJohnson/vibecoded-design-tells.git"
 PY
@@ -90,15 +105,18 @@ data = {
          "path": "skill", "include": ["SKILL.md"], "license": "MIT",
          "targets": ["OpenCode", "Hermes"],
          "tree_sha256": digest(pathlib.Path(source) / "skill")},
+        {"name": "warp-only", "repo": "fixture://upstream", "commit": commit,
+         "path": "skill", "include": ["SKILL.md"], "license": "MIT",
+         "targets": ["Warp"], "tree_sha256": digest(pathlib.Path(source) / "skill")},
     ],
 }
 pathlib.Path(manifest).write_text(json.dumps(data), encoding="utf-8")
 PY
 
 run_sync() {
-  local home="$1"
+  local task_home="$1"
   shift
-  HOME="$home" CODEX_HOME="$home/custom-codex" \
+  HOME="$task_home" CODEX_HOME="$task_home/custom-codex" XDG_CONFIG_HOME="$task_home/.config" \
     "$TMP/harness/bin/sync-agent-skills" \
       --manifest "$TMP/manifest.json" \
       --source "fixture://upstream=$FIXTURE_REPO" "$@"
@@ -126,10 +144,32 @@ ok "one sync installs atomically to Claude, Codex, OpenCode, and Hermes"
 # three hosts still install. This prevents collisions with unrelated apps.
 HOME2="$TMP/home-no-hermes"
 run_sync "$HOME2" > "$TMP/no-hermes.out"
+test ! -e "$HOME2/.agents" || fail "Warp absent must not create shared footprint"
 test -f "$HOME2/.claude/skills/sample/SKILL.md" || fail "three-host install"
 test ! -e "$HOME2/.hermes/skills/sample" || fail "Hermes production gate"
 grep -q 'Hermes skipped' "$TMP/no-hermes.out" || fail "Hermes skip report"
 ok "Hermes requires its real kanban.db production marker"
+
+# C3b: documented CLI-only presence enables explicit Warp skills; implicit
+# targets and host-specific skills stay out, collisions abort before any write.
+HOME_WARP="$TMP/home-warp"
+if [ "$(uname -s)" = Darwin ]; then
+  mkdir -p "$HOME_WARP/.warp_cli"; : > "$HOME_WARP/.warp_cli/settings.toml"
+else
+  mkdir -p "$HOME_WARP/.config/warp-terminal/cli"; : > "$HOME_WARP/.config/warp-terminal/cli/settings.toml"
+fi
+run_sync "$HOME_WARP" > "$TMP/warp.out"
+test -f "$HOME_WARP/.agents/skills/warp-only/.orchestratormaxxing-source.json" || fail "explicit Warp skill missing"
+test ! -e "$HOME_WARP/.agents/skills/sample" || fail "implicit target leaked into Warp"
+test ! -e "$HOME_WARP/.agents/skills/open-hermes" || fail "host workflow leaked into Warp"
+cp "$HOME_WARP/.agents/AGENTS.md" "$TMP/warp-rules"
+run_sync "$HOME_WARP" > "$TMP/warp-repeat.out"
+cmp "$TMP/warp-rules" "$HOME_WARP/.agents/AGENTS.md" || fail "Warp rules not idempotent"
+rm "$HOME_WARP/.agents/skills/warp-only/.orchestratormaxxing-source.json"
+printf 'user owned\n' > "$HOME_WARP/.agents/skills/warp-only/SKILL.md"
+if run_sync "$HOME_WARP" > "$TMP/warp-collision.out" 2>&1; then fail "unmanaged Warp collision accepted"; fi
+grep -q 'user owned' "$HOME_WARP/.agents/skills/warp-only/SKILL.md" || fail "unmanaged Warp content lost"
+ok "Warp CLI presence, explicit selection, idempotence and collision refusal"
 
 # C4: an unmanaged same-name skill aborts during preflight before any sibling
 # target is written; the installer never destroys user-owned skill content.
@@ -191,6 +231,3 @@ test -f "$HOME5/.claude/skills/anti-slop-design/SKILL.md" \
 ok "relocated command honors the explicit repo-local source"
 
 printf '1..%d\n' "$PASS"
-
-# Real portable payloads share this installer; test their standalone/server discovery.
-bash "$ROOT/tests/portable-skills/run.sh"

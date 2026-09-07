@@ -13,7 +13,7 @@
     "path": "hooks/test-guard.sh",
     "license": "MIT",
     "license_file": "LICENSE.davidondrej-skills",
-    "modified": "block/allow cases extracted into a tab-separated corpus; five orchestratormaxxing per-line cases appended under a marked section (2026-09-05 review)"
+    "modified": "block/allow cases extracted into a tab-separated corpus; five cmaxxing per-line cases appended under a marked section (2026-09-05 review)"
   },
   "security_patterns.py": {
     "repo": "https://github.com/anthropics/claude-plugins-official",
@@ -22,5 +22,13 @@
     "license": "Apache-2.0",
     "license_file": "LICENSE.claude-plugins-official",
     "modified": "none"
+  },
+  "warp-default-patterns.json": {
+    "source": "Warp.app/Contents/Resources/settings_schema.json",
+    "version": "0.2026.08.19.08.15.01",
+    "source_sha256": "988d512b240c99175e96ed520cd8016d475d35e70502c96d5d4bac72e845080e",
+    "json_pointer": "/$defs/ExecutionProfileFile/properties/command_denylist/default",
+    "modified": "18 default configuration values extracted verbatim; no implementation source copied",
+    "verified": "2026-09-06"
   }
 }

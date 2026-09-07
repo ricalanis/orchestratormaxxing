@@ -151,7 +151,7 @@ allow	brew install nordpass-cli
 allow	brew uninstall wget
 allow	open -a Safari
 allow	grep -rn "password-store" docs/
-# --- orchestratormaxxing additions (2026-09-05 review) — per-line (grep -E) semantics pinned; not part of the upstream corpus ---
+# --- cmaxxing additions (2026-09-05 review) — per-line (grep -E) semantics pinned; not part of the upstream corpus ---
 allow	python3 - <<'PY'\nimport json\nfor x in []:\n    pass\nprint(json.dumps({}))\nPY
 allow	git push origin feature\nls -f
 allow	git push origin main\ngh pr create -d

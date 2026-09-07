@@ -1,6 +1,6 @@
 """command-guard plugin — block dangerous terminal commands before Hermes runs them.
 
-A ``pre_tool_call`` hook for the ``terminal`` tool that shells out to the orchestratormaxxing
+A ``pre_tool_call`` hook for the ``terminal`` tool that shells out to the cmaxxing
 cross-host runner ``agent-guard pre --format json`` (the same denylist every other
 host enforces) and returns ``{"action": "block", "message": ...}`` on a deny.
 

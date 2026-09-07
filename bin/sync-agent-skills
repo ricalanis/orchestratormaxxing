@@ -17,7 +17,8 @@ import tempfile
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
-TARGET_LABELS = {"Claude", "Codex", "OpenCode", "Hermes"}
+TARGET_LABELS = {"Claude", "Codex", "OpenCode", "Hermes", "Warp"}
+DEFAULT_TARGET_LABELS = TARGET_LABELS - {"Warp"}  # Warp requires explicit per-skill selection.
 DOCTRINE_BEGIN = "<!-- orchestratormaxxing:anti-slop-design:begin -->"
 DOCTRINE_END = "<!-- orchestratormaxxing:anti-slop-design:end -->"
 DOCTRINE_BLOCK = f"""{DOCTRINE_BEGIN}
@@ -316,9 +317,15 @@ def main() -> int:
     hermes_live = (home / ".hermes/kanban.db").is_file()
     if hermes_live and not args.no_hermes:
         targets.append(("Hermes", home / ".hermes/skills"))
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
+    warp_paths = (home / ".warp/settings.toml", home / ".warp_cli/settings.toml") if sys.platform == "darwin" else (
+        config_home / "warp-terminal/settings.toml", config_home / "warp-terminal/cli/settings.toml")
+    warp_live = any(path.is_file() for path in warp_paths)
+    if warp_live:
+        targets.append(("Warp", home / ".agents/skills"))
 
     def destinations(skill: dict) -> list[tuple[str, Path]]:
-        selected = set(skill.get("targets", TARGET_LABELS))
+        selected = set(skill.get("targets", DEFAULT_TARGET_LABELS))
         return [(label, path) for label, path in targets if label in selected]
 
     sources: dict[tuple[str, str], Path] = {}
@@ -365,6 +372,8 @@ def main() -> int:
     ]
     if hermes_live and not args.no_hermes:
         doctrine_targets.append(home / ".hermes/AGENTS.md")
+    if warp_live:
+        doctrine_targets.append(home / ".agents/AGENTS.md")
     for target in doctrine_targets:
         validated_doctrine_text(target)
 

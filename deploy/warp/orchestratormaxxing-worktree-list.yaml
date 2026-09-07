@@ -1,0 +1,12 @@
+---
+name: "cmaxxing: list worktrees"
+command: "wt -C {{project}} list"
+tags: ["orchestratormaxxing", "worktree", "wt"]
+description: "List the project's worktrunk worktrees (branch, path, status). `task-workspace list --project <path> --json` is the machine form."
+arguments:
+  - name: project
+    description: "Absolute project path (the dev folder)"
+    default_value: "$PWD"
+source_url: "https://github.com/ricalanis/orchestratormaxxing"
+author: "orchestratormaxxing"
+shells: [bash, zsh]

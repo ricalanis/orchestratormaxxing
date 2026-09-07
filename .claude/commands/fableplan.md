@@ -1,11 +1,11 @@
 ---
-description: Fable plans, Opus executes. Delegates the design of a nontrivial change to the fable-planner subagent (Fable), then implements the approved plan here in Opus. Sol (Codex/GPT-5.6) critiques the plan, can be consulted mid-plan, and can be handed genuinely independent execution chunks. Use this whenever a task needs a plan before code gets written — the user asking to plan, plan mode, or any multi-file / architectural / "how should we do this" change — not only when invoked by name.
+description: Fable plans in a fresh read-only subagent, the session executes. Delegates the design of a nontrivial change to the fable-planner subagent (Fable, read-only), then implements the approved plan here in the main session (Fable 5.1 by default; identical on Opus). Sol (Codex/GPT-5.6) critiques the plan, can be consulted mid-plan, and can be handed genuinely independent execution chunks. Use this whenever a task needs a plan before code gets written — the user asking to plan, plan mode, or any multi-file / architectural / "how should we do this" change — not only when invoked by name.
 argument-hint: <task to plan, then execute>
 ---
 
-Plan the task on Fable, execute it here on Opus. The task: **$ARGUMENTS**
+Plan the task in a fresh read-only planner context, execute it here in the main session. The task: **$ARGUMENTS**
 
-You are the Opus main loop. You keep the session, the user relationship, and sign-off; you delegate only the *design* step to Fable, because planning is where a second, different model pays for itself. There is no model switching and no env remapping involved — just a subagent.
+You are Root — the main session (Fable 5.1 by default since 2026-09-05; the flow is identical on Opus). You keep the session, the user relationship, and sign-off; you delegate only the *design* step to the `fable-planner` subagent. Since the session model moved to Fable, the planner is no longer a *different* model — what the delegation still buys is (1) a clean context that plans from the code, not from this transcript, (2) a read-only planner that must finish a complete plan and contract before anything is edited, and (3) Sol's cross-family critique of a plan it did not write. There is no model switching and no env remapping involved — just a subagent.
 
 ## Flow
 
@@ -40,7 +40,7 @@ You are the Opus main loop. You keep the session, the user relationship, and sig
 
 4. **Get the user's approval.** Present the plan (via ExitPlanMode when you're in plan mode). Show provenance: what Fable proposed, which of Sol's findings you adopted or rejected and why, and what you changed yourself. Surface the assumptions instead of burying them. **Sol's review is not validation and never functions as user consent** — only the user approves. Iterate until they do. If the task is underspecified — the planner said so, or you can't state a contract — resolve that with the user *before* writing code.
 
-5. **Execute it — yourself by default.** For `OPUS-DIRECT`, and for any chunk the user didn't explicitly approve for delegation, you build it here. For each approved `DELEGABLE` chunk, route one bounded execution task through `/cheap-delegate`; if the approved plan contains at least two independent chunks, `/fanout` may execute them after planning. Never hardcode Sol, Kimi, or any lane in the plan: the live playbook and ledger choose the cheapest adequate executor. K3 is the long-horizon worker; `kimiplan` is a planner and never an execution lane. An HTTP 500 from GLM is `infra`, not a content failure.
+5. **Execute it — yourself by default.** For `OPUS-DIRECT` (= build it here in the main session; the label predates the Fable default and is kept for the evals), and for any chunk the user didn't explicitly approve for delegation, you build it here. For each approved `DELEGABLE` chunk, route one bounded execution task through `/cheap-delegate`; if the approved plan contains at least two independent chunks, `/fanout` may execute them after planning. Never hardcode Sol, Kimi, or any lane in the plan: the live playbook and ledger choose the cheapest adequate executor. K3 is the long-horizon worker; `kimiplan` is a planner and never an execution lane. An HTTP 500 from GLM is `infra`, not a content failure.
 
 6. **Verify against the contract** the plan defined (this repo's two-tier policy): run it, report pass/fail honestly, and gate with `bin/mut` when the change is high-value. Report what changed and any deviation from what was approved.
 

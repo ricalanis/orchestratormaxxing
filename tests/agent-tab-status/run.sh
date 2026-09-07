@@ -83,7 +83,7 @@ assert any("agent-tab-status" in c and " attention" in c for c in commands)
 
 install = (root / "install.sh").read_text()
 for token in (
-    'bin/agent-tab-status', 'UserPromptSubmit', 'PermissionRequest',
+    'bin/agent-tab-status', 'bin/codex-session-start', 'UserPromptSubmit', 'PermissionRequest',
     'AskUserQuestion|ExitPlanMode', 'agent-tab-status',
     ' attention 2>/dev/null', ' working 2>/dev/null',
 ):

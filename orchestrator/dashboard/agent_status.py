@@ -3,6 +3,7 @@ Agent status monitor — detects what agents are currently doing.
 Checks tmux sessions, Hermes cron jobs, and Claude Code project activity.
 """
 import subprocess
+import os
 import time
 import json
 from pathlib import Path
@@ -120,13 +121,14 @@ def get_agent_status() -> dict:
     })
 
     # OpenCode (check if installed)
-    opencode_path = _run(["which", "opencode"])
-    if opencode_path:
+    runtime_path = os.path.expanduser("~/.local/bin/o")
+    runtime_available = (os.path.isfile(runtime_path) and os.access(runtime_path, os.X_OK)) or bool(_run(["which", "o"]))
+    if runtime_available or _run(["which", "opencode"]):
         agents.append({
             "name": "OpenCode",
             "type": "opencode",
             "status": "idle",
-            "detail": "Installed, no active sessions",
+            "detail": "o worker runtime available" if runtime_available else "Installed, no active sessions",
             "sessions": [],
         })
     else:

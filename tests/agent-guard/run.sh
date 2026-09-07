@@ -184,9 +184,8 @@ JSRUN="$(command -v node 2>/dev/null || command -v bun 2>/dev/null || true)"
 for c in /opt/homebrew/bin/node /usr/local/bin/node "$HOME/.local/bin/node" /usr/bin/node; do [[ -z "$JSRUN" && -x "$c" ]] && JSRUN="$c"; done
 [[ -n "$JSRUN" ]] || fail 'C6: node/bun unavailable'
 "$JSRUN" - "$PLUGIN" <<'JS' || fail 'C6: opencode plugin behaviour'
-;(async () => {
 const pluginPath = process.argv[2]
-const mod = await import("data:text/javascript;base64," + (await import("node:fs")).readFileSync(pluginPath).toString("base64"))
+const mod = await import(pluginPath)
 const factory = mod.OrchestratormaxxingGuard
 if (typeof factory !== "function") throw new Error("plugin must export OrchestratormaxxingGuard")
 function mkShell(mode) {
@@ -244,7 +243,6 @@ a = await after("ok", "read", { filePath: "/tmp/p/ok.py" })
 if (a.calls.length) throw new Error("after must ignore non-write tools")
 a = await after("throw", "write", { filePath: "/tmp/p/app.py", content: "pickle.load(f)" })
 if (a.output.output !== "wrote file") throw new Error("a failing guard must leave output untouched")
-})().catch(error => { console.error(error); process.exitCode = 1 })
 JS
 ok "C6: OpenCode plugin — bash deny throws, safe/other tools pass, fail-open, write/edit guidance appended"
 BUN="$(command -v bun 2>/dev/null || true)"; for c in /opt/homebrew/bin/bun /usr/local/bin/bun "$HOME/.bun/bin/bun" ; do [[ -z "$BUN" && -x "$c" ]] && BUN="$c"; done
@@ -363,6 +361,7 @@ patterns = [l for l in pats.splitlines() if l.strip() and not l.startswith("#")]
 inserted = [l for l in new.splitlines(keepends=True) if re.match(r'^\s*"', l)]
 assert inserted, "no basic-string lines inserted"
 rest = "".join(l for l in new.splitlines(keepends=True) if not re.match(r'^\s*"', l))
+rest = rest.replace('\n[agents.warp_agent.other]\nauto_approve_bypasses_command_denylist = false\n', '')
 # the previously-inline `command_denylist = []` legitimately became a multi-line array
 rest_norm = rest.replace("command_denylist = [\n]", "command_denylist = []")
 assert rest_norm == orig, "a non-denylist line changed"
@@ -608,4 +607,8 @@ assert data < first(r'agent-guard" wire claude'), "wire claude runs before the d
 PY
 ok "C20: install.sh deploys the guard data before every adapter apply"
 
+python3 "$ROOT/tests/agent-guard/warp-parser.py" || fail 'C21: Warp canonical serialization and owned deduplication'
+ok "C21: Warp canonical serialization and owned deduplication"
+python3 "$ROOT/tests/agent-guard/warp-policy.py" || fail 'C22: Warp defaults, bypass and desktop/CLI coverage'
+ok "C22: Warp defaults, bypass and desktop/CLI coverage"
 printf 'agent-guard contract: PASS (%d)\n' "$PASS"

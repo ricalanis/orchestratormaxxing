@@ -1,0 +1,418 @@
+#!/usr/bin/env python3
+"""task-workspace — workspace-mode resolver for every launcher and the dashboard dispatcher.
+
+A task declares workspace: shared | worktree | container; this tool turns that
+declaration into a place to run.
+
+ADOPT-BEFORE-BUILD DECISION (CLAUDE.md gate): **ADOPT worktrunk; local code is
+routing + the lock gate only.**
+
+  task-workspace resolve --mode shared|worktree|container --project <path> [--branch <name>] [--slug <name>] [--json]
+  task-workspace merge   --project <path> --branch <name>
+  task-workspace remove  --project <path> --branch <name> --confirm
+  task-workspace list    --project <path> [--json]
+  task-workspace check
+  task-workspace install-wt
+
+EXIT CODES (typed, so callers branch without parsing prose)
+  0 ok · 1 error · 2 missing prerequisite (run: `task-workspace install-wt` for wt;
+    `install-fleet.sh` for coder-ws) · 3 refused by policy (`remove` without `--confirm`).
+
+ENV OVERRIDES
+  TASK_WORKSPACE_WT        wt binary path          (default: which(wt) → ~/.local/bin/wt → /opt/homebrew/bin/wt)
+  TASK_WORKSPACE_CODER_WS  coder-ws binary path    (default: which(coder-ws) → ~/.local/bin/coder-ws)
+  TASK_WORKSPACE_LOCK      worktrunk.lock path     (default: ~/.config/orchestratormaxxing/worktrunk.lock → ../deploy/worktrunk.lock)
+  TASK_WORKSPACE_BIN_DIR   install directory for wt (default: ~/.local/bin)
+  TASK_WORKSPACE_PLATFORM  platform key for install (default: derived from platform.system()/machine())
+"""
+import argparse
+import hashlib
+import json
+import os
+import platform as _platform
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+
+def _run(argv, **kw):
+    """subprocess.run that turns EXPECTED process failures into a returncode.
+
+    A missing/non-executable binary (OSError) or a hung child (TimeoutExpired)
+    must read as a typed failure with a sentence, never as a traceback (rule 1
+    of every fleet-tool contract). 124/127 mirror the shell conventions."""
+    text = bool(kw.get("text") or kw.get("universal_newlines") or kw.get("encoding"))
+    def _cp(code, msg):
+        out, errmsg = ("", msg) if text else (b"", msg.encode())
+        return subprocess.CompletedProcess(argv, code, out, errmsg)
+    try:
+        return subprocess.run(argv, **kw)
+    except subprocess.TimeoutExpired as e:
+        return _cp(124, f"timed out after {e.timeout}s: {argv[0]}")
+    except OSError as e:
+        return _cp(127, f"{argv[0]}: {e}")
+
+HOME = os.path.expanduser("~")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+WT_ENV = os.environ.get("TASK_WORKSPACE_WT")
+CODER_WS_ENV = os.environ.get("TASK_WORKSPACE_CODER_WS")
+LOCK_ENV = os.environ.get("TASK_WORKSPACE_LOCK")
+BIN_DIR_ENV = os.environ.get("TASK_WORKSPACE_BIN_DIR", os.path.join(HOME, ".local", "bin"))
+PLATFORM_ENV = os.environ.get("TASK_WORKSPACE_PLATFORM")
+
+OK, ERR, MISSING, REFUSED = 0, 1, 2, 3
+
+
+def err(msg):
+    print(f"task-workspace: {msg}", file=sys.stderr)
+
+
+def resolve_wt():
+    """Return the path to wt, or None if none resolves."""
+    if WT_ENV:
+        return WT_ENV
+    wt = shutil.which("wt")
+    if wt:
+        return wt
+    local = os.path.join(HOME, ".local", "bin", "wt")
+    if (os.path.isfile(local) and os.access(local, os.X_OK)):
+        return local
+    brew = "/opt/homebrew/bin/wt"
+    if (os.path.isfile(brew) and os.access(brew, os.X_OK)):
+        return brew
+    return None
+
+
+def resolve_coder_ws():
+    """Return the path to coder-ws, or None if none resolves."""
+    if CODER_WS_ENV:
+        return CODER_WS_ENV
+    cw = shutil.which("coder-ws")
+    if cw:
+        return cw
+    local = os.path.join(HOME, ".local", "bin", "coder-ws")
+    if (os.path.isfile(local) and os.access(local, os.X_OK)):
+        return local
+    return None
+
+
+def resolve_lock():
+    """Return the path to the worktrunk.lock file."""
+    if LOCK_ENV:
+        return LOCK_ENV
+    cfg = os.path.join(HOME, ".config", "orchestratormaxxing", "worktrunk.lock")
+    if os.path.isfile(cfg):
+        return cfg
+    return os.path.join(SCRIPT_DIR, "..", "deploy", "worktrunk.lock")
+
+
+def require_wt():
+    """Return (wt_path, OK) or (None, MISSING)."""
+    wt = resolve_wt()
+    if not wt or not (os.path.isfile(wt) and os.access(wt, os.X_OK)):
+        err("wt (worktrunk) not found — run: task-workspace install-wt")
+        return None, MISSING
+    return wt, OK
+
+
+def worktree_path_template():
+    """The inline worktree path template passed to wt via --config-set."""
+    return '{{ repo_path }}/../.worktrees/{{ repo }}.{{ branch | sanitize }}'
+
+
+def wt_argv(wt, project, *rest):
+    """Every wt call is anchored with -C <project> and carries the inline
+    worktree-path template — contract rule 4 says on EVERY call, so no verb can
+    ever compute a path from a different template than resolve did."""
+    return [wt, "-C", project, "--config-set",
+            f'worktree-path = "{worktree_path_template()}"', *rest]
+
+
+def wt_list_path(wt, project, branch):
+    """Resolve a branch to its worktree path from `wt list --format json`."""
+    r = _run(wt_argv(wt, project, "list", "--format", "json"),
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        err(f"wt list failed: {r.stderr.strip()}")
+        return None
+    try:
+        entries = json.loads(r.stdout)
+    except json.JSONDecodeError as e:
+        err(f"wt list returned invalid JSON: {e}")
+        return None
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("branch") == branch:
+            return entry.get("path")
+    err(f"worktree for branch {branch!r} not found")
+    return None
+
+
+# -------------------------------------------------------------------- verbs
+
+def cmd_resolve(args):
+    project = os.path.abspath(args.project)
+
+    if args.mode == "shared":
+        if args.json:
+            print(json.dumps({"mode": "shared", "path": project, "project": project}))
+        else:
+            print(project)
+        return OK
+
+    if args.mode == "container":
+        cw = resolve_coder_ws()
+        if not cw or not os.path.isfile(cw):
+            err("coder-ws not found — run: install-fleet.sh")
+            return MISSING
+        slug = args.slug or os.path.basename(project)
+        if args.json:
+            print(json.dumps({
+                "mode": "container",
+                "slug": slug,
+                "prefix": ["coder-ws", "ssh", slug, "--"],
+                "path": project,
+            }))
+        else:
+            print(f"coder-ws ssh {slug} --")
+            print(project)
+        return OK
+
+    # worktree
+    wt, status = require_wt()
+    if wt is None:
+        return status
+    if not args.branch:
+        err("worktree mode requires --branch")
+        return ERR
+
+    switch_cmd = wt_argv(wt, project, "switch", "--create", args.branch, "--no-cd")
+    r = _run(switch_cmd, capture_output=True, text=True)
+    if r.returncode != 0 and "already exists" in r.stderr:
+        switch_cmd = wt_argv(wt, project, "switch", args.branch, "--no-cd")
+        r = _run(switch_cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        err(f"wt switch failed: {r.stderr.strip()}")
+        return ERR
+
+    path = wt_list_path(wt, project, args.branch)
+    if path is None:
+        return ERR
+
+    if args.json:
+        print(json.dumps({
+            "mode": "worktree",
+            "path": path,
+            "branch": args.branch,
+            "project": project,
+        }))
+    else:
+        print(path)
+    return OK
+
+
+def cmd_merge(args):
+    wt, status = require_wt()
+    if wt is None:
+        return status
+    path = wt_list_path(wt, args.project, args.branch)
+    if path is None:
+        return ERR
+    r = _run(wt_argv(wt, path, "merge"))
+    return OK if r.returncode == 0 else ERR
+
+
+def cmd_remove(args):
+    if not args.confirm:
+        err("remove is SELECT — re-run with --confirm")
+        return REFUSED
+    wt, status = require_wt()
+    if wt is None:
+        return status
+    r = _run(wt_argv(wt, args.project, "remove", args.branch))
+    return OK if r.returncode == 0 else ERR
+
+
+def cmd_list(args):
+    wt, status = require_wt()
+    if wt is None:
+        return status
+    r = _run(wt_argv(wt, args.project, "list", "--format", "json"),
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        err(f"wt list failed: {r.stderr.strip()}")
+        return ERR
+    if args.json:
+        print(r.stdout)
+        return OK
+    try:
+        entries = json.loads(r.stdout)
+    except json.JSONDecodeError as e:
+        err(f"wt list returned invalid JSON: {e}")
+        return ERR
+    print(f"{'branch':<20} {'path'}")
+    for entry in entries:
+        # A detached worktree reports branch: null (measured 2026-09-06 on a
+        # .results verification worktree) — never format None.
+        print(f"{(entry.get('branch') or '(detached)'):<20} {entry.get('path') or ''}")
+    return OK
+
+
+def cmd_check(args):
+    wt = resolve_wt()
+    if not wt or not (os.path.isfile(wt) and os.access(wt, os.X_OK)):
+        err("wt (worktrunk) not found — run: task-workspace install-wt")
+        return MISSING
+    r = _run([wt, "--version"], capture_output=True, text=True)
+    if r.returncode != 0:
+        err(f"wt at {wt} did not answer --version ({(r.stderr or '').strip() or r.returncode}) — run: task-workspace install-wt")
+        return MISSING
+    print(f"wt:       {wt} ({r.stdout.strip()})")
+    cw = resolve_coder_ws()
+    print(f"coder-ws: {cw if cw else 'not found'}")
+    return OK
+
+
+def platform_key():
+    if PLATFORM_ENV:
+        return PLATFORM_ENV
+    system = _platform.system()
+    machine = _platform.machine()
+    if system == "Linux" and machine == "x86_64":
+        return "linux-x86_64"
+    if system == "Darwin" and machine == "arm64":
+        return "darwin-arm64"
+    err(f"unsupported platform: {system}/{machine}")
+    return None
+
+
+def cmd_install_wt(args):
+    lock_path = resolve_lock()
+    try:
+        with open(lock_path) as fh:
+            lock = json.load(fh)
+    except FileNotFoundError:
+        err(f"lock file not found: {lock_path}")
+        return ERR
+    except json.JSONDecodeError as e:
+        err(f"lock file is not valid JSON: {e}")
+        return ERR
+
+    version = lock.get("version")
+    url_base = lock.get("url_base")
+    assets = lock.get("assets", {})
+    if not version or not url_base or not assets:
+        err("lock file missing required fields")
+        return ERR
+
+    wt = resolve_wt()
+    if wt and (os.path.isfile(wt) and os.access(wt, os.X_OK)):
+        r = _run([wt, "--version"], capture_output=True, text=True)
+        if r.returncode == 0:
+            out = r.stdout.strip()
+            if out == f"wt v{version}":
+                print(f"{wt} already at {out}")
+                return OK
+
+    platform = platform_key()
+    if platform is None:
+        return ERR
+    asset = assets.get(platform)
+    if not asset:
+        err(f"no asset for platform {platform!r}")
+        return ERR
+    asset_name = asset.get("name")
+    expected_sha = asset.get("sha256")
+    if not asset_name or not expected_sha:
+        err("asset missing name or sha256")
+        return ERR
+
+    bindir = os.path.expanduser(BIN_DIR_ENV)
+    os.makedirs(bindir, exist_ok=True)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        archive_path = os.path.join(tmp, asset_name)
+        url = f"{url_base}{asset_name}"
+        r = _run(["curl", "-fsSL", "-o", archive_path, url],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            err(f"curl failed: {r.stderr.strip()}")
+            return ERR
+
+        actual_sha = hashlib.sha256(open(archive_path, "rb").read()).hexdigest()
+        if actual_sha != expected_sha:
+            err(f"sha256 mismatch for {asset_name}: expected {expected_sha}, got {actual_sha}")
+            return ERR
+
+        with tarfile.open(archive_path, "r:xz") as tar:
+            wt_member = None
+            for member in tar.getmembers():
+                if os.path.basename(member.name) == "wt":
+                    wt_member = member
+                    break
+            if wt_member is None:
+                err("archive does not contain a 'wt' binary")
+                return ERR
+            extracted = tar.extractfile(wt_member)
+            dest = os.path.join(bindir, "wt")
+            with open(dest, "wb") as out:
+                out.write(extracted.read())
+            os.chmod(dest, 0o755)
+        print(f"installed wt to {dest}")
+    return OK
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(
+        prog="task-workspace",
+        description="Resolve a task's workspace mode into a place to run.",
+        epilog=("exit codes: 0 ok · 1 error · 2 missing prerequisite "
+                "(run: `task-workspace install-wt` for wt; `install-fleet.sh` for coder-ws) · "
+                "3 refused by policy (`remove` without `--confirm`)."),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+
+    sub = p.add_subparsers(dest="verb")
+
+    rs = sub.add_parser("resolve", help="resolve a workspace mode into a path")
+    rs.add_argument("--mode", required=True, choices=["shared", "worktree", "container"])
+    rs.add_argument("--project", required=True)
+    rs.add_argument("--branch")
+    rs.add_argument("--slug")
+    rs.add_argument("--json", action="store_true")
+
+    mg = sub.add_parser("merge", help="merge a branch's worktree back into the main repo")
+    mg.add_argument("--project", required=True)
+    mg.add_argument("--branch", required=True)
+
+    rm = sub.add_parser("remove", help="remove a branch's worktree (SELECT)")
+    rm.add_argument("--project", required=True)
+    rm.add_argument("--branch", required=True)
+    rm.add_argument("--confirm", action="store_true", help="required: this removes the worktree")
+
+    ls = sub.add_parser("list", help="list worktrees for a project")
+    ls.add_argument("--project", required=True)
+    ls.add_argument("--json", action="store_true")
+
+    sub.add_parser("check", help="preflight: show wt and coder-ws presence (read-only)")
+    sub.add_parser("install-wt", help="install the pinned wt binary from the lock file")
+
+    args = p.parse_args(argv)
+
+    if not args.verb:
+        p.print_help()
+        return ERR
+
+    return {
+        "resolve": cmd_resolve,
+        "merge": cmd_merge,
+        "remove": cmd_remove,
+        "list": cmd_list,
+        "check": cmd_check,
+        "install-wt": cmd_install_wt,
+    }[args.verb](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

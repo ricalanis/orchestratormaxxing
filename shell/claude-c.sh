@@ -159,14 +159,21 @@ c() {
       ;;
   esac
 
-  local name="${1:-}"
-  shift 2>/dev/null || true
+  # The name is the first POSITIONAL only; a leading flag (`c -wt`, `c -F x`)
+  # must not become the session name (measured 2026-09-06: `c -wt -F fix/syop`
+  # produced a shared session called claude--wt). Same rule as g() and o().
+  local name=""
+  if [[ -n "${1:-}" && "${1:-}" != -* ]]; then
+    name="$1"
+    shift
+  fi
   local mode="interactive"
   local prompt_text=""
   local attach=0
   local detach=0
   local role=""
   local feature=""
+  local workspace="shared"
   local claude_args=()
 
   # Warp otherwise replaces OSC titles with its cwd/process-derived title.
@@ -182,6 +189,11 @@ c() {
       --detach)        detach=1; shift ;;
       -R|--role)       role="$2"; shift 2 ;;   # implementation|verification|docs|planning|review
       -F|--feature)    feature="$2"; shift 2 ;;
+      -W|--workspace)  # shared|worktree|container (task-workspace resolves it)
+        [[ $# -ge 2 ]] || { echo "c: --workspace requires shared|worktree|container" >&2; return 2; }
+        workspace="$2"; shift 2 ;;
+      -wt|--wt|--worktree) workspace="worktree"; shift ;;     # same as -W worktree
+      -c|--container)      workspace="container"; shift ;;    # same as -W container
       *)               claude_args+=("$1"); shift ;;
     esac
   done
@@ -189,6 +201,10 @@ c() {
     echo "c: --attach and --detach are mutually exclusive" >&2
     return 2
   fi
+  case "$workspace" in
+    shared|worktree|container) ;;
+    *) echo "c: --workspace must be shared|worktree|container (got '$workspace')" >&2; return 2 ;;
+  esac
 
   # If no name given, use cwd basename
   if [[ -z "$name" ]]; then
@@ -200,6 +216,46 @@ c() {
   # best-effort register below adds the feature link when the dashboard is up.
   local base="claude-$name"
   if [[ -n "$role" ]]; then base="claude-$name-$role"; fi
+
+  # Workspace mode (-W): `shared` is today's exact behaviour — the session runs
+  # in $PWD. `worktree` asks bin/task-workspace for an isolated worktree of the
+  # current project and runs there; `container` wraps the launch in
+  # `coder-ws ssh -t <slug> --` so Claude runs inside the Coder workspace named
+  # after the project folder, at the same absolute path. Both are resolved
+  # BEFORE any tmux session exists, so a failed resolve leaves nothing behind.
+  local launch_dir="$PWD" container_slug=""
+  if [[ "$workspace" != "shared" ]]; then
+    if [[ "$mode" != "interactive" ]]; then
+      echo "c: -W $workspace applies to interactive sessions only" >&2
+      return 2
+    fi
+    if [[ "$workspace" == "worktree" ]]; then
+      launch_dir="$(command task-workspace resolve --mode worktree --project "$PWD" \
+        --branch "task/${feature:-$name}")" || {
+        echo "c: task-workspace could not resolve a worktree for $PWD" >&2
+        return 1
+      }
+      base="$base-wt"
+    else
+      command -v coder-ws >/dev/null 2>&1 || {
+        echo "c: coder-ws is not installed (run install-fleet.sh); -W container needs it" >&2
+        return 2
+      }
+      container_slug="$(basename "$PWD")"
+      # Readiness BEFORE any session exists: one real round trip into the
+      # workspace. coder-ws exits 2 (server down / agent not connected) with
+      # the fix named, and nothing has been created yet.
+      command coder-ws ssh "$container_slug" -- true >/dev/null 2>&1 || {
+        echo "c: Coder workspace '$container_slug' is not reachable — run: coder-ws status (then coder-ws start $container_slug)" >&2
+        return 2
+      }
+      base="$base-ws"
+    fi
+  fi
+  # Quote a possibly-empty argument list for the container's `bash -lc` string:
+  # printf '%q ' with ZERO args would print '' and hand the inner CLI a bogus
+  # empty positional argument.
+  _c_quote_args() { (( $# )) && printf '%q ' "$@"; true; }
   _c_register_role() {
     [[ -z "$role" && -z "$feature" ]] && return 0
     # Dashboard base URL: legacy ORCH_DASHBOARD_URL > ORCHESTRATORMAXXING_DASHBOARD_URL (env,
@@ -268,11 +324,16 @@ PY
   local linux_normal_screen=0
   [[ "$(uname -s 2>/dev/null)" == "Linux" ]] && linux_normal_screen=1
   if [[ -n "${TMUX:-}" && "$detach" == "0" ]]; then
+    if [[ -n "$container_slug" ]]; then
+      command coder-ws ssh -t "$container_slug" -- bash -lc \
+        "cd $(printf '%q' "$PWD") && exec claude --dangerously-skip-permissions $(_c_quote_args ${claude_args[@]+"${claude_args[@]}"})"
+      return
+    fi
     if [[ "$linux_normal_screen" == "1" ]]; then
-      CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 \
-        command claude --dangerously-skip-permissions "${claude_args[@]}"
+      ( cd "$launch_dir" && CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 \
+        command claude --dangerously-skip-permissions "${claude_args[@]}" )
     else
-      command claude --dangerously-skip-permissions "${claude_args[@]}"
+      ( cd "$launch_dir" && command claude --dangerously-skip-permissions "${claude_args[@]}" )
     fi
     return
   fi
@@ -309,8 +370,14 @@ PY
   # to the visible alternate-screen viewport. `/copy` remains available for an
   # exact assistant response.
   env_args+=("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1")
-  if ! tmux new-session -d -s "$sess" -c "$PWD" \
-    "${env_args[@]}" "$claude_bin" --dangerously-skip-permissions "${claude_args[@]}"; then
+  local launch_cmd=("$claude_bin" --dangerously-skip-permissions "${claude_args[@]}")
+  if [[ -n "$container_slug" ]]; then
+    # Inside the Coder workspace: same absolute path, the container's own claude.
+    launch_cmd=(coder-ws ssh -t "$container_slug" -- bash -lc \
+      "cd $(printf '%q' "$PWD") && exec claude --dangerously-skip-permissions $(_c_quote_args ${claude_args[@]+"${claude_args[@]}"})")
+  fi
+  if ! tmux new-session -d -s "$sess" -c "$launch_dir" \
+    "${env_args[@]}" "${launch_cmd[@]}"; then
     echo "c: failed to create tmux session '$sess'" >&2
     return 1
   fi

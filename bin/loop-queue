@@ -187,8 +187,14 @@ def cmd_add(args, path, items):
     # else the loop's one loud signal gets diluted by routine research churn.
     recurred = any(it.get("id") == iid and it.get("status") == "resolved" and not it.get("expired")
                    for it in items)
+    # Incarnation counter: the appended row's ordinal among rows with this id. `ts` alone cannot
+    # separate two recurrences of one flaw (second granularity; LOOP_QUEUE_TS pins it outright),
+    # and two same-id rows that are genuinely DIFFERENT appends must never look like one row
+    # duplicated by a merge. Deterministic, no clock, no uuid. Legacy rows carry no `inc` at all,
+    # which is itself a consistent identity value for them — so no special case is needed.
+    inc = sum(1 for it in items if it.get("id") == iid)
     items.append({
-        "id": iid, "ts": now_iso(), "layer": (args.layer or "?").upper(),
+        "id": iid, "ts": now_iso(), "inc": inc, "layer": (args.layer or "?").upper(),
         "source": args.source or "manual", "flaw": flaw, "status": "open",
         "round": None, "host": host_name(),
         **({"recurred": True} if recurred else {}),
@@ -206,8 +212,127 @@ def cmd_add(args, path, items):
     return 0
 
 
+# --- merge poison: duplicate INCARNATIONS, not duplicate ids ---------------------------------
+# This file is committed and synced across machines, and claim/resolve/reopen rewrite a row IN
+# PLACE. A git line-merge sees remove+add, so it can keep BOTH versions of one row: divergent
+# status, everything else identical. Measured 2026-08-30 (commit 3821b0a): 5 ids carried a
+# resurrected "open" copy beside its "resolved" sibling — `status` counted the phantom open
+# forever, so `--gate` stayed ACT with no real work, and `resolve <id>` rewrote only one row.
+#
+# A duplicate ID is NOT the defect: cmd_add APPENDS a new row with the same content hash when a
+# resolved flaw RECURS (lq-6cc03e4c/2544ef07/1f95a006 are exactly that), and that history must
+# survive. Nor is (id, ts): `ts` is second-granular and LOOP_QUEUE_TS pins it outright, so a
+# recurrence can share its predecessor's timestamp — keying on (id, ts) ate the harness's own
+# recurrence contract the first time this was written.
+#
+# So identity is EVERY field the tool never rewrites. Only these six are rewritten in place, by
+# claim/resolve/reopen/expire; anything else — present or added later — participates in identity,
+# which fails SAFE: an unrecognized field can only split a group (never collapse one), so a new
+# field can never cause silent data loss.
+MUTABLE_FIELDS = frozenset({"status", "round", "note", "reopened_at", "reopen_count", "expired"})
+STATUS_RANK = {"open": 0, "claimed": 1, "resolved": 2}
+
+
+def _incarnation(it):
+    """Identity of one appended row: its immutable projection. None = not groupable."""
+    if not it.get("id"):
+        return None  # malformed/hand-edited row: pass through untouched, never collapse
+    return tuple(sorted((k, json.dumps(v, sort_keys=True))
+                        for k, v in it.items() if k not in MUTABLE_FIELDS))
+
+
+def _rewrite_rank(it):
+    """Precedence inside ONE poisoned incarnation group.
+
+    Every field that differs inside such a group was written by an in-place rewrite of the same
+    row, so the winner is the row carrying the LATEST rewrite:
+      1. reopen_count — `reopen` is the ONLY verb that moves a row back to "open", and it stamps
+         this counter. It must outrank the status ladder, else the collapse silently erases a
+         deliberate reopen against its pre-reopen twin.
+      2. status ladder — with reopen accounted for, open → claimed → resolved is the only
+         direction the remaining verbs move a row (`expire` acts on open rows and sets resolved),
+         so a higher rung is always the later write.
+    Ties keep the first row in file order (max() is stable), so the collapse is deterministic.
+    """
+    return (int(it.get("reopen_count") or 0), STATUS_RANK.get(it.get("status"), 0))
+
+
+def poisoned_incarnations(items):
+    """{key: [rows]} for every incarnation appearing more than once. Empty = clean."""
+    groups = {}
+    for it in items:
+        k = _incarnation(it)
+        if k is not None:
+            groups.setdefault(k, []).append(it)
+    return {k: v for k, v in groups.items() if len(v) > 1}
+
+
+def canonical(items):
+    """One row per incarnation (winner of each poisoned group), file order preserved.
+
+    Returns the SAME row objects, so a caller may mutate a returned row and save `items`.
+    """
+    dupes = poisoned_incarnations(items)
+    if not dupes:
+        return items
+    winners = {k: max(v, key=_rewrite_rank) for k, v in dupes.items()}
+    out, seen = [], set()
+    for it in items:
+        k = _incarnation(it)
+        if k not in winners:
+            out.append(it)
+        elif k not in seen:
+            seen.add(k)
+            out.append(winners[k])
+    return out
+
+
+def _warn_poison(items):
+    """Loud on stderr: a poisoned queue must never be a silent condition."""
+    dupes = poisoned_incarnations(items)
+    if dupes:
+        ids = sorted({v[0].get("id") for v in dupes.values()})
+        print(f"loop-queue: WARNING — {len(dupes)} duplicated incarnation(s) from a git merge "
+              f"({', '.join(ids)}); showing the canonical view. Repair with "
+              f"`loop-queue fsck --fix`.", file=sys.stderr)
+    return dupes
+
+
+def cmd_fsck(args, path, items):
+    """Audit (and with --fix, repair) merge-duplicated incarnations. Never touches recurrence."""
+    dupes = poisoned_incarnations(items)
+    ids = sorted({v[0].get("id") for v in dupes.values()})
+    fixed = False
+    if dupes and args.fix:
+        keep = canonical(items)
+        save(path, keep)
+        fixed = True
+    if args.json:
+        print(json.dumps({"rows": len(items), "poisoned_incarnations": len(dupes),
+                          "ids": ids, "fixed": fixed,
+                          "rows_after": len(items) - sum(len(v) - 1 for v in dupes.values())
+                          if fixed else len(items)}))
+    elif not dupes:
+        print(f"fsck: clean ({len(items)} rows, no duplicated incarnations)")
+    else:
+        for rows in dupes.values():
+            iid, ts = rows[0].get("id"), rows[0].get("ts")
+            print(f"{'✓ collapsed' if fixed else '⚠ duplicated'} {iid} @ {ts}: "
+                  f"{len(rows)} rows {[r.get('status') for r in rows]}"
+                  f"{' → ' + max(rows, key=_rewrite_rank).get('status', '?') if fixed else ''}")
+        if not fixed:
+            print(f"fsck: {len(dupes)} duplicated incarnation(s) — repair with `fsck --fix`",
+                  file=sys.stderr)
+    # 0 = clean, or repaired. 1 = poison present and left in place (audit mode).
+    return 0 if (not dupes or fixed) else 1
+
+
 def _find(items, iid):
-    matches = [it for it in items if it.get("id") == iid or it.get("id") == f"lq-{iid}"]
+    # Resolve against the CANONICAL view: matches[-1] is the newest incarnation (correct for
+    # recurrence), but inside a merge-poisoned incarnation it could be the stale losing copy,
+    # so claim/resolve/reopen would rewrite the wrong row.
+    matches = [it for it in canonical(items)
+               if it.get("id") == iid or it.get("id") == f"lq-{iid}"]
     return matches[-1] if matches else None
 
 
@@ -313,7 +438,8 @@ def cmd_expire(args, path, items):
 
 def cmd_list(args, path, items):
     want = args.status
-    sel = [it for it in items if want == "all" or it.get("status") == want]
+    _warn_poison(items)
+    sel = [it for it in canonical(items) if want == "all" or it.get("status") == want]
     if args.json:
         print(json.dumps(sel, indent=2))
         return 0
@@ -333,6 +459,12 @@ def cmd_list(args, path, items):
 
 
 def cmd_status(args, path, items):
+    # Count the CANONICAL view. A merge-resurrected "open" twin is not real work: counting it
+    # kept `--gate` ACT forever while `resolve <id>` could never drain it (measured 2026-08-30).
+    # Hiding it from the count is only safe because it is never hidden from the OPERATOR —
+    # _warn_poison is loud on stderr and `fsck` exits 1 on it.
+    dupes = _warn_poison(items)
+    items = canonical(items)
     counts = {"open": 0, "claimed": 0, "resolved": 0}
     for it in items:
         counts[it.get("status", "open")] = counts.get(it.get("status", "open"), 0) + 1
@@ -347,7 +479,8 @@ def cmd_status(args, path, items):
     reopened_items = sum(1 for it in items if it.get("reopen_count"))
     if args.json:
         print(json.dumps({**counts, "total": len(items), "actionable": actionable,
-                          "reopened_items": reopened_items, "reopen_events": reopen_events}))
+                          "reopened_items": reopened_items, "reopen_events": reopen_events,
+                          "poisoned_incarnations": len(dupes)}))
     elif not args.gate:
         print(f"open={counts['open']} claimed={counts['claimed']} "
               f"resolved={counts['resolved']} total={len(items)} actionable={actionable} "
@@ -384,6 +517,12 @@ def main():
     x.add_argument("--json", action="store_true")
     x.set_defaults(fn=cmd_expire)
 
+    f = sub.add_parser("fsck")
+    f.add_argument("--fix", action="store_true",
+                   help="collapse each merge-duplicated incarnation to its winning row")
+    f.add_argument("--json", action="store_true")
+    f.set_defaults(fn=cmd_fsck)
+
     s = sub.add_parser("status")
     s.add_argument("--json", action="store_true")
     s.add_argument("--gate", action="store_true")
@@ -402,7 +541,11 @@ def main():
     # mutating verbs run the whole load→mutate→save transaction under the
     # bounded sidecar lock; reads stay lock-free (save() is an atomic replace,
     # so a reader can never see a torn file).
-    lock = acquire_lock(path) if args.cmd in MUTATING_CMDS else None
+    # `fsck` is read-only unless --fix: only the repairing form joins the write transaction, so
+    # a plain audit can never exit 1 for lock contention (which would collide with its
+    # "1 = poison present" exit code).
+    mutating = args.cmd in MUTATING_CMDS or (args.cmd == "fsck" and args.fix)
+    lock = acquire_lock(path) if mutating else None
     try:
         items = load(path)
         rc = args.fn(args, path, items)

@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""Bounded, hook-safe Codex SessionStart context formatter."""
+import json
+import os
+import subprocess
+import sys
+
+MAX_BYTES = 16384
+COMMAND_TIMEOUT_SECONDS = 2
+
+
+def run(argv):
+    """Return (ok, stdout, short_reason) without surfacing child stderr."""
+    try:
+        r = subprocess.run(
+            argv,
+            capture_output=True,
+            timeout=COMMAND_TIMEOUT_SECONDS,
+            check=False,
+        )
+        if r.returncode:
+            return False, b"", f"exit {r.returncode}"
+        return True, r.stdout or b"", ""
+    except subprocess.TimeoutExpired:
+        return False, b"", f"timed out after {COMMAND_TIMEOUT_SECONDS}s"
+    except OSError:
+        return False, b"", "unavailable"
+
+
+def has_audit_flags(mem_audit_bytes):
+    try:
+        text = mem_audit_bytes.decode("utf-8", "replace")
+        return "⚠" in text or "✗" in text
+    except Exception:
+        return False
+
+
+def utf8_prefix(text, limit):
+    """Return the largest UTF-8-safe prefix whose encoded size is <= limit."""
+    data = text.encode("utf-8", "replace")
+    if len(data) <= limit:
+        return text
+    return data[:limit].decode("utf-8", "ignore")
+
+
+def bounded_detail(value, limit, retrieval_command):
+    """Bound one section and make any omitted detail explicitly retrievable."""
+    text = value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value)
+    if len(text.encode("utf-8")) <= limit:
+        return text.rstrip()
+    marker = f"\n… clipped; run `{retrieval_command}` for full detail."
+    room = max(0, limit - len(marker.encode("utf-8")))
+    return utf8_prefix(text, room).rstrip() + marker
+
+
+def unavailable(name, reason):
+    suffix = f": {reason}" if reason else ""
+    return f"({name} unavailable{suffix})"
+
+
+def main():
+    if os.environ.get("SOLPLAN_CHILD", "0") == "1":
+        return
+
+    # These section budgets include their clipping markers. Their sum plus all
+    # headings and queue metadata stays comfortably below the global ceiling.
+    memory_budget = 4800
+    audit_budget = 1200
+    changelog_budget = 3200
+    wip_budget = 4300
+
+    parts = []
+
+    memory_ok, memory, memory_reason = run(
+        ["memoryctl", "brief", "--max-bytes", "7000"]
+    )
+    if memory_ok and memory:
+        body = bounded_detail(
+            memory, memory_budget, "memoryctl brief --max-bytes 12000"
+        )
+        parts.append(f"## Shared governed project memory\n{body}")
+    else:
+        parts.append(
+            "## Shared governed project memory\n"
+            + unavailable("memoryctl brief", memory_reason)
+        )
+
+    audit_ok, audit, audit_reason = run(["mem-audit"])
+    if audit_ok and has_audit_flags(audit):
+        audit_text = bounded_detail(audit, audit_budget, "mem-audit")
+        parts.append(
+            "## Memory audit flags\n"
+            "Re-verify stale/superseded memory before trusting it.\n"
+            + audit_text
+        )
+    elif not audit_ok:
+        parts.append("## Memory audit\n" + unavailable("mem-audit", audit_reason))
+
+    # The watcher is observation-only and detached; it must run exactly once.
+    run(["loop-tick", "--kick", "--quiet"])
+    queue_ok, queue_status, queue_reason = run(["loop-queue", "status", "--json"])
+    if queue_ok and queue_status:
+        try:
+            q = json.loads(queue_status.decode("utf-8", "replace"))
+            parts.append(
+                "## Self-improve queue\n"
+                f"{q.get('open', '?')} open, {q.get('actionable', '?')} actionable. "
+                "Run `$orchestratormaxxing:self-improve` to drain; "
+                "run `loop-queue list` for item details."
+            )
+        except (UnicodeError, ValueError):
+            parts.append("## Self-improve queue\n(loop-queue status unavailable)")
+    else:
+        parts.append(
+            "## Self-improve queue\n"
+            + unavailable("loop-queue status", queue_reason)
+        )
+
+    session_ok, session_bytes, session_reason = run(
+        ["session-log", "tail", "--n", "1", "--json"]
+    )
+    if session_ok and session_bytes:
+        try:
+            session = json.loads(session_bytes.decode("utf-8", "replace"))
+            changelog = session.get("changelog") or {}
+            entries = changelog.get("entries") or []
+            if entries and isinstance(entries[0], str):
+                newest = bounded_detail(
+                    entries[0], changelog_budget, "session-log tail"
+                )
+                parts.append(f"## Newest changelog state\n{newest}")
+            else:
+                parts.append("## Newest changelog state\n(no recent entries)")
+
+            wip = session.get("wip") or {}
+            wip_body = wip.get("body") if isinstance(wip, dict) else None
+            if isinstance(wip_body, str) and wip_body:
+                current = bounded_detail(wip_body, wip_budget, "session-log wip show")
+                parts.append(f"## Current WIP state\n{current}")
+            else:
+                parts.append("## Current WIP state\n(no WIP set)")
+        except (AttributeError, UnicodeError, ValueError):
+            parts.append("## Session log\n(session-log tail unavailable)")
+    else:
+        parts.append("## Session log\n" + unavailable("session-log tail", session_reason))
+
+    out = ("\n\n".join(parts).rstrip() + "\n").encode("utf-8", "replace")
+    if len(out) > MAX_BYTES:  # final fail-safe; section budgets should prevent this
+        out = utf8_prefix(out.decode("utf-8", "replace"), MAX_BYTES).encode("utf-8")
+    sys.stdout.buffer.write(out)
+    sys.stdout.buffer.flush()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:  # a SessionStart helper must never break the Codex session
+        print(
+            "Codex SessionStart context unavailable; run `memoryctl brief` and "
+            "`session-log tail` manually."
+        )

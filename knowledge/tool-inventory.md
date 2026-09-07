@@ -22,6 +22,7 @@ not routed directly by an orchestrator session):
 - `agent-tab-status` — sets the Warp-visible tmux window title for Claude/Codex lifecycle state; called by hooks with the current `TMUX_PANE`.
 - `browser-mcp-contract` — one-command deterministic verify of the browser MCP stack (install checks + live CDP phase).
 - `chrome-debug` — ONE entry point for the account-integrated CDP Chrome (port 18800); shared human+agent profile.
+- `codex-session-start` — bounds Codex's governed-memory, harness-health, changelog, and WIP startup context to 16 KiB while keeping the watcher non-blocking.
 - `codex-stop-hook` — fail-open Codex Stop hook emitting exactly one JSON object on stdout.
 - `opencode-browser-mcp` — MCP stdio server exposing Chrome CDP actions (navigate/click/type/extract/screenshot/eval) to OpenCode agents.
 - `orchestration-practice` — deterministic matcher and preflight receipt generator for the shared Orchestra-of-One practice catalog.
