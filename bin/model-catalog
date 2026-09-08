@@ -170,6 +170,8 @@ def merge_facts(prior, row, observed_at=None):
             return None
         merged = dict(prior)
         merged["usage_label_source"] = "carried"
+        merged["usage_rank"] = usage_rank(merged["usage_label"])
+        merged.setdefault("output", OUTPUT_UNKNOWN)
         # keep the original observation time; a repeated carry must not advance it
         merged.setdefault("usage_label_observed", observed_at)
         merged["context"] = row.get("context")
@@ -232,7 +234,7 @@ def cmd_refresh(args):
             prior_cache = json.load(f)
     except FileNotFoundError:
         prior_cache = {}
-    except (OSError, json.JSONDecodeError) as ex:
+    except (OSError, ValueError) as ex:
         sys.stderr.write(f"ERROR: cannot read existing catalog cache {args.cache}: {ex}\n")
         return 1
     if (not isinstance(prior_cache, dict)

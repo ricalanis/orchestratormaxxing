@@ -125,6 +125,14 @@ assert merged["context"] == 1_000_000, f"C10 FAIL: fresh context not kept: {merg
 assert merged["modalities"] == ["Text", "Image"], f"C10 FAIL: fresh modalities not kept: {merged!r}"
 assert merged["usage_rank"] == 1, f"C10 FAIL: carried usage lost its rank: {merged!r}"
 
+legacy_prior = {"usage_label": "Medium Usage", "context": 256_000,
+                "modalities": ["Text"]}
+legacy_merged = merge_facts(legacy_prior, drows["qwen3.5:397b-cloud"])
+assert legacy_merged["usage_rank"] == 1, \
+    f"C10 FAIL: legacy carry did not restore usage_rank: {legacy_merged!r}"
+assert "output" in legacy_merged and legacy_merged["output"] is None, \
+    f"C10 FAIL: legacy carry did not restore output field: {legacy_merged!r}"
+
 # A repeated carry does NOT advance the observation timestamp.
 merged2 = merge_facts(merged, drows["qwen3.5:397b-cloud"])
 assert merged2["usage_label_observed"] == "2026-09-01T00:00:00Z", \
@@ -443,6 +451,15 @@ with tempfile.TemporaryDirectory() as d:
     assert open(corrupt, "rb").read() == corrupt_bytes, \
         "C13 FAIL: corrupt existing cache bytes were overwritten"
     assert not os.path.exists(corrupt + ".tmp"), "C13 FAIL: leftover .tmp"
+
+    invalid_utf8 = os.path.join(d, "invalid-utf8.json")
+    invalid_utf8_bytes = b'{"models":"\xff\xfe"}'
+    open(invalid_utf8, "wb").write(invalid_utf8_bytes)
+    g["urllib"].request.urlopen = forbidden_transport
+    rc, out = run(["refresh", "--cache", invalid_utf8])
+    assert rc != 0, "C13 FAIL: invalid UTF-8 cache returned success"
+    assert open(invalid_utf8, "rb").read() == invalid_utf8_bytes, \
+        "C13 FAIL: invalid UTF-8 cache bytes were overwritten"
 
     # Valid JSON with an unreadable schema is still existing evidence. Refuse
     # it before transport instead of laundering it into an empty prior cache.
