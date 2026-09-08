@@ -389,6 +389,22 @@ with tempfile.TemporaryDirectory() as d:
         "C11 FAIL: a zero-useful-facts refresh overwrote a good cache"
     assert not os.path.exists(good + ".tmp"), "C11 FAIL: leftover .tmp after refused refresh"
 
+    # ---- C11b: one successful page cannot hide loss of another live model
+    # that has prior evidence. Refuse the whole refresh and preserve bytes.
+    partial = os.path.join(d, "partial-good.json")
+    partial_bytes = json.dumps({"fetched_at": "2026-09-01T00:00:00Z", "models": {
+        "qwen3.5:397b": {"usage_label": "Medium Usage", "context": 256_000,
+                          "modalities": ["Text", "Image"]},
+        "broken-model": {"usage_label": "Low Usage", "context": 64_000,
+                          "modalities": ["Text"]}}}).encode("utf-8")
+    open(partial, "wb").write(partial_bytes)
+    g["urllib"].request.urlopen = make_stub(["qwen3.5:397b", "broken-model"])
+    rc, out = run(["refresh", "--cache", partial])
+    assert rc != 0, f"C11b FAIL: partial prior-fact loss returned success: {rc}"
+    assert open(partial, "rb").read() == partial_bytes, \
+        "C11b FAIL: partial degradation overwrote the good cache"
+    assert not os.path.exists(partial + ".tmp"), "C11b FAIL: leftover .tmp"
+
     # ---- C12: end-to-end — a degraded page (usage absent, context/modalities
     # present) with a prior cache carries the usage through the real refresh CLI.
     carry = os.path.join(d, "carry.json")
@@ -427,6 +443,18 @@ with tempfile.TemporaryDirectory() as d:
     assert open(corrupt, "rb").read() == corrupt_bytes, \
         "C13 FAIL: corrupt existing cache bytes were overwritten"
     assert not os.path.exists(corrupt + ".tmp"), "C13 FAIL: leftover .tmp"
+
+    # Valid JSON with an unreadable schema is still existing evidence. Refuse
+    # it before transport instead of laundering it into an empty prior cache.
+    for bad_shape in (["bad-root"], {"models": ["bad-models"]}):
+        shaped = os.path.join(d, "bad-shape.json")
+        shaped_bytes = json.dumps(bad_shape).encode("utf-8")
+        open(shaped, "wb").write(shaped_bytes)
+        g["urllib"].request.urlopen = forbidden_transport
+        rc, out = run(["refresh", "--cache", shaped])
+        assert rc != 0, f"C13 FAIL: invalid cache shape returned success: {bad_shape!r}"
+        assert open(shaped, "rb").read() == shaped_bytes, \
+            "C13 FAIL: invalid-shape cache bytes were overwritten"
 
 print("refresh-path offline checks pass")
 PY

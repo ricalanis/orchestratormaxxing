@@ -235,6 +235,10 @@ def cmd_refresh(args):
     except (OSError, json.JSONDecodeError) as ex:
         sys.stderr.write(f"ERROR: cannot read existing catalog cache {args.cache}: {ex}\n")
         return 1
+    if (not isinstance(prior_cache, dict)
+            or not isinstance(prior_cache.get("models", {}), dict)):
+        sys.stderr.write(f"ERROR: existing catalog cache {args.cache} has an invalid shape\n")
+        return 1
     key = load_key()
     ids = live_model_ids(key)
     pages, models, unknown = {}, {}, []
@@ -259,9 +263,19 @@ def cmd_refresh(args):
             sys.stderr.write(f"  ? {mid}: no published row — recorded UNKNOWN\n")
         else:
             models[mid] = facts
+    # A live model with prior facts must not disappear because its current page
+    # failed or became unparseable. Refuse the entire refresh so one successful
+    # page cannot mask partial evidence loss elsewhere.
+    unresolved_prior = sorted(mid for mid in ids
+                              if mid in prior_models and mid not in models)
+    if unresolved_prior:
+        sys.stderr.write("ERROR: refresh lost prior facts for live model(s): "
+                         + ", ".join(unresolved_prior)
+                         + " — refusing to overwrite the cache\n")
+        return 1
     # A refresh that resolves zero useful facts while the cache holds useful
-    # facts is a degraded probe, not a signal to erase good data. Refuse to
-    # clobber: return nonzero, leave the cache bytes untouched, no temp file.
+    # facts is a degraded probe even when those cached ids are no longer in the
+    # live list. Refuse to clobber it pending an explicit clean refresh.
     if not models and prior_models:
         sys.stderr.write("ERROR: refresh resolved no useful facts but the cache "
                          "holds useful facts — refusing to overwrite it\n")
