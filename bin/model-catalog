@@ -140,6 +140,56 @@ def facts_from_page(model_id, rows):
     }
 
 
+def cached_models(cache):
+    """Return prior per-model facts, or an empty mapping for a bad cache shape."""
+    if not isinstance(cache, dict):
+        return {}
+    models = cache.get("models", {})
+    return models if isinstance(models, dict) else {}
+
+
+def merge_facts(prior, row, observed_at=None):
+    """Merge a freshly parsed row with a previously observed model's facts.
+
+    A catalogue page can temporarily omit the usage tier while still publishing
+    context/modalities. Rather than drop the model (all-or-nothing) and let a
+    refresh clobber a good cache with the loss, carry the previously observed
+    usage — marked `usage_label_source="carried"` and keeping the original
+    `usage_label_observed` timestamp. Fresh fields (context/modalities) always
+    replace prior values; a later published usage removes the carry provenance.
+    Never invents a value: with no prior evidence and no published usage, the
+    result is None (UNKNOWN).
+    """
+    # Context is part of the fresh observation. Carrying only a stale usage
+    # label must not turn an otherwise empty row into a useful model record.
+    if row.get("context") is None:
+        return None
+    usage = row.get("usage_label")
+    if usage is None:
+        if not isinstance(prior, dict) or prior.get("usage_label") is None:
+            return None
+        merged = dict(prior)
+        merged["usage_label_source"] = "carried"
+        merged["usage_rank"] = usage_rank(merged["usage_label"])
+        merged.setdefault("output", OUTPUT_UNKNOWN)
+        # keep the original observation time; a repeated carry must not advance it
+        merged.setdefault("usage_label_observed", observed_at)
+        merged["context"] = row.get("context")
+        merged["modalities"] = row.get("modalities", [])
+        merged["vision"] = any(m.lower() in ("image", "video") for m in merged["modalities"])
+        return merged
+    return {
+        "usage_label": usage,
+        "usage_rank": usage_rank(usage),
+        "context": row.get("context"),
+        "output": OUTPUT_UNKNOWN,
+        "modalities": row.get("modalities", []),
+        "vision": any(m.lower() in ("image", "video") for m in row.get("modalities", [])),
+        "usage_label_source": "published",
+        "usage_label_observed": observed_at,
+    }
+
+
 # ------------------------------------------------------------------ transport
 def ssl_ctx():
     try:
@@ -176,9 +226,26 @@ def live_model_ids(key):
 
 # --------------------------------------------------------------------- verbs
 def cmd_refresh(args):
+    # A missing cache is the normal first-refresh case. Read any prior evidence
+    # quietly. Existing but unreadable/corrupt evidence fails closed: treating
+    # it as absent could let a degraded refresh overwrite the only good cache.
+    try:
+        with open(args.cache) as f:
+            prior_cache = json.load(f)
+    except FileNotFoundError:
+        prior_cache = {}
+    except (OSError, ValueError) as ex:
+        sys.stderr.write(f"ERROR: cannot read existing catalog cache {args.cache}: {ex}\n")
+        return 1
+    if (not isinstance(prior_cache, dict)
+            or not isinstance(prior_cache.get("models", {}), dict)):
+        sys.stderr.write(f"ERROR: existing catalog cache {args.cache} has an invalid shape\n")
+        return 1
     key = load_key()
     ids = live_model_ids(key)
     pages, models, unknown = {}, {}, []
+    prior_models = cached_models(prior_cache)
+    observed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     for mid in ids:
         slug = library_slug(mid)
         if slug not in pages:
@@ -187,14 +254,36 @@ def cmd_refresh(args):
             except urllib.error.URLError as ex:
                 sys.stderr.write(f"  ! {slug}: fetch failed ({ex.reason})\n")
                 pages[slug] = {}
+        row = pages[slug].get(row_name_for(mid))
         facts = facts_from_page(mid, pages[slug])
+        if facts is None and row is not None:
+            # page still publishes context/modalities but omits usage: carry the
+            # previously observed usage rather than drop the model (never invent)
+            facts = merge_facts(prior_models.get(mid), row, observed_at=observed_at)
         if facts is None:
             unknown.append(mid)
             sys.stderr.write(f"  ? {mid}: no published row — recorded UNKNOWN\n")
         else:
             models[mid] = facts
+    # A live model with prior facts must not disappear because its current page
+    # failed or became unparseable. Refuse the entire refresh so one successful
+    # page cannot mask partial evidence loss elsewhere.
+    unresolved_prior = sorted(mid for mid in ids
+                              if mid in prior_models and mid not in models)
+    if unresolved_prior:
+        sys.stderr.write("ERROR: refresh lost prior facts for live model(s): "
+                         + ", ".join(unresolved_prior)
+                         + " — refusing to overwrite the cache\n")
+        return 1
+    # A refresh that resolves zero useful facts while the cache holds useful
+    # facts is a degraded probe even when those cached ids are no longer in the
+    # live list. Refuse to clobber it pending an explicit clean refresh.
+    if not models and prior_models:
+        sys.stderr.write("ERROR: refresh resolved no useful facts but the cache "
+                         "holds useful facts — refusing to overwrite it\n")
+        return 1
     payload = {
-        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "fetched_at": observed_at,
         "source": "ollama.com/library (published rows)",
         "live_ids": ids,
         "unknown": unknown,

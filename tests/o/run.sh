@@ -12,14 +12,17 @@ TMUX_BIN="$(command -v tmux)"
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/o-runtime.XXXXXX")"
 STUBS="$SCRATCH/bin"
+export TMPDIR="$SCRATCH/tmp"
+mkdir -p "$TMPDIR"
 RUN_DIR="$ROOT/.results/delegation/o-runtime-$$"
 PROFILE_RUN_DIR="$ROOT/.results/delegation/o-runtime-profile-$$"
 DEFERRED_RUN_DIR="$ROOT/.results/delegation/o-runtime-deferred-$$"
 ENGLISH_RUN_DIR="$ROOT/.results/delegation/o-runtime-english-deferred-$$"
 MALFORMED_RUN_DIR="$ROOT/.results/delegation/o-runtime-malformed-$$"
 MARKED_RUN_DIR="$ROOT/.results/delegation/o-runtime-marked-$$"
+TIMEOUT_RUN_DIR="$ROOT/.results/delegation/o-runtime-timeout-$$"
 mkdir -p "$STUBS" "$RUN_DIR" "$PROFILE_RUN_DIR" "$DEFERRED_RUN_DIR" \
-  "$ENGLISH_RUN_DIR" "$MALFORMED_RUN_DIR" "$MARKED_RUN_DIR"
+  "$ENGLISH_RUN_DIR" "$MALFORMED_RUN_DIR" "$MARKED_RUN_DIR" "$TIMEOUT_RUN_DIR"
 export TMUX_TMPDIR="$SCRATCH/tmux"
 mkdir -p "$TMUX_TMPDIR"
 unset TMUX TMUX_PANE
@@ -29,7 +32,7 @@ cleanup() {
     [[ -n "$session" ]] && tmux kill-session -t "=$session" 2>/dev/null || true
   done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
   rm -rf "$SCRATCH" "$RUN_DIR" "$PROFILE_RUN_DIR" "$DEFERRED_RUN_DIR" \
-    "$ENGLISH_RUN_DIR" "$MALFORMED_RUN_DIR" "$MARKED_RUN_DIR"
+    "$ENGLISH_RUN_DIR" "$MALFORMED_RUN_DIR" "$MARKED_RUN_DIR" "$TIMEOUT_RUN_DIR"
 }
 trap cleanup EXIT
 fail() { printf 'o-runtime: %s\n' "$*" >&2; exit 1; }
@@ -338,6 +341,80 @@ assert row.get("text", "") != "FINAL-TURN-2", row
 PY
 done
 
+# Output-budget truncation is a failed turn with recoverable evidence. It must
+# be visible in the pane, remain rejected by handoff, and preserve both the
+# partial text and raw transport under restrictive permissions.
+rm -f "$RUN_DIR/output-partial.md"
+printf 'PARTIAL-SENTINEL' > "$RUN_DIR/partial-sentinel"
+ln "$RUN_DIR/partial-sentinel" "$RUN_DIR/output-partial.md"
+next_turn=$(( $(tmux show-options -v -t '=opencode-contract-first:' @orchestratormaxxing_turn) + 1 ))
+printf 'TRANSPORT-SENTINEL' > "$SCRATCH/transport-sentinel"
+ln -s "$SCRATCH/transport-sentinel" "$RUN_DIR/turn-${next_turn}.transport.log"
+"$O" send opencode-contract-first --prompt TRUNCATED_PARTIAL --json >/dev/null
+wait_pane_marker opencode-contract-first TURN-DONE-ERROR:truncated-length 6 \
+  || fail 'a length-truncated turn was reported as an idle success'
+set +e
+truncated="$($O handoff opencode-contract-first --timeout 5 --json)"
+truncated_rc=$?
+set -e
+[[ "$truncated_rc" -eq 65 ]] || fail "truncated handoff rc=$truncated_rc, wanted 65"
+python3 - "$truncated" "$RUN_DIR/output-partial.md" <<'PY'
+import json, os, stat, sys
+row = json.loads(sys.argv[1])
+assert row["status"] == "incomplete_tool_call", row
+assert row["text"] == "", row
+assert row["partial_bytes"] == len("PARTIAL-WORK"), row
+assert open(sys.argv[2]).read() == "PARTIAL-WORK"
+assert stat.S_IMODE(os.stat(sys.argv[2]).st_mode) == 0o600
+PY
+[[ "$(cat "$RUN_DIR/partial-sentinel")" == 'PARTIAL-SENTINEL' ]] \
+  || fail 'partial-output temp handling clobbered a pre-existing hardlink target'
+[[ "$(cat "$SCRATCH/transport-sentinel")" == 'TRANSPORT-SENTINEL' ]] \
+  || fail 'transport retention followed a pre-existing symlink target'
+[[ ! -L "$RUN_DIR/turn-${next_turn}.transport.log" ]] \
+  || fail 'transport retention did not replace the planted symlink entry'
+[[ ! -e "$RUN_DIR/output.md" || "$(cat "$RUN_DIR/output.md")" != 'PARTIAL-WORK' ]] \
+  || fail 'a truncated turn was published as an accepted output.md'
+python3 - "$RUN_DIR" <<'PY'
+import glob, os, stat, sys
+paths = glob.glob(os.path.join(sys.argv[1], "turn-*.transport.log"))
+assert paths, "run-turn deleted every transport log"
+assert all(stat.S_IMODE(os.stat(p).st_mode) == 0o600 for p in paths), paths
+PY
+
+# Compatibility callers may supply a readable non-.prompt file on a read-only
+# mount. They keep the old temporary-stream behavior; runtime turn-N.prompt
+# files above still retain their transport beside the prompt.
+compat_dir="$SCRATCH/read-only-prompt"
+mkdir "$compat_dir"
+printf 'COMPAT-PROMPT' > "$compat_dir/input.txt"
+chmod 555 "$compat_dir"
+set +e
+compat_out="$(ORCHESTRATORMAXXING_HARNESS_CHILD=1 ORCHESTRATORMAXXING_O_DELEGATED=1 \
+  "$O" run-turn --agent glm-coder --prompt-file "$compat_dir/input.txt" --timeout 3 2>&1)"
+compat_rc=$?
+set -e
+chmod 755 "$compat_dir"
+[[ "$compat_rc" -eq 0 ]] || fail "read-only compatibility prompt failed: $compat_out"
+[[ "$(cat "$compat_dir/input.txt")" == 'COMPAT-PROMPT' ]] \
+  || fail 'compatibility stream handling modified the prompt file'
+
+# An error after multiple message ids salvages only the latest message. Older
+# abandoned text must not be concatenated into misleading repair evidence.
+"$O" send opencode-contract-first --prompt ERROR_MULTI_PARTIAL --json >/dev/null
+set +e
+multi="$($O handoff opencode-contract-first --timeout 6 --json)"
+multi_rc=$?
+set -e
+[[ "$multi_rc" -eq 69 ]] || fail "multi-message timeout rc=$multi_rc, wanted 69"
+python3 - "$multi" "$RUN_DIR/output-partial.md" <<'PY'
+import json, sys
+row = json.loads(sys.argv[1])
+assert row["status"] == "provider_error", row
+assert row["partial_bytes"] == len("LATEST-PARTIAL"), row
+assert open(sys.argv[2]).read() == "LATEST-PARTIAL"
+PY
+
 # Bounded read distinguishes captured, truly empty, missing, and unreadable.
 captured="$($O output opencode-contract-first --lines 40 --json)"
 python3 - "$captured" <<'PY'
@@ -473,5 +550,43 @@ assert "opencode-contract-second" in row["sessions"], row
 PY
 ! tmux has-session -t '=opencode-contract-second' 2>/dev/null || fail 'reap did not close the idle delegated worker'
 tmux has-session -t '=opencode-empty' 2>/dev/null || fail 'reap killed an untagged session'
+
+# A stale handoff file with a current terminal binding used to run for longer
+# than --timeout because every fixed polling tick also paid interpreter startup.
+printf '# Acceptance\nA1 must pass.\n' > "$TIMEOUT_RUN_DIR/contract.md"
+printf '# Brief\nWork only in the current project.\n' > "$TIMEOUT_RUN_DIR/brief.md"
+chmod a-w "$TIMEOUT_RUN_DIR/contract.md" "$TIMEOUT_RUN_DIR/brief.md"
+timeout_delegated="$($O delegate handoff-timeout --agent glm-coder --run-dir "$TIMEOUT_RUN_DIR" --json)"
+[[ "$timeout_delegated" == *'"status":"sent"'* ]] || fail 'handoff-timeout delegation did not dispatch'
+sane_handoff="$($O handoff opencode-handoff-timeout --timeout 5 --json)"
+[[ "$sane_handoff" == *'"status":"completed_retrievable"'* ]] \
+  || fail 'handoff-timeout worker did not complete before corrupting its handoff.json'
+python3 -c 'import json,sys
+p=sys.argv[1]; o=json.load(open(p)); assert o["turn"]==1, o
+o["turn"]=99; json.dump(o, open(p,"w"))' "$TIMEOUT_RUN_DIR/handoff.json"
+
+REAL_PYTHON3="$(command -v python3)"
+SLOWDIR="$SCRATCH/slow-python3"
+mkdir -p "$SLOWDIR"
+cat > "$SLOWDIR/python3" <<SH
+#!/bin/sh
+sleep 0.6
+exec "$REAL_PYTHON3" "\$@"
+SH
+chmod +x "$SLOWDIR/python3"
+t0="$SECONDS"
+set +e
+slow_out="$(PATH="$SLOWDIR:$PATH" $O handoff opencode-handoff-timeout --timeout 2 --json)"
+slow_rc=$?
+set -e
+elapsed=$((SECONDS - t0))
+[[ "$slow_rc" -eq 4 ]] || fail "corrupted handoff did not fail typed (rc=$slow_rc)"
+[[ "$slow_out" == *'"status":"bound_not_retrievable"'* ]] \
+  || fail "expected bound_not_retrievable, got: $slow_out"
+[[ "$slow_out" == *'message_id=msg_fake'* && "$slow_out" == *'finish=stop'* ]] \
+  || fail "bound_not_retrievable detail lost terminal identity: $slow_out"
+[[ "$elapsed" -le 6 ]] \
+  || fail "o handoff exceeded its real timeout under slow validation: ${elapsed}s"
+$O close opencode-handoff-timeout --json >/dev/null
 
 printf 'o-runtime: PASS\n'
