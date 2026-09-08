@@ -566,8 +566,11 @@ PY
 )"
   # os.replace swaps the directory entry itself; it does not follow a symlink
   # already planted at the stable transport path.
-  python3 -c 'import os,sys; os.replace(sys.argv[1],sys.argv[2])' \
-    "$stream" "$final_stream" || return 1
+  if ! python3 -c 'import os,sys; os.replace(sys.argv[1],sys.argv[2])' \
+      "$stream" "$final_stream"; then
+    rm -f -- "$stream"
+    return 1
+  fi
   if printf '%s' "$payload" | o bind-event --json >/dev/null 2>&1 || printf '%s' "$payload" | command o bind-event --json >/dev/null 2>&1; then
     local turn; turn="$(printf '%s' "$payload" | python3 -c 'import json,sys
 d=json.load(sys.stdin)
