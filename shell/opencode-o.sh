@@ -482,7 +482,11 @@ _o_run_turn() {
   [[ "$timeout" =~ ^[0-9]+$ ]] && [[ "$timeout" -ge 1 ]] || timeout=600
   local oc; oc="$(command -v opencode 2>/dev/null)" || { echo 'o run-turn: opencode not on PATH' >&2; return 127; }
   local stream rc waited=0
-  stream="$(mktemp "${TMPDIR:-/tmp}/o-run-turn.XXXXXX")" || return 1
+  # A failed turn is the one whose raw event record matters most. Keep that
+  # record beside its prompt instead of deleting a temporary file after parse.
+  stream="${prompt_file%.prompt}.transport.log"
+  : >"$stream" 2>/dev/null || return 1
+  chmod 600 "$stream" 2>/dev/null || return 1
   local prompt_text; prompt_text="$(cat "$prompt_file")"
   local run_args=(run --format json --agent "$agent")
   [[ -n "$session" ]] && run_args+=(-s "$session")
@@ -545,6 +549,10 @@ if rc == 124:
 elif rc != 0:
     err = err or f"exit-{rc}"
 text = "".join(texts.get(mid, [])) if mid else ""
+# A timeout can happen after useful text but before the terminal message. Keep
+# that text available to the failed-turn recovery path below.
+if err and not text.strip():
+    text = "".join(chunk for chunks in texts.values() for chunk in chunks)
 if not sid:
     sid = "ses_unbound0"      # keeps the payload well-formed; error_code marks the failure
     err = err or "no-session"
@@ -554,9 +562,12 @@ print(json.dumps({"session_id": sid, "message_id": mid, "finish": finish or ("st
                   "text": text, "error_code": err}, separators=(",", ":")))
 PY
 )"
-  rm -f -- "$stream"
   if printf '%s' "$payload" | o bind-event --json >/dev/null 2>&1 || printf '%s' "$payload" | command o bind-event --json >/dev/null 2>&1; then
-    local turn; turn="$(printf '%s' "$payload" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("IDLE" if not d["error_code"] else "ERROR:"+d["error_code"])')"
+    local turn; turn="$(printf '%s' "$payload" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+if d["error_code"]: print("ERROR:"+d["error_code"])
+elif d["finish"] != "stop": print("ERROR:truncated-"+(d["finish"] or "unknown"))
+else: print("IDLE")')"
     echo "TURN-DONE-$turn"
   else
     echo "BIND-FAILED"
@@ -693,7 +704,7 @@ _o_handoff_worker() {
   [[ "$timeout" =~ ^[0-9]+$ ]] || { [[ "$as_json" == 1 ]] && _o_json_status invalid_limit "$sess" 'timeout must be a non-negative integer'; return 2; }
   _o_has_session "$sess" || { [[ "$as_json" == 1 ]] && _o_json_status missing "$sess" 'session absent'; return 3; }
   _o_owned_worker_session "$sess" || { [[ "$as_json" == 1 ]] && _o_json_status not_owned "$sess" 'delegation ownership binding required'; return 4; }
-  local run_abs turn waited=0 ticks file pending
+  local run_abs turn file pending
   run_abs="$(_o_worker_option "$sess" @orchestratormaxxing_run_dir)"
   turn="$(_o_worker_option "$sess" @orchestratormaxxing_turn)"
   [[ -n "$run_abs" && "$turn" =~ ^[1-9][0-9]*$ ]] || {
@@ -701,7 +712,9 @@ _o_handoff_worker() {
     return 4
   }
   file="$run_abs/handoff.json"
-  ticks=$((timeout * 5))
+  # Count real elapsed time. Interpreter startup and file validation are part
+  # of the advertised wait budget, not free work outside a fixed tick count.
+  local deadline=$((SECONDS + timeout))
   while :; do
     if [[ -f "$file" ]] && python3 -c 'import json,sys
 o=json.load(open(sys.argv[1]))
@@ -709,16 +722,32 @@ raise SystemExit(0 if o.get("worker_session")==sys.argv[2] and o.get("turn")==in
         "$file" "$sess" "$turn" 2>/dev/null; then
       break
     fi
-    [[ "$waited" -lt "$ticks" ]] || {
+    (( SECONDS < deadline )) || {
+      # binding.json is committed before handoff.json. If the terminal binding
+      # exists but the retrievable handoff never arrives, report that state
+      # distinctly from a turn that is still pending.
+      local bound=""
+      [[ -f "$run_abs/binding.json" ]] && bound="$(python3 -c 'import json,sys
+try:
+    o=json.load(open(sys.argv[1]))
+    if o.get("worker_session")==sys.argv[2] and o.get("turn")==int(sys.argv[3]) and (o.get("message_id") or o.get("error_code")):
+        print("opencode_session="+str(o.get("opencode_session_id",""))
+              +" message_id="+str(o.get("message_id",""))
+              +" finish="+str(o.get("finish","")))
+except Exception:
+    pass' "$run_abs/binding.json" "$sess" "$turn" 2>/dev/null)"
       pending="$(_o_worker_option "$sess" @orchestratormaxxing_pending)"
-      [[ "$as_json" == 1 ]] && _o_json_status readiness_failure "$sess" "turn $turn pending=${pending:-unknown}"
+      if [[ -n "$bound" ]]; then
+        [[ "$as_json" == 1 ]] && _o_json_status bound_not_retrievable "$sess" "turn $turn $bound"
+      else
+        [[ "$as_json" == 1 ]] && _o_json_status readiness_failure "$sess" "turn $turn pending=${pending:-unknown}"
+      fi
       return 4
     }
     sleep 0.2
-    waited=$((waited + 1))
   done
-  python3 -c 'import json,sys
-path,worker,turn,as_json=sys.argv[1],sys.argv[2],int(sys.argv[3]),sys.argv[4]=="1"
+  python3 -c 'import json,os,sys
+path,worker,turn,as_json,run_dir=sys.argv[1],sys.argv[2],int(sys.argv[3]),sys.argv[4]=="1",sys.argv[5]
 try:
     o=json.load(open(path))
     required={"schema_version","worker_session","turn","opencode_session_id",
@@ -744,6 +773,29 @@ try:
          "opencode_session":o["opencode_session_id"],
          "message_id":o["message_id"],"finish":finish,
          "bytes":n,"text":text if rc==0 else ""}
+    if rc != 0 and text.strip():
+        # Partial work is repair evidence, never an accepted output. Publishing
+        # is best-effort so a read-only run directory cannot erase the typed
+        # failure that the caller needs to act on.
+        tmp=os.path.join(run_dir,"output-partial.tmp")
+        dst=os.path.join(run_dir,"output-partial.md")
+        try:
+            flags=os.O_WRONLY|os.O_CREAT|os.O_TRUNC
+            if hasattr(os,"O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            fd=os.open(tmp,flags,0o600)
+            try:
+                with os.fdopen(fd,"wb") as stream:
+                    stream.write(text.encode("utf-8")); stream.flush(); os.fsync(stream.fileno())
+                os.chmod(tmp,0o600)
+                os.replace(tmp,dst)
+                row["partial_path"]=dst
+                row["partial_bytes"]=n
+            finally:
+                if os.path.exists(tmp): os.unlink(tmp)
+        except OSError:
+            row["partial_path"]=""
+            row["partial_bytes"]=n
     if as_json:
         print(json.dumps(row,separators=(",",":"),ensure_ascii=False))
     elif rc==0:
@@ -758,7 +810,7 @@ except Exception as exc:
          "detail":str(exc)[:80]}
     if as_json: print(json.dumps(row,separators=(",",":")))
     else: print("o handoff: malformed_handoff",file=sys.stderr)
-    raise SystemExit(65)' "$file" "$sess" "$turn" "$as_json"
+    raise SystemExit(65)' "$file" "$sess" "$turn" "$as_json" "$run_abs"
 }
 
 _o_output_worker() {

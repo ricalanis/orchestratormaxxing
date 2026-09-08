@@ -32,6 +32,9 @@ def payload_for(line: str, turn: int) -> dict[str, str]:
         base["finish"] = "error"
         base["text"] = ""
         base["error_code"] = "429"
+    elif "TRUNCATED_PARTIAL" in line:
+        base["finish"] = "length"
+        base["text"] = "PARTIAL-WORK"
     elif "OVERSIZE_FINAL" in line:
         base["text"] = "X" * 70000
     return base
