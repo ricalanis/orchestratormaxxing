@@ -21,7 +21,7 @@ mod = runpy.run_path(sys.argv[1])
 FIX = sys.argv[2]
 
 for name in ("parse_rows", "row_name_for", "parse_context", "USAGE_ORDER",
-             "usage_rank", "facts_from_page", "merge_facts"):
+             "usage_rank", "facts_from_page", "cached_models", "merge_facts"):
     assert name in mod, f"C0 FAIL: bin/model-catalog exposes no {name}"
 
 parse_rows = mod["parse_rows"]
@@ -29,7 +29,13 @@ row_name_for = mod["row_name_for"]
 parse_context = mod["parse_context"]
 usage_rank = mod["usage_rank"]
 facts_from_page = mod["facts_from_page"]
+cached_models = mod["cached_models"]
 merge_facts = mod["merge_facts"]
+
+assert cached_models(["bad-root"]) == {}, \
+    "C0 FAIL: non-object cache root was accepted"
+assert cached_models({"models": ["bad-models"]}) == {}, \
+    "C0 FAIL: non-object models collection was accepted"
 
 # ---- C1: exact facts out of a real saved page, no interpretation ------------
 qwen = open(f"{FIX}/qwen3.5.html").read()
@@ -142,6 +148,8 @@ assert recovered["usage_label_observed"] == "2026-09-08T00:00:00Z", \
 # semantics — merge_facts must not invent a value from nothing.
 assert merge_facts(None, drows["qwen3.5:397b-cloud"]) is None, \
     "C10 FAIL: merge_facts invented usage with no prior evidence"
+assert merge_facts("corrupt-cache-entry", drows["qwen3.5:397b-cloud"]) is None, \
+    "C10 FAIL: malformed prior cache entry was treated as usable evidence"
 # Prior usage alone cannot rescue a row that has also lost fresh context.
 assert merge_facts(prior, {"usage_label": None, "context": None,
                            "modalities": []}) is None, \

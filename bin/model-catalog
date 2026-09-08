@@ -140,6 +140,14 @@ def facts_from_page(model_id, rows):
     }
 
 
+def cached_models(cache):
+    """Return prior per-model facts, or an empty mapping for a bad cache shape."""
+    if not isinstance(cache, dict):
+        return {}
+    models = cache.get("models", {})
+    return models if isinstance(models, dict) else {}
+
+
 def merge_facts(prior, row, observed_at=None):
     """Merge a freshly parsed row with a previously observed model's facts.
 
@@ -158,7 +166,7 @@ def merge_facts(prior, row, observed_at=None):
         return None
     usage = row.get("usage_label")
     if usage is None:
-        if not prior or prior.get("usage_label") is None:
+        if not isinstance(prior, dict) or prior.get("usage_label") is None:
             return None
         merged = dict(prior)
         merged["usage_label_source"] = "carried"
@@ -226,7 +234,7 @@ def cmd_refresh(args):
             prior_cache = json.load(f)
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         prior_cache = {}
-    prior_models = prior_cache.get("models", {}) if prior_cache else {}
+    prior_models = cached_models(prior_cache)
     observed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     for mid in ids:
         slug = library_slug(mid)
