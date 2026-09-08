@@ -413,6 +413,21 @@ with tempfile.TemporaryDirectory() as d:
     assert cq["modalities"] == ["Text", "Image"], f"C12 FAIL: fresh modalities not kept: {cq!r}"
     assert not os.path.exists(carry + ".tmp"), "C12 FAIL: leftover .tmp"
 
+    # ---- C13: an existing but corrupt cache is evidence we cannot safely
+    # interpret, not the same as a normal first refresh. Fail before transport
+    # and preserve its bytes exactly.
+    corrupt = os.path.join(d, "corrupt.json")
+    corrupt_bytes = b'{"models":'
+    open(corrupt, "wb").write(corrupt_bytes)
+    def forbidden_transport(*_args, **_kwargs):
+        raise AssertionError("C13 FAIL: corrupt cache reached network transport")
+    g["urllib"].request.urlopen = forbidden_transport
+    rc, out = run(["refresh", "--cache", corrupt])
+    assert rc != 0, f"C13 FAIL: corrupt existing cache returned success: {rc}"
+    assert open(corrupt, "rb").read() == corrupt_bytes, \
+        "C13 FAIL: corrupt existing cache bytes were overwritten"
+    assert not os.path.exists(corrupt + ".tmp"), "C13 FAIL: leftover .tmp"
+
 print("refresh-path offline checks pass")
 PY
 

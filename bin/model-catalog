@@ -224,16 +224,20 @@ def live_model_ids(key):
 
 # --------------------------------------------------------------------- verbs
 def cmd_refresh(args):
-    key = load_key()
-    ids = live_model_ids(key)
-    pages, models, unknown = {}, {}, []
     # A missing cache is the normal first-refresh case. Read any prior evidence
-    # quietly here; the user-facing cache readers retain their existing errors.
+    # quietly. Existing but unreadable/corrupt evidence fails closed: treating
+    # it as absent could let a degraded refresh overwrite the only good cache.
     try:
         with open(args.cache) as f:
             prior_cache = json.load(f)
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
+    except FileNotFoundError:
         prior_cache = {}
+    except (OSError, json.JSONDecodeError) as ex:
+        sys.stderr.write(f"ERROR: cannot read existing catalog cache {args.cache}: {ex}\n")
+        return 1
+    key = load_key()
+    ids = live_model_ids(key)
+    pages, models, unknown = {}, {}, []
     prior_models = cached_models(prior_cache)
     observed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     for mid in ids:
