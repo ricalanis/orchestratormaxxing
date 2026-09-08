@@ -12,6 +12,8 @@ TMUX_BIN="$(command -v tmux)"
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/o-runtime.XXXXXX")"
 STUBS="$SCRATCH/bin"
+export TMPDIR="$SCRATCH/tmp"
+mkdir -p "$TMPDIR"
 RUN_DIR="$ROOT/.results/delegation/o-runtime-$$"
 PROFILE_RUN_DIR="$ROOT/.results/delegation/o-runtime-profile-$$"
 DEFERRED_RUN_DIR="$ROOT/.results/delegation/o-runtime-deferred-$$"
@@ -344,7 +346,7 @@ done
 # partial text and raw transport under restrictive permissions.
 rm -f "$RUN_DIR/output-partial.md"
 printf 'PARTIAL-SENTINEL' > "$RUN_DIR/partial-sentinel"
-ln "$RUN_DIR/partial-sentinel" "$RUN_DIR/output-partial.tmp"
+ln "$RUN_DIR/partial-sentinel" "$RUN_DIR/output-partial.md"
 next_turn=$(( $(tmux show-options -v -t '=opencode-contract-first:' @orchestratormaxxing_turn) + 1 ))
 printf 'TRANSPORT-SENTINEL' > "$SCRATCH/transport-sentinel"
 ln -s "$SCRATCH/transport-sentinel" "$RUN_DIR/turn-${next_turn}.transport.log"
@@ -378,6 +380,39 @@ import glob, os, stat, sys
 paths = glob.glob(os.path.join(sys.argv[1], "turn-*.transport.log"))
 assert paths, "run-turn deleted every transport log"
 assert all(stat.S_IMODE(os.stat(p).st_mode) == 0o600 for p in paths), paths
+PY
+
+# Compatibility callers may supply a readable non-.prompt file on a read-only
+# mount. They keep the old temporary-stream behavior; runtime turn-N.prompt
+# files above still retain their transport beside the prompt.
+compat_dir="$SCRATCH/read-only-prompt"
+mkdir "$compat_dir"
+printf 'COMPAT-PROMPT' > "$compat_dir/input.txt"
+chmod 555 "$compat_dir"
+set +e
+compat_out="$(ORCHESTRATORMAXXING_HARNESS_CHILD=1 ORCHESTRATORMAXXING_O_DELEGATED=1 \
+  "$O" run-turn --agent glm-coder --prompt-file "$compat_dir/input.txt" --timeout 3 2>&1)"
+compat_rc=$?
+set -e
+chmod 755 "$compat_dir"
+[[ "$compat_rc" -eq 0 ]] || fail "read-only compatibility prompt failed: $compat_out"
+[[ "$(cat "$compat_dir/input.txt")" == 'COMPAT-PROMPT' ]] \
+  || fail 'compatibility stream handling modified the prompt file'
+
+# An error after multiple message ids salvages only the latest message. Older
+# abandoned text must not be concatenated into misleading repair evidence.
+"$O" send opencode-contract-first --prompt ERROR_MULTI_PARTIAL --json >/dev/null
+set +e
+multi="$($O handoff opencode-contract-first --timeout 6 --json)"
+multi_rc=$?
+set -e
+[[ "$multi_rc" -eq 69 ]] || fail "multi-message timeout rc=$multi_rc, wanted 69"
+python3 - "$multi" "$RUN_DIR/output-partial.md" <<'PY'
+import json, sys
+row = json.loads(sys.argv[1])
+assert row["status"] == "provider_error", row
+assert row["partial_bytes"] == len("LATEST-PARTIAL"), row
+assert open(sys.argv[2]).read() == "LATEST-PARTIAL"
 PY
 
 # Bounded read distinguishes captured, truly empty, missing, and unreadable.

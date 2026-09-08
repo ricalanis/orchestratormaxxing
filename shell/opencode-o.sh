@@ -479,15 +479,24 @@ _o_run_turn() {
     esac
   done
   [[ -n "$agent" && -n "$prompt_file" && -r "$prompt_file" ]] || { echo 'o run-turn: --agent and a readable --prompt-file are required' >&2; return 2; }
-  [[ "$prompt_file" == *.prompt ]] || { echo 'o run-turn: --prompt-file must end in .prompt' >&2; return 2; }
   [[ "$timeout" =~ ^[0-9]+$ ]] && [[ "$timeout" -ge 1 ]] || timeout=600
   local oc; oc="$(command -v opencode 2>/dev/null)" || { echo 'o run-turn: opencode not on PATH' >&2; return 127; }
-  local stream final_stream rc waited=0
+  local stream final_stream="" retain_stream=0 rc waited=0
   # A failed turn is the one whose raw event record matters most. Keep that
   # record beside its prompt. Create exclusively under a random name first so
   # an existing symlink or hardlink at the stable name is never opened.
-  final_stream="${prompt_file%.prompt}.transport.log"
-  stream="$(mktemp "${final_stream}.tmp.XXXXXX")" || return 1
+  if [[ "$prompt_file" == *.prompt ]]; then
+    final_stream="${prompt_file%.prompt}.transport.log"
+    if stream="$(mktemp "${final_stream}.tmp.XXXXXX" 2>/dev/null)"; then
+      retain_stream=1
+    fi
+  fi
+  # Older machine callers could pass any readable file, including one on a
+  # read-only mount. Preserve that flow without weakening retention for the
+  # runtime-owned turn-N.prompt files used by delegation.
+  if [[ "$retain_stream" != 1 ]]; then
+    stream="$(mktemp "${TMPDIR:-/tmp}/o-run-turn.XXXXXX")" || return 1
+  fi
   chmod 600 "$stream" 2>/dev/null || { rm -f -- "$stream"; return 1; }
   local prompt_text; prompt_text="$(cat "$prompt_file")"
   local run_args=(run --format json --agent "$agent")
@@ -524,7 +533,7 @@ _o_run_turn() {
   payload="$(python3 - "$stream" "$rc" <<'PY'
 import json, sys
 path, rc = sys.argv[1], int(sys.argv[2])
-sid = ""; mid = ""; finish = ""; texts = {}; err = ""
+sid = ""; mid = ""; finish = ""; texts = {}; last_text_mid = ""; err = ""
 try:
     for raw in open(path, encoding="utf-8", errors="replace"):
         raw = raw.strip()
@@ -540,6 +549,7 @@ try:
         m = part.get("messageID")
         if t == "text" and isinstance(part.get("text"), str) and isinstance(m, str):
             texts.setdefault(m, []).append(part["text"])
+            last_text_mid = m
         elif t == "step_finish" and isinstance(m, str):
             mid = m; finish = str(part.get("reason") or "")
         elif t == "error":
@@ -554,7 +564,7 @@ text = "".join(texts.get(mid, [])) if mid else ""
 # A timeout can happen after useful text but before the terminal message. Keep
 # that text available to the failed-turn recovery path below.
 if err and not text.strip():
-    text = "".join(chunk for chunks in texts.values() for chunk in chunks)
+    text = "".join(texts.get(last_text_mid, []))
 if not sid:
     sid = "ses_unbound0"      # keeps the payload well-formed; error_code marks the failure
     err = err or "no-session"
@@ -564,12 +574,16 @@ print(json.dumps({"session_id": sid, "message_id": mid, "finish": finish or ("st
                   "text": text, "error_code": err}, separators=(",", ":")))
 PY
 )"
-  # os.replace swaps the directory entry itself; it does not follow a symlink
-  # already planted at the stable transport path.
-  if ! python3 -c 'import os,sys; os.replace(sys.argv[1],sys.argv[2])' \
-      "$stream" "$final_stream"; then
+  if [[ "$retain_stream" == 1 ]]; then
+    # os.replace swaps the directory entry itself; it does not follow a symlink
+    # already planted at the stable transport path.
+    if ! python3 -c 'import os,sys; os.replace(sys.argv[1],sys.argv[2])' \
+        "$stream" "$final_stream"; then
+      rm -f -- "$stream"
+      return 1
+    fi
+  else
     rm -f -- "$stream"
-    return 1
   fi
   if printf '%s' "$payload" | o bind-event --json >/dev/null 2>&1 || printf '%s' "$payload" | command o bind-event --json >/dev/null 2>&1; then
     local turn; turn="$(printf '%s' "$payload" | python3 -c 'import json,sys

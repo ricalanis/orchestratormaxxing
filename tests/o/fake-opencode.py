@@ -76,6 +76,15 @@ def run_mode(argv: list[str]) -> int:
         import time
         time.sleep(600)          # the runner's timeout is the only way out
         return 0
+    if "ERROR_MULTI_PARTIAL" in line:
+        base_mid = f"msg_fake{os.getpid()}_{turn}"
+        for suffix, text in (("old", "STALE-PARTIAL"), ("latest", "LATEST-PARTIAL")):
+            other_mid = f"{base_mid}_{suffix}"
+            print(json.dumps({"type": "text", "sessionID": sid,
+                              "part": {"type": "text", "sessionID": sid,
+                                       "messageID": other_mid, "text": text}},
+                             separators=(",", ":")), flush=True)
+        return 1                 # error after two message ids, no terminal event
     pay = payload_for(line, turn)
     pay["session_id"] = sid
     mid = pay["message_id"]
