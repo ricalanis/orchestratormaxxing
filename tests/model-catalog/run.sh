@@ -21,7 +21,7 @@ mod = runpy.run_path(sys.argv[1])
 FIX = sys.argv[2]
 
 for name in ("parse_rows", "row_name_for", "parse_context", "USAGE_ORDER",
-             "usage_rank", "facts_from_page"):
+             "usage_rank", "facts_from_page", "merge_facts"):
     assert name in mod, f"C0 FAIL: bin/model-catalog exposes no {name}"
 
 parse_rows = mod["parse_rows"]
@@ -29,6 +29,7 @@ row_name_for = mod["row_name_for"]
 parse_context = mod["parse_context"]
 usage_rank = mod["usage_rank"]
 facts_from_page = mod["facts_from_page"]
+merge_facts = mod["merge_facts"]
 
 # ---- C1: exact facts out of a real saved page, no interpretation ------------
 qwen = open(f"{FIX}/qwen3.5.html").read()
@@ -83,6 +84,68 @@ assert usage_rank("Low Usage") < usage_rank("Medium Usage") < usage_rank("High U
 # unknown model slip under a ceiling it was never measured against.
 assert usage_rank(None) is None and usage_rank("Bogus Usage") is None, \
     "C6 FAIL: an unknown usage label was given a rank"
+
+# ---- C10: a page that still publishes context/modalities but TEMPORARILY
+# omits the usage tier must not drop the model or clobber a good cache. The
+# prior usage is carried (marked + timestamped, never invented); fresh fields
+# stay fresh; a later published usage removes the carry provenance.
+# Synthetic markup: usage field absent, context + modalities present.
+degraded = ('<a href="/library/qwen3.5"><span><p>qwen3.5:397b-cloud</p></span>'
+            '<p class="flex text-neutral-500">1M context window · Text, Image</p></a>')
+drows = parse_rows(degraded)
+assert "qwen3.5:397b-cloud" in drows, "C10 FAIL: degraded row not parsed"
+assert drows["qwen3.5:397b-cloud"]["usage_label"] is None, \
+    "C10 FAIL: a missing usage label was invented"
+assert drows["qwen3.5:397b-cloud"]["context"] == 1_000_000, \
+    "C10 FAIL: context on a degraded row was lost"
+assert drows["qwen3.5:397b-cloud"]["modalities"] == ["Text", "Image"], \
+    "C10 FAIL: modalities on a degraded row were lost"
+
+# facts_from_page alone still refuses to fabricate usage for a degraded row.
+assert facts_from_page("qwen3.5:397b", drows) is None, \
+    "C10 FAIL: facts_from_page invented usage for a degraded row"
+
+# merge_facts carries the prior usage, marked + timestamped, keeps fresh fields.
+prior = {"usage_label": "Medium Usage", "usage_rank": 1, "context": 256_000,
+         "output": None, "modalities": ["Text", "Image"], "vision": True,
+         "usage_label_source": "published",
+         "usage_label_observed": "2026-09-01T00:00:00Z"}
+merged = merge_facts(prior, drows["qwen3.5:397b-cloud"])
+assert merged["usage_label"] == "Medium Usage", f"C10 FAIL: usage not carried: {merged!r}"
+assert merged["usage_label_source"] == "carried", f"C10 FAIL: carry not marked: {merged!r}"
+assert merged["usage_label_observed"] == "2026-09-01T00:00:00Z", \
+    f"C10 FAIL: original observation time not kept: {merged!r}"
+assert merged["context"] == 1_000_000, f"C10 FAIL: fresh context not kept: {merged!r}"
+assert merged["modalities"] == ["Text", "Image"], f"C10 FAIL: fresh modalities not kept: {merged!r}"
+assert merged["usage_rank"] == 1, f"C10 FAIL: carried usage lost its rank: {merged!r}"
+
+# A repeated carry does NOT advance the observation timestamp.
+merged2 = merge_facts(merged, drows["qwen3.5:397b-cloud"])
+assert merged2["usage_label_observed"] == "2026-09-01T00:00:00Z", \
+    f"C10 FAIL: repeated carry advanced the timestamp: {merged2!r}"
+
+# A later PUBLISHED usage removes the carry provenance.
+fresh = {"usage_label": "High Usage", "usage_rank": 2, "context": 1_000_000,
+         "output": None, "modalities": ["Text", "Image"], "vision": True,
+         "usage_label_source": "published",
+         "usage_label_observed": "2026-09-08T00:00:00Z"}
+recovered = merge_facts(merged2, {"usage_label": "High Usage", "context": 1_000_000,
+                                  "modalities": ["Text", "Image"]},
+                        observed_at="2026-09-08T00:00:00Z")
+assert recovered["usage_label"] == "High Usage", f"C10 FAIL: published usage not taken: {recovered!r}"
+assert recovered["usage_label_source"] == "published", \
+    f"C10 FAIL: carry provenance not removed on published usage: {recovered!r}"
+assert recovered["usage_label_observed"] == "2026-09-08T00:00:00Z", \
+    f"C10 FAIL: published observation time not taken: {recovered!r}"
+
+# Without prior evidence, missing usage stays UNKNOWN (None) under existing
+# semantics — merge_facts must not invent a value from nothing.
+assert merge_facts(None, drows["qwen3.5:397b-cloud"]) is None, \
+    "C10 FAIL: merge_facts invented usage with no prior evidence"
+# Prior usage alone cannot rescue a row that has also lost fresh context.
+assert merge_facts(prior, {"usage_label": None, "context": None,
+                           "modalities": []}) is None, \
+    "C10 FAIL: stale usage made an empty row look useful"
 print("parse checks pass")
 PY
 
@@ -133,6 +196,10 @@ pages = {
     "https://ollama.com/library/deepseek-v4-pro": open(f"{FIX}/deepseek-v4-pro.html").read(),
     "https://ollama.com/library/glm-5.3-flash": open(f"{FIX}/glm-5.3-flash.html").read(),
 }
+
+# synthetic degraded page: usage tier absent, context + modalities present
+degraded = ('<a href="/library/qwen3.5"><span><p>qwen3.5:397b-cloud</p></span>'
+            '<p class="flex text-neutral-500">1M context window · Text, Image</p></a>')
 
 class Resp:
     def __init__(self, body): self.body = body.encode("utf-8")
@@ -295,6 +362,48 @@ with tempfile.TemporaryDirectory() as d:
         raise AssertionError("C9e FAIL: an unreadable auth store did not abort refresh")
     except SystemExit as ex:
         assert "ERROR reading" in str(ex), f"C9e FAIL: wrong abort: {ex!r}"
+
+    # ---- C11: a refresh that resolves ZERO useful facts while the cache holds
+    # useful facts must NOT clobber the good cache. It returns nonzero, leaves
+    # the cache bytes unchanged, and leaves no temporary file.
+    json.dump({"ollama-cloud": {"key": "test-key-c8"}}, open(auth, "w"))
+    good = os.path.join(d, "good.json")
+    good_bytes = json.dumps({"fetched_at": "2026-09-01T00:00:00Z", "models": {
+        "qwen3.5:397b": {"usage_label": "Medium Usage", "context": 256_000,
+                         "modalities": ["Text", "Image"]}}}).encode("utf-8")
+    open(good, "wb").write(good_bytes)
+    # the only live id's library fetch fails -> zero useful facts resolved; the
+    # cache already holds useful facts, so the refresh must refuse to clobber it.
+    g["urllib"].request.urlopen = make_stub(["broken-model"])
+    rc, out = run(["refresh", "--cache", good])
+    assert rc != 0, f"C11 FAIL: a zero-useful-facts refresh must return nonzero, got {rc}"
+    assert open(good, "rb").read() == good_bytes, \
+        "C11 FAIL: a zero-useful-facts refresh overwrote a good cache"
+    assert not os.path.exists(good + ".tmp"), "C11 FAIL: leftover .tmp after refused refresh"
+
+    # ---- C12: end-to-end — a degraded page (usage absent, context/modalities
+    # present) with a prior cache carries the usage through the real refresh CLI.
+    carry = os.path.join(d, "carry.json")
+    json.dump({"fetched_at": "2026-09-01T00:00:00Z", "models": {
+        "qwen3.5:397b": {"usage_label": "Medium Usage", "usage_rank": 1,
+                         "context": 256_000, "output": None,
+                         "modalities": ["Text", "Image"], "vision": True,
+                         "usage_label_source": "published",
+                         "usage_label_observed": "2026-09-01T00:00:00Z"}}},
+        open(carry, "w"))
+    pages["https://ollama.com/library/qwen3.5"] = degraded
+    g["urllib"].request.urlopen = make_stub(["qwen3.5:397b"])
+    rc, out = run(["refresh", "--cache", carry])
+    assert rc == 0, f"C12 FAIL: degraded refresh with prior cache must exit 0, got {rc}"
+    cp = json.load(open(carry))
+    cq = cp["models"]["qwen3.5:397b"]
+    assert cq["usage_label"] == "Medium Usage", f"C12 FAIL: usage not carried: {cq!r}"
+    assert cq["usage_label_source"] == "carried", f"C12 FAIL: carry not marked: {cq!r}"
+    assert cq["usage_label_observed"] == "2026-09-01T00:00:00Z", \
+        f"C12 FAIL: original observation time not kept: {cq!r}"
+    assert cq["context"] == 1_000_000, f"C12 FAIL: fresh context not kept: {cq!r}"
+    assert cq["modalities"] == ["Text", "Image"], f"C12 FAIL: fresh modalities not kept: {cq!r}"
+    assert not os.path.exists(carry + ".tmp"), "C12 FAIL: leftover .tmp"
 
 print("refresh-path offline checks pass")
 PY

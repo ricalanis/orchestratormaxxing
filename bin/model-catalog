@@ -140,6 +140,46 @@ def facts_from_page(model_id, rows):
     }
 
 
+def merge_facts(prior, row, observed_at=None):
+    """Merge a freshly parsed row with a previously observed model's facts.
+
+    A catalogue page can temporarily omit the usage tier while still publishing
+    context/modalities. Rather than drop the model (all-or-nothing) and let a
+    refresh clobber a good cache with the loss, carry the previously observed
+    usage — marked `usage_label_source="carried"` and keeping the original
+    `usage_label_observed` timestamp. Fresh fields (context/modalities) always
+    replace prior values; a later published usage removes the carry provenance.
+    Never invents a value: with no prior evidence and no published usage, the
+    result is None (UNKNOWN).
+    """
+    # Context is part of the fresh observation. Carrying only a stale usage
+    # label must not turn an otherwise empty row into a useful model record.
+    if row.get("context") is None:
+        return None
+    usage = row.get("usage_label")
+    if usage is None:
+        if not prior or prior.get("usage_label") is None:
+            return None
+        merged = dict(prior)
+        merged["usage_label_source"] = "carried"
+        # keep the original observation time; a repeated carry must not advance it
+        merged.setdefault("usage_label_observed", observed_at)
+        merged["context"] = row.get("context")
+        merged["modalities"] = row.get("modalities", [])
+        merged["vision"] = any(m.lower() in ("image", "video") for m in merged["modalities"])
+        return merged
+    return {
+        "usage_label": usage,
+        "usage_rank": usage_rank(usage),
+        "context": row.get("context"),
+        "output": OUTPUT_UNKNOWN,
+        "modalities": row.get("modalities", []),
+        "vision": any(m.lower() in ("image", "video") for m in row.get("modalities", [])),
+        "usage_label_source": "published",
+        "usage_label_observed": observed_at,
+    }
+
+
 # ------------------------------------------------------------------ transport
 def ssl_ctx():
     try:
@@ -179,6 +219,15 @@ def cmd_refresh(args):
     key = load_key()
     ids = live_model_ids(key)
     pages, models, unknown = {}, {}, []
+    # A missing cache is the normal first-refresh case. Read any prior evidence
+    # quietly here; the user-facing cache readers retain their existing errors.
+    try:
+        with open(args.cache) as f:
+            prior_cache = json.load(f)
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        prior_cache = {}
+    prior_models = prior_cache.get("models", {}) if prior_cache else {}
+    observed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     for mid in ids:
         slug = library_slug(mid)
         if slug not in pages:
@@ -187,14 +236,26 @@ def cmd_refresh(args):
             except urllib.error.URLError as ex:
                 sys.stderr.write(f"  ! {slug}: fetch failed ({ex.reason})\n")
                 pages[slug] = {}
+        row = pages[slug].get(row_name_for(mid))
         facts = facts_from_page(mid, pages[slug])
+        if facts is None and row is not None:
+            # page still publishes context/modalities but omits usage: carry the
+            # previously observed usage rather than drop the model (never invent)
+            facts = merge_facts(prior_models.get(mid), row, observed_at=observed_at)
         if facts is None:
             unknown.append(mid)
             sys.stderr.write(f"  ? {mid}: no published row — recorded UNKNOWN\n")
         else:
             models[mid] = facts
+    # A refresh that resolves zero useful facts while the cache holds useful
+    # facts is a degraded probe, not a signal to erase good data. Refuse to
+    # clobber: return nonzero, leave the cache bytes untouched, no temp file.
+    if not models and prior_models:
+        sys.stderr.write("ERROR: refresh resolved no useful facts but the cache "
+                         "holds useful facts — refusing to overwrite it\n")
+        return 1
     payload = {
-        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "fetched_at": observed_at,
         "source": "ollama.com/library (published rows)",
         "live_ids": ids,
         "unknown": unknown,
