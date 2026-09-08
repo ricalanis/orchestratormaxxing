@@ -343,6 +343,11 @@ done
 # be visible in the pane, remain rejected by handoff, and preserve both the
 # partial text and raw transport under restrictive permissions.
 rm -f "$RUN_DIR/output-partial.md"
+printf 'PARTIAL-SENTINEL' > "$RUN_DIR/partial-sentinel"
+ln "$RUN_DIR/partial-sentinel" "$RUN_DIR/output-partial.tmp"
+next_turn=$(( $(tmux show-options -v -t '=opencode-contract-first:' @orchestratormaxxing_turn) + 1 ))
+printf 'TRANSPORT-SENTINEL' > "$SCRATCH/transport-sentinel"
+ln -s "$SCRATCH/transport-sentinel" "$RUN_DIR/turn-${next_turn}.transport.log"
 "$O" send opencode-contract-first --prompt TRUNCATED_PARTIAL --json >/dev/null
 wait_pane_marker opencode-contract-first TURN-DONE-ERROR:truncated-length 6 \
   || fail 'a length-truncated turn was reported as an idle success'
@@ -360,6 +365,12 @@ assert row["partial_bytes"] == len("PARTIAL-WORK"), row
 assert open(sys.argv[2]).read() == "PARTIAL-WORK"
 assert stat.S_IMODE(os.stat(sys.argv[2]).st_mode) == 0o600
 PY
+[[ "$(cat "$RUN_DIR/partial-sentinel")" == 'PARTIAL-SENTINEL' ]] \
+  || fail 'partial-output temp handling clobbered a pre-existing hardlink target'
+[[ "$(cat "$SCRATCH/transport-sentinel")" == 'TRANSPORT-SENTINEL' ]] \
+  || fail 'transport retention followed a pre-existing symlink target'
+[[ ! -L "$RUN_DIR/turn-${next_turn}.transport.log" ]] \
+  || fail 'transport retention did not replace the planted symlink entry'
 [[ ! -e "$RUN_DIR/output.md" || "$(cat "$RUN_DIR/output.md")" != 'PARTIAL-WORK' ]] \
   || fail 'a truncated turn was published as an accepted output.md'
 python3 - "$RUN_DIR" <<'PY'

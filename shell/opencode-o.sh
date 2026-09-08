@@ -479,14 +479,16 @@ _o_run_turn() {
     esac
   done
   [[ -n "$agent" && -n "$prompt_file" && -r "$prompt_file" ]] || { echo 'o run-turn: --agent and a readable --prompt-file are required' >&2; return 2; }
+  [[ "$prompt_file" == *.prompt ]] || { echo 'o run-turn: --prompt-file must end in .prompt' >&2; return 2; }
   [[ "$timeout" =~ ^[0-9]+$ ]] && [[ "$timeout" -ge 1 ]] || timeout=600
   local oc; oc="$(command -v opencode 2>/dev/null)" || { echo 'o run-turn: opencode not on PATH' >&2; return 127; }
-  local stream rc waited=0
+  local stream final_stream rc waited=0
   # A failed turn is the one whose raw event record matters most. Keep that
-  # record beside its prompt instead of deleting a temporary file after parse.
-  stream="${prompt_file%.prompt}.transport.log"
-  : >"$stream" 2>/dev/null || return 1
-  chmod 600 "$stream" 2>/dev/null || return 1
+  # record beside its prompt. Create exclusively under a random name first so
+  # an existing symlink or hardlink at the stable name is never opened.
+  final_stream="${prompt_file%.prompt}.transport.log"
+  stream="$(mktemp "${final_stream}.tmp.XXXXXX")" || return 1
+  chmod 600 "$stream" 2>/dev/null || { rm -f -- "$stream"; return 1; }
   local prompt_text; prompt_text="$(cat "$prompt_file")"
   local run_args=(run --format json --agent "$agent")
   [[ -n "$session" ]] && run_args+=(-s "$session")
@@ -562,6 +564,10 @@ print(json.dumps({"session_id": sid, "message_id": mid, "finish": finish or ("st
                   "text": text, "error_code": err}, separators=(",", ":")))
 PY
 )"
+  # os.replace swaps the directory entry itself; it does not follow a symlink
+  # already planted at the stable transport path.
+  python3 -c 'import os,sys; os.replace(sys.argv[1],sys.argv[2])' \
+    "$stream" "$final_stream" || return 1
   if printf '%s' "$payload" | o bind-event --json >/dev/null 2>&1 || printf '%s' "$payload" | command o bind-event --json >/dev/null 2>&1; then
     local turn; turn="$(printf '%s' "$payload" | python3 -c 'import json,sys
 d=json.load(sys.stdin)
@@ -746,7 +752,7 @@ except Exception:
     }
     sleep 0.2
   done
-  python3 -c 'import json,os,sys
+  python3 -c 'import json,os,sys,tempfile
 path,worker,turn,as_json,run_dir=sys.argv[1],sys.argv[2],int(sys.argv[3]),sys.argv[4]=="1",sys.argv[5]
 try:
     o=json.load(open(path))
@@ -777,13 +783,10 @@ try:
         # Partial work is repair evidence, never an accepted output. Publishing
         # is best-effort so a read-only run directory cannot erase the typed
         # failure that the caller needs to act on.
-        tmp=os.path.join(run_dir,"output-partial.tmp")
         dst=os.path.join(run_dir,"output-partial.md")
+        tmp=""
         try:
-            flags=os.O_WRONLY|os.O_CREAT|os.O_TRUNC
-            if hasattr(os,"O_NOFOLLOW"):
-                flags |= os.O_NOFOLLOW
-            fd=os.open(tmp,flags,0o600)
+            fd,tmp=tempfile.mkstemp(prefix=".output-partial.",dir=run_dir)
             try:
                 with os.fdopen(fd,"wb") as stream:
                     stream.write(text.encode("utf-8")); stream.flush(); os.fsync(stream.fileno())
