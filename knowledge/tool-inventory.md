@@ -26,6 +26,7 @@ not routed directly by an orchestrator session):
 - `codex-stop-hook` — fail-open Codex Stop hook emitting exactly one JSON object on stdout.
 - `opencode-browser-mcp` — MCP stdio server exposing Chrome CDP actions (navigate/click/type/extract/screenshot/eval) to OpenCode agents.
 - `orchestration-practice` — deterministic matcher and preflight receipt generator for the shared Orchestra-of-One practice catalog.
+- `slop-check` — lists Python slop on changed lines with pinned SlopCodeBench ast-grep rules; exit 0 clean, 1 findings, 2 cannot scan; see `deploy/slop-rules/README.md`.
 - `sync-agent-skills` — installs the pinned external skill stack into Claude, Codex, OpenCode, and Hermes.
 - `tmux-guard` — PATH shim that forwards normal tmux commands and refuses server-wide `kill-server` so one diagnostic cannot terminate every shared agent session.
 - `warp-agent-event` — emits one privacy-minimal Warp CLI-agent lifecycle event through tmux.

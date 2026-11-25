@@ -32,6 +32,8 @@ orchestrator/.hermes/
 test-results/
 # flock sentinels (knowledge/*.jsonl.lock)
 *.lock
+# pinned dependency locks under deploy/ are source, not flock sentinels
+!deploy/**/*.lock
 # build output of book/build-pdf.sh — regenerate, don't track
 book/*.pdf
 
