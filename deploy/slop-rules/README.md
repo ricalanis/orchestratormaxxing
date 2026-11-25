@@ -40,7 +40,8 @@ its own config; that reduces what a scanned repository can influence, and it is 
   repository with no commits is scanned whole.
 - Whole-path mode does not read `.gitignore`; diff mode does, so an ignored new file is not scanned.
   An explicit path that is not a Python file is skipped with "no Python files to check". One source
-  file that is not UTF-8, or one unreadable directory, makes the whole run exit 2.
+  file that is not UTF-8, one unreadable directory, or one unreadable file of any kind (the tool
+  reads the first line of every non-`.py` file to look for a shebang) makes the whole run exit 2.
 - An id in `default-rules.txt` that matches no rule exits 2. `install.sh` replaces the installed rule
   files and list and removes any other `*.yaml` in that directory. Keep custom rules in the
   repository copy, or in a directory named by `SLOP_CHECK_RULES`.
