@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Contract for bin/slop-check: pinned rules, changed-lines scope, and no false "clean".
 set -euo pipefail
+# Isolation: the caller's git environment and config never reach the fixtures or the tool.
+unset "${!GIT_@}"
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TOOL="$ROOT/bin/slop-check"
 RULES="$ROOT/deploy/slop-rules"
@@ -23,6 +26,7 @@ assert len(wanted) == len(set(wanted)) == 25, sorted(wanted)
 assert set(wanted) <= set(ids), set(wanted) - set(ids)
 lock = (rules / "requirements.lock").read_text()
 assert lock.startswith("ast-grep-cli==0.42.1") and lock.count("--hash=sha256:") >= 4
+assert all(re.fullmatch(r"[0-9a-f]{64}", h) for h in re.findall(r"--hash=sha256:(\S*)", lock)), lock
 PY
 
 # S2 (no venv needed): a missing venv is "cannot scan" (exit 2), never clean.
@@ -71,11 +75,96 @@ for record in '{}' '{"file":"/elsewhere.py","range":{"start":{"line":0},"end":{"
   ! grep -q Traceback "$TMP/err" || fail "S6 scanner record $record raised a traceback"
 done
 
-# Everything below needs the pinned ast-grep venv.
-if ! "$TOOL" --install --check >/dev/null 2>&1; then
-  echo "slop-check contract: SKIP: pinned ast-grep venv not installed (run: slop-check --install)"
-  exit "$HARNESS_SKIP_EXIT"
-fi
+# S7-S9 (no venv, no network): --install runs a stub uv placed first on PATH. The stub records its
+# arguments and working directory, fakes `venv` (the directory and bin/) and `pip install` (a
+# stub ast-grep that reports the pinned version), and fails `pip install` while $TMP/uv-fail exists.
+STUB="$TMP/stub-bin"; mkdir "$STUB" "$TMP/caller" "$TMP/inst"
+{ printf '#!/bin/sh\nLOG=%s\n' "$TMP"; cat <<'SH'; } > "$STUB/uv"; chmod +x "$STUB/uv"
+printf '%s\n' "$*" >> "$LOG/uv-args"; pwd -P >> "$LOG/uv-cwd"
+for arg; do case $arg in -*) ;; *) cmd=$arg; break ;; esac; done
+case $cmd in
+  venv) for arg; do dir=$arg; done; mkdir -p "$dir/bin" ;;
+  pip)
+    [ ! -e "$LOG/uv-fail" ] || exit 1
+    prev=; for arg; do [ "$prev" != --python ] || py=$arg; [ "$prev" != -r ] || req=$arg; prev=$arg; done
+    [ -f "$req" ] || exit 1  # like the real builder: the lock must be readable from here
+    printf '#!/bin/sh\necho "ast-grep 0.42.1"\n' > "$(dirname "$py")/ast-grep"; chmod +x "$(dirname "$py")/ast-grep" ;;
+  *) exit 1 ;;
+esac
+SH
+no_leftovers() { [ -z "$(ls -d "$TMP/inst"/*.new.* 2>/dev/null)" ]; }
+
+# S7: install builds beside the target and swaps it in, from the venv's parent, without uv config.
+rc=0; (cd "$TMP/caller" && PATH="$STUB:$PATH" SLOP_CHECK_VENV="$TMP/inst/venv" "$TOOL" --install >/dev/null 2>"$TMP/err") || rc=$?
+[ "$rc" = 0 ] || fail "S7 install with a stub uv exited $rc, wanted 0: $(tail -1 "$TMP/err")"
+cmp -s "$TMP/inst/venv/.lock-sha256" "$TMP/noexec-venv/.lock-sha256" || fail 'S7 install left no matching stamp'
+no_leftovers || fail "S7 install left a build directory: $(ls "$TMP/inst")"
+[ "$(grep -c -- '--no-config' "$TMP/uv-args")" = 2 ] || fail "S7 uv ran without --no-config: $(cat "$TMP/uv-args")"
+[ "$(sort -u "$TMP/uv-cwd")" = "$(cd "$TMP/inst" && pwd -P)" ] \
+  || fail "S7 builders ran from $(sort -u "$TMP/uv-cwd"), wanted the venv's parent"
+rc=0; SLOP_CHECK_VENV="$TMP/inst/venv" "$TOOL" --install --check >/dev/null 2>&1 || rc=$?
+[ "$rc" = 0 ] || fail "S7 --install --check after install exited $rc, wanted 0"
+
+# S7b: a relative SLOP_CHECK_RULES still installs (the builders run from another directory).
+ln -s "$RULES" "$TMP/caller/rules"
+rc=0; (cd "$TMP/caller" && PATH="$STUB:$PATH" SLOP_CHECK_RULES=rules SLOP_CHECK_VENV="$TMP/inst/venv" "$TOOL" --install >/dev/null 2>"$TMP/err") || rc=$?
+[ "$rc" = 0 ] || fail "S7b install with a relative SLOP_CHECK_RULES exited $rc, wanted 0: $(tail -1 "$TMP/err")"
+
+# S8: a failed build leaves the existing venv exactly as it was, and nothing beside it.
+cp -R "$TMP/inst/venv" "$TMP/inst-before"; : > "$TMP/uv-fail"
+rc=0; PATH="$STUB:$PATH" SLOP_CHECK_VENV="$TMP/inst/venv" "$TOOL" --install >/dev/null 2>"$TMP/err" || rc=$?
+rm "$TMP/uv-fail"
+[ "$rc" = 2 ] || fail "S8 failed build exited $rc, wanted 2"
+diff -r "$TMP/inst-before" "$TMP/inst/venv" >/dev/null || fail 'S8 a failed build changed the existing venv'
+no_leftovers || fail "S8 failed build left a build directory: $(ls "$TMP/inst")"
+grep -q 'removing uv from PATH' "$TMP/err" || fail "S8 uv failure did not name the pip builder: $(cat "$TMP/err")"
+
+# S9: --install --check runs the scanner: a stamped venv whose ast-grep reports another version is drift.
+cp -R "$TMP/inst-before" "$TMP/oldver-venv"; printf '#!/bin/sh\necho "ast-grep 0.41.0"\n' > "$TMP/oldver-venv/bin/ast-grep"
+rc=0; SLOP_CHECK_VENV="$TMP/oldver-venv" "$TOOL" --install --check >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] || fail "S9 --install --check accepted a scanner of another version (exit $rc)"
+
+# S10: argument combinations that make no sense are usage errors (exit 2), and nothing is built.
+for args in '--check' "--install $TMP/slop.py" '--install --diff HEAD' '--install --all-rules' "--max 0 $TMP/slop.py"; do
+  # shellcheck disable=SC2086 # one word per argument; $TMP has no spaces
+  rc=0; (cd "$TMP/caller" && PATH="$STUB:$PATH" SLOP_CHECK_VENV="$TMP/args-venv" "$TOOL" $args >/dev/null 2>"$TMP/err") || rc=$?
+  [ "$rc" = 2 ] && grep -q 'usage:' "$TMP/err" || fail "S10 '$args' exited $rc without a usage error: $(tail -1 "$TMP/err")"
+done
+[ ! -e "$TMP/args-venv" ] || fail 'S10 a refused --install still built a venv'
+
+# S11: an unknown default rule id, or SLOP_CHECK_RULES naming no rules directory, is "cannot scan".
+mkdir "$TMP/badids"; cp "$RULES"/* "$TMP/badids/"; echo no-such-rule >> "$TMP/badids/default-rules.txt"
+: > "$TMP/stub-out"
+rc=0; SLOP_CHECK_RULES="$TMP/badids" SLOP_CHECK_VENV="$TMP/stub-venv" "$TOOL" "$TMP/slop.py" >/dev/null 2>"$TMP/err" || rc=$?
+[ "$rc" = 2 ] && grep -q no-such-rule "$TMP/err" || fail "S11 unknown default rule id exited $rc: $(tail -1 "$TMP/err")"
+rc=0; SLOP_CHECK_RULES="$TMP/nowhere" SLOP_CHECK_VENV="$TMP/stub-venv" "$TOOL" "$TMP/slop.py" >/dev/null 2>"$TMP/err" || rc=$?
+[ "$rc" = 2 ] && grep -q SLOP_CHECK_RULES "$TMP/err" || fail "S11 missing SLOP_CHECK_RULES directory exited $rc: $(tail -1 "$TMP/err")"
+
+# S12: a crash is "cannot scan" (exit 2), never exit 1 like findings. Rule ids of mixed types
+# cannot be sorted, which nothing in the tool expects.
+printf '{"file":"%s","range":{"start":{"line":0},"end":{"line":0}},"ruleId":%s,"message":"m"}\n' \
+  "$TMP/slop.py" 1 "$TMP/slop.py" '"a"' > "$TMP/stub-out"
+rc=0; SLOP_CHECK_VENV="$TMP/stub-venv" "$TOOL" "$TMP/slop.py" >/dev/null 2>"$TMP/err" || rc=$?
+[ "$rc" = 2 ] || fail "S12 a crash exited $rc, wanted 2"
+grep -q 'cannot scan: internal error: TypeError' "$TMP/err" || fail "S12 crash not reported as internal error: $(tail -1 "$TMP/err")"
+
+# S13: a reader that closes the pipe early (slop-check | head) gets the normal code and no traceback.
+python3 -c 'import json, sys
+for n in range(5000):
+    print(json.dumps({"file": sys.argv[1], "range": {"start": {"line": n}, "end": {"line": n}}, "ruleId": "r", "message": "m" * 50}))' \
+  "$TMP/slop.py" > "$TMP/stub-out"
+rc=0; SLOP_CHECK_VENV="$TMP/stub-venv" "$TOOL" --max 5000 "$TMP/slop.py" 2>"$TMP/err" | head -1 >/dev/null || rc=${PIPESTATUS[0]}
+[ "$rc" = 1 ] || fail "S13 closed pipe exited $rc, wanted 1: $(tail -1 "$TMP/err")"
+[ ! -s "$TMP/err" ] || fail "S13 closed pipe was not quiet: $(tail -1 "$TMP/err")"
+
+# Everything below needs the pinned ast-grep venv: only drift (exit 1) skips; "cannot check" fails.
+rc=0; "$TOOL" --install --check >/dev/null 2>"$TMP/err" || rc=$?
+case "$rc" in
+  0) ;;
+  1) echo "slop-check contract: SKIP: pinned ast-grep venv not installed (run: slop-check --install)"
+     exit "$HARNESS_SKIP_EXIT" ;;
+  *) fail "venv gate: --install --check exited $rc: $(tail -1 "$TMP/err")" ;;
+esac
 
 scan_json() { local rc=0; "$TOOL" "$@" --json > "$TMP/out.json" || rc=$?; echo "$rc"; }
 field() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(eval(sys.argv[2]))' "$TMP/out.json" "$1"; }
@@ -190,6 +279,12 @@ printf 'except ValueError: pass\n' >> cr.py
 [ "$(scan_json)" = 1 ] || fail "C21 lone carriage return shifted added lines (false clean): $(cat "$TMP/out.json")"
 [ "$(field '[(f["file"].rsplit("/",1)[1], f["line"]) for f in d["findings"]]')" = "[('cr.py', 4)]" ] \
   || fail "C21 wrong line: $(cat "$TMP/out.json")"
+
+# C31: submodule entries in the compared tree are noted on stderr; the exit code does not change.
+git update-index --add --cacheinfo "160000,$(git rev-parse HEAD),sub"; git commit -qm sub
+rc=0; "$TOOL" >/dev/null 2>"$TMP/err" || rc=$?
+[ "$rc" = 1 ] || fail "C31 a submodule entry changed the exit code to $rc"
+grep -q 'note: 1 submodule path(s) not scanned' "$TMP/err" || fail "C31 skipped submodule not noted: $(cat "$TMP/err")"
 cd "$TMP"
 
 # C6: --all-rules really scans with the rules outside the default set.
@@ -227,7 +322,10 @@ for link in "$TMP/linked/link.py" "$TMP/loop.py"; do
 done
 
 # C22: a directory that cannot be read is "cannot scan" (exit 2), not "no Python files".
-if [ "$(id -u)" != 0 ]; then
+SKIPPED=''
+if [ "$(id -u)" = 0 ]; then
+  SKIPPED='; C22 skipped: root reads any directory'
+else
   mkdir -p "$TMP/locked/inner"; cp "$TMP/slop.py" "$TMP/locked/inner/a.py"; chmod 000 "$TMP/locked/inner"
   rc=0; "$TOOL" "$TMP/locked" >/dev/null 2>&1 || rc=$?
   chmod 755 "$TMP/locked/inner"
@@ -246,8 +344,9 @@ printf 'try:\n    x = 1\nexcept ValueError:\n    # sep\342\200\250here\n    pass
 
 # C25: a relative SLOP_CHECK_VENV works (the scanner runs from another directory).
 REAL_VENV="$(python3 -c 'import os,pathlib;print(os.environ.get("SLOP_CHECK_VENV") or pathlib.Path.home()/".local/share/orchestratormaxxing/slop-check/venv")')"
-ln -s "$REAL_VENV" "$TMP/rel-venv"
-rc=0; (cd "$TMP" && SLOP_CHECK_VENV=rel-venv "$TOOL" "$TMP/slop.py" >/dev/null 2>&1) || rc=$?
+ln -s "$REAL_VENV" "$TMP/rel-venv"; mkdir "$TMP/empty-home"
+# An empty HOME: were the relative path ignored, the default venv under HOME would not exist either.
+rc=0; (cd "$TMP" && HOME="$TMP/empty-home" SLOP_CHECK_VENV=rel-venv "$TOOL" "$TMP/slop.py" >/dev/null 2>&1) || rc=$?
 [ "$rc" = 1 ] || fail "C25 relative SLOP_CHECK_VENV exited $rc, wanted 1"
 
 # C26: a file past the scanner's size limit is "cannot scan" (the scanner would skip it silently).
@@ -259,4 +358,34 @@ python3 -c 'import sys; open(sys.argv[1], "w").write("# filler 1234567890\n" * 1
 [ "$(scan_json "$TMP/big.py")" = 1 ] || fail 'C26 a large file under the limit was not scanned'
 rm -f "$TMP/huge.py" "$TMP/big.py"
 
-echo 'slop-check contract: OK (S1-S6, C1-C26)'
+# C27: any file whose first line is a Python shebang is Python, whatever its suffix; a .pyi
+# without one is not.
+mkdir "$TMP/shebang"; cp "$TMP/tool" "$TMP/shebang/tool.v2"; cp "$TMP/slop.py" "$TMP/shebang/stub.pyi"
+[ "$(scan_json "$TMP/shebang")" = 1 ] || fail "C27 tool.v2 with a Python shebang not scanned: $(cat "$TMP/out.json")"
+[ "$(files_found)" = "['tool.v2']" ] || fail "C27 wrong files: $(files_found)"
+
+# C28: in a repository with no commits, default diff mode scans every Python file as new;
+# an explicit --diff that does not resolve is "not a revision".
+mkdir "$TMP/unborn"; cd "$TMP/unborn"; git init -q; cp "$TMP/slop.py" new.py
+[ "$(scan_json)" = 1 ] || fail "C28 repository with no commits not scanned: $(cat "$TMP/out.json")"
+[ "$(field '[(f["file"].rsplit("/",1)[1], f["line"]) for f in d["findings"]]')" = "[('new.py', 3)]" ] \
+  || fail "C28 wrong findings: $(cat "$TMP/out.json")"
+rc=0; "$TOOL" --diff nosuch >/dev/null 2>"$TMP/err" || rc=$?
+[ "$rc" = 2 ] && grep -q 'not a revision: nosuch' "$TMP/err" || fail "C28 --diff nosuch exited $rc: $(cat "$TMP/err")"
+cd "$TMP"
+
+# C29: control characters in a printed file name are shown escaped, never sent to the terminal raw.
+mkdir "$TMP/esc"; cp "$TMP/slop.py" "$TMP/esc/a"$'\033'"[31mb.py"
+out="$("$TOOL" "$TMP/esc" || true)"
+case "$out" in *$'\033'*) fail 'C29 printed a raw escape character' ;; esac
+case "$out" in *'esc/a\x1b[31mb.py:3 '*) ;; *) fail "C29 name not shown escaped: $out" ;; esac
+
+# C30: a directory holding pyvenv.cfg is a virtualenv under any name and is pruned below the scan root.
+mkdir -p "$TMP/venvs/proj/env/lib"; : > "$TMP/venvs/proj/env/pyvenv.cfg"
+cp "$TMP/slop.py" "$TMP/venvs/proj/app.py"; cp "$TMP/slop.py" "$TMP/venvs/proj/env/lib/dep.py"
+[ "$(scan_json "$TMP/venvs/proj")" = 1 ] && [ "$(files_found)" = "['app.py']" ] \
+  || fail "C30 virtualenv below the scan root not pruned: $(files_found)"
+[ "$(scan_json "$TMP/venvs/proj/env")" = 1 ] && [ "$(files_found)" = "['dep.py']" ] \
+  || fail "C30 a scan root holding pyvenv.cfg was pruned: $(files_found)"
+
+echo "slop-check contract: OK (S1-S13, C1-C31$SKIPPED)"

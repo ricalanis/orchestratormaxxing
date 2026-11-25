@@ -130,6 +130,8 @@ mkdir -p "$SHARE_DIR"
 cp "$REPO_DIR/bin/slop-check"    "$BIN_DST/slop-check"
 chmod +x "$BIN_DST/slop-check"
 mkdir -p "$SHARE_DIR/slop-rules"
+# Old rule files go first, so a rule that no longer ships cannot stay loaded.
+rm -f "$SHARE_DIR"/slop-rules/*.yaml
 cp "$REPO_DIR"/deploy/slop-rules/* "$SHARE_DIR/slop-rules/"
 "$BIN_DST/slop-check" --install --check >/dev/null 2>&1 || echo "  NOTE: slop-check venv not built; run: slop-check --install"
 chmod +x "$BIN_DST/o"
