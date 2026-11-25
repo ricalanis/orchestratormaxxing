@@ -281,7 +281,7 @@
       ],
       "license": "MIT",
       "tree_sha256": "958bb6b5ed189d1da3359cdc2cd5230a261c3f248892fe1e37588e8eaa86d22c",
-      "note": "Adopted verbatim: forward-looking one-decision-at-a-time drill (top four choices, stated preference, wait for the user) for plans with unresolved choices — the retrospective sibling is decisions.",
+      "note": "Adopted verbatim: forward-looking one-decision-at-a-time drill (top four choices, stated preference, wait for the user) for plans with unresolved choices \u2014 the retrospective sibling is decisions.",
       "targets": [
         "Claude",
         "Codex",
@@ -465,6 +465,26 @@
       "targets": [
         "OpenCode",
         "Hermes"
+      ]
+    },
+    {
+      "name": "no-slop",
+      "kind": "internal-router",
+      "repo": "local://orchestratormaxxing",
+      "commit": "0000000000000000000000000000000000000000",
+      "path": "skills/no-slop",
+      "include": [
+        "SKILL.md"
+      ],
+      "license": "MIT",
+      "tree_sha256": "3abd04f4e97db00ef798d3daf38a6c8cc373248d88648d423d1587a7f361f82c",
+      "note": "This repo's own wording of actions drawn from the No AI Slop manifesto (gist dexhorthy/4cc96f01be5b1208519e75dad250a948; ideas only, no text copied); pairs with bin/slop-check.",
+      "targets": [
+        "Claude",
+        "Codex",
+        "OpenCode",
+        "Hermes",
+        "Warp"
       ]
     }
   ]

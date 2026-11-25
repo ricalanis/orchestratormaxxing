@@ -28,7 +28,7 @@ expected = {
     "decisions", "next-decision",
     "cheap-delegate", "fanout", "gauntlet", "i-have-adhd",
     "ideas", "memory", "self-improve", "solplan", "wrap-up",
-    "worktree",
+    "worktree", "no-slop",
 }
 assert {item["name"] for item in data["skills"]} == expected
 assert all(re.fullmatch(r"[0-9a-f]{40}", item["commit"]) for item in data["skills"])

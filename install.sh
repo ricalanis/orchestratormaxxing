@@ -124,6 +124,14 @@ cp "$REPO_DIR/bin/agent-guard"   "$BIN_DST/agent-guard"
 
 cp "$REPO_DIR/bin/xsearch"     "$BIN_DST/xsearch"
 mkdir -p "$SHARE_DIR"
+# bin/slop-check — lists Python slop on changed lines with the pinned rules in
+# deploy/slop-rules. Its ast-grep venv is built only by the explicit `slop-check --install`
+# (hash-locked from requirements.lock) — this installer downloads nothing.
+cp "$REPO_DIR/bin/slop-check"    "$BIN_DST/slop-check"
+chmod +x "$BIN_DST/slop-check"
+mkdir -p "$SHARE_DIR/slop-rules"
+cp "$REPO_DIR"/deploy/slop-rules/* "$SHARE_DIR/slop-rules/"
+"$BIN_DST/slop-check" --install --check >/dev/null 2>&1 || echo "  NOTE: slop-check venv not built; run: slop-check --install"
 chmod +x "$BIN_DST/o"
 rm -rf -- "$SHARE_DIR/orchestration_practices"
 cp -R "$REPO_DIR/orchestration_practices" "$SHARE_DIR/orchestration_practices"

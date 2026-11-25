@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+"""Report Python slop on the lines you changed, using the pinned SlopCodeBench rules.
+
+  slop-check                     changed lines since HEAD, plus untracked files (the usual call)
+  slop-check --diff REV          changed lines since REV, plus untracked files
+  slop-check PATH ...            whole files or directories
+  slop-check --install [--check] build or check the hash-locked ast-grep venv
+
+Options: --all-rules (all 197 rules, default is the 25 in default-rules.txt), --max N, --json.
+Exit 0 clean, 1 findings, 2 cannot scan (not installed, not a git repo, bad path). A scan that
+could not run never reports clean. --install --check exits 0 current, 1 drift, 2 cannot check.
+
+Diff mode never runs `git diff`: it compares the raw blobs of REV with the working tree bytes, so
+the repository's attributes, filters and pathspec magic in file names cannot hide lines or run programs.
+
+Environment: SLOP_CHECK_RULES (rules directory) and SLOP_CHECK_VENV (venv path) are trusted inputs.
+Point them only at directories you control: the rules directory's lock decides what --install installs.
+"""
+from __future__ import annotations
+
+import argparse
+import difflib
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+AST_GREP_VERSION = "0.42.1"
+SHARE = Path.home() / ".local/share/orchestratormaxxing"
+RULE_ID = re.compile(r"^id:\s*(\S+)", re.MULTILINE)
+# The repository may be untrusted: git must not fetch a missing object, prompt, or take index locks.
+GIT_ENV = {"GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"}
+# Directory names a whole-path scan never descends into (only below the scan root).
+# ast-grep 0.42.1 skips, without an error, a file over 3,000,000 bytes and 200,000 lines; refuse a little earlier.
+SCANNER_MAX_BYTES, SCANNER_MAX_LINES = 2_900_000, 190_000
+PRUNED_DIRS = {".venv", ".git", "node_modules", "__pycache__"}
+
+
+class CannotScan(Exception):
+    """The scan could not run; the caller must not treat this as clean."""
+
+
+def rules_dir() -> Path:
+    in_tree = Path(__file__).resolve().parent.parent / "deploy/slop-rules"
+    for candidate in (Path(os.environ.get("SLOP_CHECK_RULES", "")), in_tree, SHARE / "slop-rules"):
+        if str(candidate) not in ("", ".") and (candidate / "default-rules.txt").is_file():
+            if not (candidate / "requirements.lock").is_file():
+                raise CannotScan(f"{candidate} has no requirements.lock: reinstall the rules")
+            return candidate
+    raise CannotScan("rules not found: run install.sh, or set SLOP_CHECK_RULES")
+
+
+def venv_dir() -> Path:
+    # Absolute: the scanner runs from another directory. An empty value means unset.
+    return Path(os.path.abspath(os.environ.get("SLOP_CHECK_VENV") or SHARE / "slop-check/venv"))
+
+
+def lock_hash(rules: Path) -> str:
+    return hashlib.sha256((rules / "requirements.lock").read_bytes()).hexdigest()
+
+
+def ast_grep() -> Path:
+    binary = venv_dir() / "bin/ast-grep"
+    stamp = venv_dir() / ".lock-sha256"
+    if not os.access(binary, os.X_OK) or not stamp.is_file():
+        raise CannotScan(f"ast-grep venv missing at {venv_dir()}: run slop-check --install")
+    if stamp.read_text().strip() != lock_hash(rules_dir()):
+        raise CannotScan("ast-grep venv was built from another lock: run slop-check --install")
+    return binary
+
+
+def install(check: bool) -> int:
+    rules, venv = rules_dir(), venv_dir()
+    stamp = venv / ".lock-sha256"
+    current = (stamp.is_file() and stamp.read_text().strip() == lock_hash(rules)
+               and os.access(venv / "bin/ast-grep", os.X_OK))
+    if check:
+        print("slop-check: venv matches lock" if current else f"slop-check: DRIFT venv at {venv} does not match lock")
+        return 0 if current else 1
+    if venv.is_dir() and any(venv.iterdir()) and not stamp.is_file():
+        raise CannotScan(f"refusing to replace {venv}: it has no slop-check {stamp.name} stamp. "
+                         "Remove the directory or choose another path (SLOP_CHECK_VENV)")
+    lock = rules / "requirements.lock"
+    if shutil.which("uv"):
+        create = ["uv", "venv", "-q", "--clear", str(venv)]
+        fill = ["uv", "pip", "install", "-q", "--python", str(venv / "bin/python"), "--require-hashes", "-r", str(lock)]
+    else:
+        create = [sys.executable, "-m", "venv", "--clear", str(venv)]
+        fill = [str(venv / "bin/pip"), "install", "-q", "--require-hashes", "-r", str(lock)]
+    try:
+        subprocess.run(create, check=True)
+        stamp.write_text("incomplete\n")  # claims the directory, so a failed build can be retried
+        subprocess.run(fill, check=True)
+    except (subprocess.CalledProcessError, OSError) as error:
+        raise CannotScan(f"venv build failed: {error}") from error
+    version = subprocess.run([str(venv / "bin/ast-grep"), "--version"], capture_output=True, text=True).stdout
+    if AST_GREP_VERSION not in version:
+        print(f"slop-check: installed ast-grep reports {version.strip()!r}, wanted {AST_GREP_VERSION}", file=sys.stderr)
+        return 2
+    stamp.write_text(lock_hash(rules) + "\n")
+    print(f"slop-check: installed ast-grep {AST_GREP_VERSION} at {venv}")
+    return 0
+
+
+def rule_documents(rules: Path, all_rules: bool) -> tuple[str, int]:
+    wanted = set((rules / "default-rules.txt").read_text().split())
+    docs = []
+    for path in sorted(rules.glob("*.yaml")):
+        for doc in re.split(r"^---\s*$", path.read_text(), flags=re.MULTILINE):
+            match = RULE_ID.search(doc)
+            if match and (all_rules or match.group(1) in wanted):
+                docs.append(doc.strip())
+    if not docs:
+        raise CannotScan(f"no rules selected from {rules}")
+    return "\n---\n".join(docs) + "\n", len(docs)
+
+
+def is_python(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    if path.suffix:
+        return path.suffix == ".py"
+    with path.open("rb") as stream:
+        first = stream.readline(200)
+    return first.startswith(b"#!") and b"python" in first
+
+
+def git(*args: str, cwd: Path, stdin: bytes = b"") -> bytes:
+    # Only commands that list names or print raw objects: none of them reads attributes or runs a filter.
+    command = ["git", "-c", "core.fsmonitor=false", "-c", "protocol.allow=never", *args]
+    result = subprocess.run(command, cwd=cwd, input=stdin, capture_output=True, env={**os.environ, **GIT_ENV})
+    if result.returncode != 0:
+        raise CannotScan(f"git {' '.join(args)} failed: {result.stderr.decode(errors='replace').strip()}")
+    return result.stdout
+
+
+def names(listing: bytes) -> list[str]:
+    """Split -z output; os.fsdecode keeps any byte sequence as a usable path."""
+    return [os.fsdecode(name) for name in listing.split(b"\0") if name]
+
+
+def old_blobs(commit: str, root: Path) -> dict[str, str]:
+    """Map each regular file in the commit to its blob id; symlinks and submodules are left out."""
+    blobs = {}
+    for record in names(git("ls-tree", "-r", "-z", "--full-tree", commit, cwd=root)):
+        meta, _, name = record.partition("\t")
+        mode, kind, sha = meta.split()
+        if kind == "blob" and mode != "120000":
+            blobs[name] = sha
+    return blobs
+
+
+def read_blobs(shas: set[str], root: Path) -> dict[str, bytes]:
+    """Raw bytes of each blob from one `git cat-file --batch` process; a missing object cannot be scanned."""
+    order = sorted(shas)
+    out = git("cat-file", "--batch", cwd=root, stdin="".join(f"{sha}\n" for sha in order).encode())
+    blobs, start = {}, 0
+    for sha in order:
+        end = out.index(b"\n", start)
+        header = out[start:end].split()
+        if header[:2] != [sha.encode(), b"blob"] or len(header) != 3:
+            raise CannotScan(f"git object {sha} is missing: {out[start:end].decode(errors='replace')}")
+        size = int(header[2])
+        blobs[sha] = out[end + 1:end + 1 + size]
+        start = end + 2 + size
+    return blobs
+
+
+def scanner_lines(text: bytes) -> list[bytes]:
+    """Lines as the scanner counts them: split on \\n only, so a lone \\r does not start a line.
+    Like splitlines, a final \\n ends the last line rather than starting an empty one."""
+    return [line.removesuffix(b"\r") for line in text.removesuffix(b"\n").split(b"\n")]
+
+
+def added_lines(old: bytes, new: bytes) -> set[int]:
+    matcher = difflib.SequenceMatcher(None, scanner_lines(old), scanner_lines(new), autojunk=False)
+    return {line + 1 for op, _, _, first, last in matcher.get_opcodes()
+            if op in ("replace", "insert") for line in range(first, last)}
+
+
+def changed_lines(rev: str) -> dict[Path, set[int] | None]:
+    """Map each changed Python file to its added line numbers; None means every line (new since REV)."""
+    if rev.startswith("-"):
+        raise CannotScan(f"not a revision: {rev}")
+    root = Path(os.fsdecode(git("rev-parse", "--show-toplevel", cwd=Path.cwd()).rstrip(b"\n")))
+    commit = git("rev-parse", "--verify", "--quiet", "--end-of-options", f"{rev}^{{commit}}", cwd=root).decode().strip()
+    old = old_blobs(commit, root)
+    listed = names(git("ls-files", "-z", cwd=root) + git("ls-files", "--others", "--exclude-standard", "-z", cwd=root))
+    # A symlink could point outside the repository; only regular files are read.
+    current = sorted(name for name in set(listed) if not (root / name).is_symlink() and is_python(root / name))
+    blobs = read_blobs({old[name] for name in current if name in old}, root)
+    changed: dict[Path, set[int] | None] = {}
+    for name in current:
+        new = (root / name).read_bytes()
+        if name not in old:
+            changed[root / name] = None
+        elif new != blobs[old[name]]:
+            changed[root / name] = added_lines(blobs[old[name]], new)
+    return changed
+
+
+def unreadable(error: OSError) -> None:
+    """os.walk skips a directory it cannot list; a scan that skipped one must not report clean."""
+    raise CannotScan(f"cannot read {error.filename}: {error.strerror}")
+
+
+def tree_files(root: Path) -> list[Path]:
+    """Python files below root; links are never followed and only names below root are pruned."""
+    found: list[Path] = []
+    for top, dirs, filenames in os.walk(root, followlinks=False, onerror=unreadable):
+        for name in PRUNED_DIRS.intersection(dirs):
+            dirs.remove(name)  # in place: os.walk descends only into what is left
+        found.extend(Path(top) / name for name in filenames)
+    return sorted(path for path in found if not path.is_symlink() and is_python(path))
+
+
+def whole_files(paths: list[str]) -> dict[Path, set[int] | None]:
+    files: dict[Path, set[int] | None] = {}
+    for raw in paths:
+        # abspath, not resolve: no link is followed, so a symlink loop cannot raise.
+        path = Path(os.path.abspath(raw))
+        if path.is_symlink():
+            raise CannotScan(f"{raw} is a symlink; symlinks are not scanned")
+        if path.is_dir():
+            files.update({p: None for p in tree_files(path)})
+        elif is_python(path):
+            files[path] = None
+        elif not path.exists():
+            raise CannotScan(f"no such path: {raw}")
+    return files
+
+
+def require_scannable(files: dict[Path, set[int] | None]) -> None:
+    """The scanner skips some files without an error; refuse them instead of reporting clean."""
+    for path in files:
+        data = path.read_bytes()
+        try:
+            data.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise CannotScan(f"{path} is not UTF-8; the scanner would skip it") from error
+        if len(data) > SCANNER_MAX_BYTES and data.count(b"\n") > SCANNER_MAX_LINES:
+            raise CannotScan(f"{path} is too large for the scanner; it would skip it")
+
+
+def scan(files: dict[Path, set[int] | None], rule_text: str) -> list[dict]:
+    binary = ast_grep()
+    require_scannable(files)
+    with tempfile.TemporaryDirectory(prefix="slop-check.") as tmp:
+        rule_file = Path(tmp) / "rules.yaml"
+        rule_file.write_text(rule_text)
+        # ast-grep picks the language by extension; give extensionless scripts a .py alias.
+        alias = {}
+        for index, path in enumerate(files):
+            target = path if path.suffix == ".py" else Path(tmp) / f"script{index}.py"
+            if target != path:
+                shutil.copyfile(path, target)
+            alias[str(target)] = path
+        # Own config and cwd: ast-grep would otherwise load sgconfig.yml from the scanned repository,
+        # and that file can name a shared library to load.
+        config = Path(tmp) / "sgconfig.yml"
+        config.write_text("ruleDirs: []\n")
+        command = [str(binary), "scan", "--json=stream", "--config", str(config), "-r", str(rule_file), *alias]
+        result = subprocess.run(command, cwd=tmp, capture_output=True, text=True)
+        if result.returncode not in (0, 1):
+            raise CannotScan(f"ast-grep failed ({result.returncode}): {result.stderr.strip()[-300:]}")
+        found = []
+        for line in filter(None, result.stdout.split("\n")):  # not splitlines: a record may hold U+2028
+            hit = json.loads(line)
+            try:
+                path = alias[hit["file"]]  # ast-grep echoes the path it was given
+                first, last = hit["range"]["start"]["line"] + 1, hit["range"]["end"]["line"] + 1
+                wanted = files[path]
+                if wanted is None or any(n in wanted for n in range(first, last + 1)):
+                    found.append({"file": str(path), "line": first, "rule": hit["ruleId"], "message": hit["message"]})
+            except (KeyError, TypeError) as error:
+                raise CannotScan(f"unexpected ast-grep record: {line[:200]}") from error
+    return sorted(found, key=lambda f: (f["file"], f["line"], f["rule"]))
+
+
+def display(path: str) -> str:
+    try:
+        return str(Path(path).relative_to(Path.cwd()))
+    except ValueError:
+        return path
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("paths", nargs="*")
+    parser.add_argument("--diff", metavar="REV")
+    parser.add_argument("--all-rules", action="store_true")
+    parser.add_argument("--max", type=int, default=15)
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--install", action="store_true")
+    parser.add_argument("--check", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        if args.install:
+            return install(args.check)
+        if args.paths and args.diff:
+            raise CannotScan("give paths or --diff, not both")
+        files = whole_files(args.paths) if args.paths else changed_lines(args.diff or "HEAD")
+        rule_text, rule_count = rule_documents(rules_dir(), args.all_rules)
+        found = scan(files, rule_text) if files else []
+    except (CannotScan, OSError, ValueError) as error:  # ValueError: undecodable text or scanner output
+        print(f"slop-check: cannot scan: {error}", file=sys.stderr)
+        return 2
+    scope = "whole files" if args.paths else f"changed lines since {args.diff or 'HEAD'}"
+    if args.json:
+        print(json.dumps({"files": len(files), "rules": rule_count, "scope": scope, "findings": found}))
+    elif not files:
+        print(f"slop-check: no Python files to check ({scope})")
+    elif not found:
+        print(f"slop-check: clean ({len(files)} files, {rule_count} rules, {scope})")
+    else:
+        print(f"slop-check: {len(found)} findings ({len(files)} files, {rule_count} rules, {scope})")
+        for hit in found[:args.max]:
+            print(f"{display(hit['file'])}:{hit['line']} {hit['rule']}: {hit['message']}")
+        if len(found) > args.max:
+            print(f"(+{len(found) - args.max} more; --max to show them)")
+    return 1 if found else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
